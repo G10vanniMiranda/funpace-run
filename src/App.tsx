@@ -1,0 +1,49 @@
+import { Navbar, Marquee, Footer } from "./components/layout";
+import { AboutSection } from "./components/about";
+import { Hero } from "./components/hero";
+import { RegistrationSection, SponsorSection } from "./components/forms";
+import { CourseMap, Gallery } from "./components/visuals";
+import { FAQSection } from "./components/faq";
+import { AdminPage } from "./pages/Admin";
+import { PaymentErrorPage } from "./pages/PaymentError";
+import { PrivacyPage, TermsPage } from "./pages/Privacy";
+import { SuccessPage } from "./pages/Success";
+
+export default function App() {
+  const pathname = window.location.pathname;
+
+  if (pathname === '/sucesso') {
+    return <SuccessPage />;
+  }
+
+  if (pathname === '/admin') {
+    return <AdminPage />;
+  }
+
+  if (pathname === '/privacidade') {
+    return <PrivacyPage />;
+  }
+
+  if (pathname === '/regulamento') {
+    return <TermsPage />;
+  }
+
+  if (pathname === '/erro' || pathname === '/pagamento-cancelado') {
+    return <PaymentErrorPage />;
+  }
+
+  return (
+    <main className="min-h-screen bg-black w-full text-white">
+      <Navbar />
+      <Hero />
+      <Marquee />
+      <AboutSection />
+      <RegistrationSection />
+      <CourseMap />
+      <Gallery />
+      <FAQSection />
+      <SponsorSection />
+      <Footer />
+    </main>
+  );
+}

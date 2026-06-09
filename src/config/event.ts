@@ -1,0 +1,31 @@
+export const eventInfo = {
+  name: 'FunPace Run 2026',
+  edition: 'Season 01',
+  city: 'Porto Velho',
+  state: 'RO',
+  dateLabel: '12 de Setembro, 2026',
+  startTimeLabel: '06:00',
+  startsAt: '2026-09-12T06:00:00-04:00',
+  locationName: 'Complexo Madeira Mamore',
+  locationLabel: 'Complexo Madeira Mamore - RO',
+  distances: ['10K', '5K'],
+  distanceOptions: [
+    { value: '10K', label: '10K - Performance' },
+    { value: '5K', label: '5K - Starter' },
+  ],
+  genderOptions: [
+    { value: 'female', label: 'Feminino' },
+    { value: 'male', label: 'Masculino' },
+    { value: 'non_binary', label: 'Nao binario' },
+    { value: 'prefer_not_to_answer', label: 'Prefiro nao informar' },
+  ],
+  currentLot: 'Lote 1',
+  offerNote: 'Inscricao confirmada somente apos pagamento aprovado.',
+  kitItems: [
+    'Camisa alta tecnologia Dri-Fit UV',
+    'Numero de peito e chip',
+    'Medalha finisher exclusiva',
+    'Acesso ao Recovery Lounge',
+  ],
+  shirtSizes: ['P', 'M', 'G', 'GG'],
+};
