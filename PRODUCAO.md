@@ -6,13 +6,17 @@ Este checklist cobre seguranca, performance e operacao. O deploy em si fica a ca
 
 - Trocar `ADMIN_API_KEY` e nunca usar `change-me` fora do ambiente local.
 - Definir `ALLOWED_ORIGINS` somente com o dominio oficial.
+- Definir `PAYMENT_PROVIDER=infinitepay`.
+- Definir `INFINITEPAY_HANDLE` com a InfiniteTag da conta, sem o simbolo `$`.
+- Definir `APP_URL` e `API_PUBLIC_URL` com URLs HTTPS publicas.
 - Configurar `PAYMENT_WEBHOOK_SECRET` forte.
+- Configurar/testar o webhook da InfinitePay apontando para `/api/webhooks/payment?token=PAYMENT_WEBHOOK_SECRET`.
 - Substituir `data/funpace-db.json` por banco gerenciado com transacoes reais antes de alto volume.
 - Validar regulamento final e politica de privacidade.
 - Confirmar preco, lote, capacidade, data, horario e local oficial.
 - Rodar `npm run lint`.
 - Rodar `npm run build`.
-- Rodar teste completo de inscricao, duplicidade, vaga esgotada e exportacao CSV.
+- Rodar teste completo de inscricao, redirecionamento InfinitePay, pagamento aprovado, webhook duplicado, valor divergente, duplicidade, vaga esgotada e exportacao CSV.
 
 ## Backups
 

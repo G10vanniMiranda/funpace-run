@@ -3,18 +3,27 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { validateRegistration } from '../src/lib/validation';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
 import { snapshot, transaction, type PaymentRecord, type RegistrationRecord } from './database';
+import { createInfinitePayCheckout } from './infinitepay';
 
 const port = Number(process.env.API_PORT || 3001);
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+const appUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+const apiPublicUrl = (process.env.API_PUBLIC_URL || appUrl).replace(/\/$/, '');
+const paymentProvider = process.env.PAYMENT_PROVIDER || '';
+const infinitePayHandle = process.env.INFINITEPAY_HANDLE || '';
 const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
 const isProduction = process.env.NODE_ENV === 'production';
 
 if (isProduction && adminApiKey === 'change-me') {
   throw new Error('ADMIN_API_KEY must be changed in production.');
+}
+
+if (isProduction && paymentProvider === 'infinitepay' && !infinitePayHandle) {
+  throw new Error('INFINITEPAY_HANDLE must be configured in production.');
 }
 
 const rateLimit = new Map<string, { count: number; resetAt: number }>();
@@ -160,6 +169,72 @@ function verifyWebhookSignature(rawBody: string, signature: string | undefined) 
   return expectedBuffer.length === signatureBuffer.length && timingSafeEqual(expectedBuffer, signatureBuffer);
 }
 
+function getWebhookUrl() {
+  const url = new URL('/api/webhooks/payment', apiPublicUrl);
+
+  if (webhookSecret) {
+    url.searchParams.set('token', webhookSecret);
+  }
+
+  return url.toString();
+}
+
+function getRegistrationSuccessUrl(registrationId: string) {
+  const url = new URL('/sucesso', appUrl);
+  url.searchParams.set('registrationId', registrationId);
+  return url.toString();
+}
+
+function getRegistrationDescription(distanceName: string, lotName: string) {
+  return `Inscricao FunPace Run 2026 - ${distanceName} - ${lotName}`;
+}
+
+function toPaymentProviderStatus(status: unknown): RegistrationStatus {
+  if (status === 'paid' || status === true) {
+    return 'paid';
+  }
+
+  if (status === 'cancelled' || status === 'refunded' || status === 'expired') {
+    return status;
+  }
+
+  if (status === 'payment_failed') {
+    return 'payment_failed';
+  }
+
+  return 'pending_payment';
+}
+
+type PendingCheckout = CreateRegistrationResponse & {
+  statusCode: number;
+  amountCents?: number;
+  description?: string;
+};
+
+function markPaymentCreationFailed(registrationId: string) {
+  transaction((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+    const payment = database.payments.find((item) => item.registrationId === registrationId);
+    const now = new Date().toISOString();
+
+    if (registration?.status === 'pending_payment') {
+      registration.status = 'payment_failed';
+      registration.updatedAt = now;
+
+      const lot = database.lots.find((item) => item.id === registration.lotId);
+
+      if (lot && lot.soldCount > 0) {
+        lot.soldCount -= 1;
+      }
+    }
+
+    if (payment) {
+      payment.status = 'payment_failed';
+      payment.updatedAt = now;
+    }
+  });
+}
+
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
   if (!requireJson(req, res)) {
     return;
@@ -188,7 +263,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
   const hash = cpfHash(payload.cpf);
 
-  const response = transaction<CreateRegistrationResponse & { statusCode: number }>((database) => {
+  const response = transaction<PendingCheckout>((database) => {
     const event = database.events.find((item) => item.slug === 'funpace-run-2026' && item.status === 'published');
 
     if (!event) {
@@ -238,11 +313,12 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     ));
 
     if (existing) {
+      const payment = database.payments.find((item) => item.registrationId === existing.id);
       const response: CreateRegistrationResponse = {
         registrationId: existing.id,
         registrationStatus: existing.status,
-        checkoutStatus: 'not_configured',
-        checkoutUrl: null,
+        checkoutStatus: payment?.checkoutUrl ? 'created' : 'not_configured',
+        checkoutUrl: payment?.checkoutUrl || null,
         message: existing.status === 'paid'
           ? 'Ja existe uma inscricao paga para este CPF.'
           : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
@@ -270,7 +346,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     const payment: PaymentRecord = {
       id: randomUUID(),
       registrationId: registration.id,
-      provider: 'not_configured',
+      provider: paymentProvider || 'not_configured',
       status: 'pending_payment',
       amountCents: registration.amountCents,
       providerPaymentId: null,
@@ -289,11 +365,65 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       registrationStatus: registration.status,
       checkoutStatus: 'not_configured',
       checkoutUrl: null,
-      message: 'Inscricao pre-criada. Configure um adaptador de pagamento real para gerar checkout.',
+      message: paymentProvider === 'infinitepay'
+        ? 'Inscricao criada. Redirecionando para o checkout InfinitePay.'
+        : 'Inscricao pre-criada. Configure um adaptador de pagamento real para gerar checkout.',
+      amountCents: registration.amountCents,
+      description: getRegistrationDescription(distance.name, activeLot.name),
     };
   });
 
-  const { statusCode, ...payloadResponse } = response;
+  if (
+    response.statusCode === 201
+    && paymentProvider === 'infinitepay'
+    && infinitePayHandle
+    && response.amountCents
+    && response.description
+  ) {
+    try {
+      const checkout = await createInfinitePayCheckout({
+        handle: infinitePayHandle,
+        orderNsu: response.registrationId,
+        amountCents: response.amountCents,
+        description: response.description,
+        redirectUrl: getRegistrationSuccessUrl(response.registrationId),
+        webhookUrl: getWebhookUrl(),
+        customer: payload,
+      });
+
+      transaction((database) => {
+        const payment = database.payments.find((item) => item.registrationId === response.registrationId);
+
+        if (payment) {
+          payment.provider = 'infinitepay';
+          payment.providerPaymentId = checkout.providerPaymentId;
+          payment.checkoutUrl = checkout.checkoutUrl;
+          payment.updatedAt = new Date().toISOString();
+        }
+
+        database.paymentEvents.push({
+          id: randomUUID(),
+          paymentId: payment?.id || '',
+          providerEventId: checkout.providerPaymentId || response.registrationId,
+          eventType: 'infinitepay.checkout_created',
+          payload: checkout.raw,
+          receivedAt: new Date().toISOString(),
+        });
+      });
+
+      response.checkoutStatus = 'created';
+      response.checkoutUrl = checkout.checkoutUrl;
+    } catch {
+      markPaymentCreationFailed(response.registrationId);
+      response.statusCode = 502;
+      response.registrationStatus = 'payment_failed';
+      response.checkoutStatus = 'not_configured';
+      response.checkoutUrl = null;
+      response.message = 'Nao foi possivel criar o checkout InfinitePay. Tente novamente em instantes.';
+    }
+  }
+
+  const { statusCode, amountCents: _amountCents, description: _description, ...payloadResponse } = response;
   logRequest(req, statusCode, response.registrationId ? 'registration_processed' : 'registration_rejected');
   json(res, statusCode, payloadResponse);
 }
@@ -304,24 +434,42 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   }
 
   const rawBody = await readBody(req);
+  const url = new URL(req.url || '/', `http://${req.headers.host}`);
   const signature = Array.isArray(req.headers['x-webhook-signature'])
     ? req.headers['x-webhook-signature'][0]
     : req.headers['x-webhook-signature'];
 
-  if (!verifyWebhookSignature(rawBody, signature)) {
+  if (webhookSecret && url.searchParams.get('token') !== webhookSecret && !verifyWebhookSignature(rawBody, signature)) {
     json(res, 401, { message: 'Webhook nao autorizado.' });
     return;
   }
 
-  const event = parseJsonBody<{ registrationId?: string; status?: RegistrationStatus; providerEventId?: string; eventType?: string }>(rawBody);
+  const event = parseJsonBody<{
+    registrationId?: string;
+    status?: RegistrationStatus;
+    providerEventId?: string;
+    eventType?: string;
+    order_nsu?: string;
+    transaction_nsu?: string;
+    invoice_slug?: string;
+    slug?: string;
+    amount?: number;
+    paid_amount?: number;
+    paid?: boolean;
+    capture_method?: string;
+    receipt_url?: string;
+  }>(rawBody);
 
-  if (!event?.registrationId || !event.status) {
+  const registrationId = event?.registrationId || event?.order_nsu || '';
+  const nextStatus = toPaymentProviderStatus(event?.status || event?.paid);
+
+  if (!registrationId || !event) {
     json(res, 422, { message: 'Webhook invalido.' });
     return;
   }
 
   const result = transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const registration = database.registrations.find((item) => item.id === event.registrationId);
+    const registration = database.registrations.find((item) => item.id === registrationId);
 
     if (!registration) {
       return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
@@ -329,20 +477,31 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
 
     const payment = database.payments.find((item) => item.registrationId === registration.id);
     const now = new Date().toISOString();
+    const providerEventId = event.providerEventId || event.transaction_nsu || event.invoice_slug || event.slug || '';
 
-    registration.status = event.status;
+    if (typeof event.amount === 'number' && event.amount !== registration.amountCents) {
+      return { statusCode: 400, payload: { message: 'Valor do pagamento divergente.' } };
+    }
+
+    if (providerEventId && database.paymentEvents.some((item) => item.providerEventId === providerEventId)) {
+      return { statusCode: 200, payload: { ok: true, duplicated: true } };
+    }
+
+    registration.status = nextStatus;
     registration.updatedAt = now;
 
     if (payment) {
-      payment.status = event.status;
+      payment.provider = 'infinitepay';
+      payment.providerPaymentId = event.transaction_nsu || event.invoice_slug || event.slug || payment.providerPaymentId;
+      payment.status = nextStatus;
       payment.updatedAt = now;
     }
 
     database.paymentEvents.push({
       id: randomUUID(),
       paymentId: payment?.id || '',
-      providerEventId: event.providerEventId || randomUUID(),
-      eventType: event.eventType || 'payment.status_changed',
+      providerEventId: providerEventId || randomUUID(),
+      eventType: event.eventType || 'infinitepay.payment_status_changed',
       payload: event,
       receivedAt: now,
     });

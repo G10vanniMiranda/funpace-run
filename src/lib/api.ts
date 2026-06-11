@@ -4,6 +4,7 @@ import type {
   AvailabilityResponse,
   CreateRegistrationResponse,
   RegistrationFormData,
+  RegistrationStatus,
 } from '../types/registration';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
@@ -69,6 +70,37 @@ export async function getAvailability() {
   }
 
   return payload as AvailabilityResponse;
+}
+
+export async function getRegistrationStatus(registrationId: string) {
+  let response: Response;
+
+  try {
+    response = await fetch(`${API_BASE_URL}/api/registrations/${registrationId}`);
+  } catch {
+    throw new ApiError('Nao foi possivel consultar a inscricao.');
+  }
+
+  const payload = await response.json().catch(() => null) as ApiErrorPayload | {
+    registrationId: string;
+    status: RegistrationStatus;
+    amountCents: number;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
+
+  if (!response.ok) {
+    const errorPayload = payload as ApiErrorPayload | null;
+    throw new ApiError(errorPayload?.message || 'Nao foi possivel consultar a inscricao.');
+  }
+
+  return payload as {
+    registrationId: string;
+    status: RegistrationStatus;
+    amountCents: number;
+    createdAt: string;
+    updatedAt: string;
+  };
 }
 
 function toQueryString(filters: Record<string, string>) {
