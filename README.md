@@ -45,8 +45,8 @@ Set these variables before enabling real sales:
 ```bash
 PAYMENT_PROVIDER="infinitepay"
 INFINITEPAY_HANDLE="sua-infinite-tag-sem-cifrao"
-APP_URL="https://funpacerun.com.br"
-API_PUBLIC_URL="https://funpacerun.com.br"
+APP_URL="https://funpace-run.vercel.app"
+API_PUBLIC_URL="https://funpace-run.vercel.app"
 PAYMENT_WEBHOOK_SECRET="um-token-forte"
 ```
 
@@ -55,7 +55,7 @@ The registration API sends `POST https://api.checkout.infinitepay.io/links` with
 `order_nsu` is the local `registrationId`. InfinitePay returns the buyer to `/sucesso`, and the webhook should call:
 
 ```text
-https://funpacerun.com.br/api/webhooks/payment?token=PAYMENT_WEBHOOK_SECRET
+https://funpace-run.vercel.app/api/webhooks/payment?token=PAYMENT_WEBHOOK_SECRET
 ```
 
 The webhook payload is matched by `order_nsu`; the API validates the amount and marks the registration as `paid` when InfinitePay sends `paid: true`.
