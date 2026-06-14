@@ -30,7 +30,16 @@ Landing page oficial do FunPace Run 2026, criada para apresentar a corrida, comu
    npm run api
    ```
 
-The local API stores development data in `data/funpace-db.json`. This file is a development persistence layer only; production should use a managed database such as Postgres.
+The local API stores development data in `data/funpace-db.json` while `DATABASE_PROVIDER="json"`.
+For Supabase/Postgres, run `server/supabase-schema.sql` in the Supabase SQL editor and set:
+
+```bash
+DATABASE_PROVIDER="supabase"
+DATABASE_URL="postgresql://postgres.PROJECT_REF:SENHA@aws-0-REGION.pooler.supabase.com:6543/postgres"
+DATABASE_SSL="true"
+```
+
+The table names are quoted and start with `run-`, for example `"run-registrations"`.
 
 ## Admin Panel
 

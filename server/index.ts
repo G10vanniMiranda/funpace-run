@@ -211,8 +211,8 @@ type PendingCheckout = CreateRegistrationResponse & {
   description?: string;
 };
 
-function markPaymentCreationFailed(registrationId: string) {
-  transaction((database) => {
+async function markPaymentCreationFailed(registrationId: string) {
+  await transaction((database) => {
     const registration = database.registrations.find((item) => item.id === registrationId);
     const payment = database.payments.find((item) => item.registrationId === registrationId);
     const now = new Date().toISOString();
@@ -263,7 +263,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
   const hash = cpfHash(payload.cpf);
 
-  const response = transaction<PendingCheckout>((database) => {
+  const response = await transaction<PendingCheckout>((database) => {
     const event = database.events.find((item) => item.slug === 'funpace-run-2026' && item.status === 'published');
 
     if (!event) {
@@ -391,7 +391,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         customer: payload,
       });
 
-      transaction((database) => {
+      await transaction((database) => {
         const payment = database.payments.find((item) => item.registrationId === response.registrationId);
 
         if (payment) {
@@ -414,7 +414,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       response.checkoutStatus = 'created';
       response.checkoutUrl = checkout.checkoutUrl;
     } catch {
-      markPaymentCreationFailed(response.registrationId);
+      await markPaymentCreationFailed(response.registrationId);
       response.statusCode = 502;
       response.registrationStatus = 'payment_failed';
       response.checkoutStatus = 'not_configured';
@@ -468,7 +468,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const result = transaction<{ statusCode: number; payload: unknown }>((database) => {
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
     const registration = database.registrations.find((item) => item.id === registrationId);
 
     if (!registration) {
@@ -512,10 +512,10 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   json(res, result.statusCode, result.payload);
 }
 
-function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
+async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
   const id = url.pathname.split('/').at(-1) || '';
-  const database = snapshot();
+  const database = await snapshot();
   const registration = database.registrations.find((item) => item.id === id);
 
   if (!registration) {
@@ -534,8 +534,8 @@ function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
   });
 }
 
-function handleGetAvailability(_req: IncomingMessage, res: ServerResponse) {
-  const database = snapshot();
+async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse) {
+  const database = await snapshot();
   const event = database.events.find((item) => item.slug === 'funpace-run-2026');
 
   if (!event) {
@@ -574,8 +574,8 @@ function handleGetAvailability(_req: IncomingMessage, res: ServerResponse) {
   json(res, 200, { event, lots, distances });
 }
 
-function getAdminRows(url: URL) {
-  const database = snapshot();
+async function getAdminRows(url: URL) {
+  const database = await snapshot();
   const lotId = url.searchParams.get('lotId') || '';
   const distanceId = url.searchParams.get('distanceId') || '';
   const status = url.searchParams.get('status') || '';
@@ -620,12 +620,12 @@ function getAdminRows(url: URL) {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
+async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   if (!requireAdmin(req, res)) {
     return;
   }
 
-  const database = snapshot();
+  const database = await snapshot();
   const paid = database.registrations.filter((item) => item.status === 'paid');
   const pending = database.registrations.filter((item) => item.status === 'pending_payment');
   const revenueCents = paid.reduce((total, item) => total + item.amountCents, 0);
@@ -663,12 +663,12 @@ function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   });
 }
 
-function handleAdminRegistrations(req: IncomingMessage, res: ServerResponse, url: URL) {
+async function handleAdminRegistrations(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!requireAdmin(req, res)) {
     return;
   }
 
-  json(res, 200, { registrations: getAdminRows(url) });
+  json(res, 200, { registrations: await getAdminRows(url) });
 }
 
 function escapeCsv(value: unknown) {
@@ -676,12 +676,12 @@ function escapeCsv(value: unknown) {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
+async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!requireAdmin(req, res)) {
     return;
   }
 
-  const rows = getAdminRows(url);
+  const rows = await getAdminRows(url);
   const headers = ['id', 'nome', 'email', 'telefone', 'distancia', 'lote', 'camisa', 'status', 'pagamento', 'valor', 'criado_em'];
   const lines = rows.map((row) => [
     row.id,
@@ -718,27 +718,27 @@ createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname.startsWith('/api/registrations/')) {
-      handleGetRegistration(req, res);
+      await handleGetRegistration(req, res);
       return;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/availability') {
-      handleGetAvailability(req, res);
+      await handleGetAvailability(req, res);
       return;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/summary') {
-      handleAdminSummary(req, res);
+      await handleAdminSummary(req, res);
       return;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/registrations') {
-      handleAdminRegistrations(req, res, url);
+      await handleAdminRegistrations(req, res, url);
       return;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/registrations.csv') {
-      handleAdminRegistrationsCsv(req, res, url);
+      await handleAdminRegistrationsCsv(req, res, url);
       return;
     }
 

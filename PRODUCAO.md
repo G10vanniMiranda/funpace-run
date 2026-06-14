@@ -11,7 +11,8 @@ Este checklist cobre seguranca, performance e operacao. O deploy em si fica a ca
 - Definir `APP_URL` e `API_PUBLIC_URL` com URLs HTTPS publicas.
 - Configurar `PAYMENT_WEBHOOK_SECRET` forte.
 - Configurar/testar o webhook da InfinitePay apontando para `/api/webhooks/payment?token=PAYMENT_WEBHOOK_SECRET`.
-- Substituir `data/funpace-db.json` por banco gerenciado com transacoes reais antes de alto volume.
+- Criar as tabelas do Supabase com `server/supabase-schema.sql`.
+- Definir `DATABASE_PROVIDER=supabase`, `DATABASE_URL` e `DATABASE_SSL=true`.
 - Validar regulamento final e politica de privacidade.
 - Confirmar preco, lote, capacidade, data, horario e local oficial.
 - Rodar `npm run lint`.
