@@ -2,6 +2,9 @@
 
 Landing page oficial do FunPace Run 2026, criada para apresentar a corrida, comunicar a oferta de inscricao e preparar o fluxo de venda online.
 
+Contato oficial: funpacerunclub@gmail.com
+Instagram oficial: https://www.instagram.com/fun__pace/
+
 ## Run Locally
 
 **Prerequisites:** Node.js

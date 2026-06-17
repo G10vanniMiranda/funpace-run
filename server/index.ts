@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { validateRegistration } from '../src/lib/validation';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
-import { snapshot, transaction, type PaymentRecord, type RegistrationRecord } from './database';
+import { snapshot, transaction, type Database, type PaymentRecord, type RegistrationRecord } from './database';
 import { createInfinitePayCheckout } from './infinitepay';
 
 const port = Number(process.env.API_PORT || 3001);
@@ -37,7 +37,7 @@ function setCors(req: IncomingMessage, res: ServerResponse) {
 
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Webhook-Signature,X-Admin-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Webhook-Signature,X-Admin-Key,X-Admin-Actor');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
@@ -83,6 +83,11 @@ function requireAdmin(req: IncomingMessage, res: ServerResponse) {
 
   json(res, 401, { message: 'Acesso administrativo nao autorizado.' });
   return false;
+}
+
+function getAdminActor(req: IncomingMessage) {
+  const actor = Array.isArray(req.headers['x-admin-actor']) ? req.headers['x-admin-actor'][0] : req.headers['x-admin-actor'];
+  return actor?.trim() || 'admin';
 }
 
 function getClientKey(req: IncomingMessage) {
@@ -143,6 +148,38 @@ function parseJsonBody<T>(rawBody: string) {
 
 function cpfHash(cpf: string) {
   return createHash('sha256').update(cpf.replace(/\D/g, '')).digest('hex');
+}
+
+function onlyDigits(value: string) {
+  return value.replace(/\D/g, '');
+}
+
+function maskCpf(cpf: string) {
+  const digits = onlyDigits(cpf);
+
+  if (digits.length !== 11) {
+    return '***.***.***-**';
+  }
+
+  return `${digits.slice(0, 3)}.***.***-${digits.slice(9)}`;
+}
+
+function getAge(birthDate: string) {
+  const date = new Date(`${birthDate}T00:00:00`);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  const today = new Date();
+  let age = today.getFullYear() - date.getFullYear();
+  const monthDiff = today.getMonth() - date.getMonth();
+
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < date.getDate())) {
+    age -= 1;
+  }
+
+  return age;
 }
 
 function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData {
@@ -594,30 +631,52 @@ async function getAdminRows(url: URL) {
         registration.payload.fullName.toLowerCase().includes(query)
         || registration.payload.email.toLowerCase().includes(query)
         || registration.payload.phone.includes(query)
+        || registration.payload.cpf.includes(query)
+        || onlyDigits(registration.payload.cpf).includes(onlyDigits(query))
       );
     })
-    .map((registration) => {
-      const distance = database.distances.find((item) => item.id === registration.distanceId);
-      const lot = database.lots.find((item) => item.id === registration.lotId);
-      const payment = database.payments.find((item) => item.registrationId === registration.id);
-
-      return {
-        id: registration.id,
-        fullName: registration.payload.fullName,
-        email: registration.payload.email,
-        phone: registration.payload.phone,
-        distance: distance?.name || registration.distanceId,
-        distanceId: registration.distanceId,
-        lot: lot?.name || registration.lotId,
-        lotId: registration.lotId,
-        shirtSize: registration.payload.shirtSize,
-        status: registration.status,
-        paymentStatus: payment?.status || registration.status,
-        amountCents: registration.amountCents,
-        createdAt: registration.createdAt,
-      };
-    })
+    .map((registration) => toAdminRow(database, registration))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function toAdminRow(database: Database, registration: RegistrationRecord) {
+  const distance = database.distances.find((item) => item.id === registration.distanceId);
+  const lot = database.lots.find((item) => item.id === registration.lotId);
+  const payment = database.payments.find((item) => item.registrationId === registration.id);
+  const checkIn = database.checkIns.find((item) => item.registrationId === registration.id);
+  const kitDelivery = database.kitDeliveries.find((item) => item.registrationId === registration.id);
+
+  return {
+    id: registration.id,
+    fullName: registration.payload.fullName,
+    email: registration.payload.email,
+    cpfMasked: maskCpf(registration.payload.cpf),
+    phone: registration.payload.phone,
+    birthDate: registration.payload.birthDate,
+    age: getAge(registration.payload.birthDate),
+    gender: registration.payload.gender,
+    emergencyContactName: registration.payload.emergencyContactName,
+    emergencyContactPhone: registration.payload.emergencyContactPhone,
+    city: null,
+    state: null,
+    team: null,
+    bibNumber: null,
+    checkInStatus: checkIn ? 'checked_in' : 'not_started',
+    checkInAt: checkIn?.checkedInAt || null,
+    checkInBy: checkIn?.checkedInBy || null,
+    kitStatus: kitDelivery ? 'delivered' : 'not_delivered',
+    kitDeliveredAt: kitDelivery?.deliveredAt || null,
+    kitDeliveredBy: kitDelivery?.deliveredBy || null,
+    distance: distance?.name || registration.distanceId,
+    distanceId: registration.distanceId,
+    lot: lot?.name || registration.lotId,
+    lotId: registration.lotId,
+    shirtSize: registration.payload.shirtSize,
+    status: registration.status,
+    paymentStatus: payment?.status || registration.status,
+    amountCents: registration.amountCents,
+    createdAt: registration.createdAt,
+  };
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -629,6 +688,8 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   const paid = database.registrations.filter((item) => item.status === 'paid');
   const pending = database.registrations.filter((item) => item.status === 'pending_payment');
   const revenueCents = paid.reduce((total, item) => total + item.amountCents, 0);
+  const checkIns = database.checkIns.length;
+  const kitDeliveries = database.kitDeliveries.length;
   const byStatus = database.registrations.reduce<Record<string, number>>((acc, item) => {
     acc[item.status] = (acc[item.status] || 0) + 1;
     return acc;
@@ -656,11 +717,133 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
       paid: paid.length,
       pending: pending.length,
       revenueCents,
+      checkIns,
+      kitDeliveries,
     },
     byStatus,
     byDistance,
     lots,
   });
+}
+
+type AdminActionRequest = {
+  notes?: string;
+};
+
+async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  if (!requireJson(req, res)) {
+    return;
+  }
+
+  const rawBody = await readBody(req);
+  const payload = parseJsonBody<AdminActionRequest>(rawBody) || {};
+  const actor = getAdminActor(req);
+  const now = new Date().toISOString();
+
+  const result = await transaction((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+
+    if (!registration) {
+      return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
+    }
+
+    if (registration.status !== 'paid') {
+      return { statusCode: 409, payload: { message: 'Check-in permitido apenas para inscricoes pagas.' } };
+    }
+
+    const existing = database.checkIns.find((item) => item.registrationId === registration.id);
+
+    if (existing) {
+      existing.checkedInAt = now;
+      existing.checkedInBy = actor;
+      existing.notes = payload.notes?.trim() || null;
+    } else {
+      database.checkIns.push({
+        id: randomUUID(),
+        registrationId: registration.id,
+        status: 'checked_in',
+        checkedInAt: now,
+        checkedInBy: actor,
+        notes: payload.notes?.trim() || null,
+      });
+    }
+
+    database.auditLogs.push({
+      id: randomUUID(),
+      actor,
+      action: 'registration.check_in',
+      entityType: 'registration',
+      entityId: registration.id,
+      payload: { notes: payload.notes?.trim() || null },
+      createdAt: now,
+    });
+
+    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  });
+
+  json(res, result.statusCode, result.payload);
+}
+
+async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  if (!requireJson(req, res)) {
+    return;
+  }
+
+  const rawBody = await readBody(req);
+  const payload = parseJsonBody<AdminActionRequest>(rawBody) || {};
+  const actor = getAdminActor(req);
+  const now = new Date().toISOString();
+
+  const result = await transaction((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+
+    if (!registration) {
+      return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
+    }
+
+    if (registration.status !== 'paid') {
+      return { statusCode: 409, payload: { message: 'Entrega de kit permitida apenas para inscricoes pagas.' } };
+    }
+
+    const existing = database.kitDeliveries.find((item) => item.registrationId === registration.id);
+
+    if (existing) {
+      existing.deliveredAt = now;
+      existing.deliveredBy = actor;
+      existing.notes = payload.notes?.trim() || null;
+    } else {
+      database.kitDeliveries.push({
+        id: randomUUID(),
+        registrationId: registration.id,
+        status: 'delivered',
+        deliveredAt: now,
+        deliveredBy: actor,
+        notes: payload.notes?.trim() || null,
+      });
+    }
+
+    database.auditLogs.push({
+      id: randomUUID(),
+      actor,
+      action: 'registration.kit_delivered',
+      entityType: 'registration',
+      entityId: registration.id,
+      payload: { notes: payload.notes?.trim() || null },
+      createdAt: now,
+    });
+
+    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  });
+
+  json(res, result.statusCode, result.payload);
 }
 
 async function handleAdminRegistrations(req: IncomingMessage, res: ServerResponse, url: URL) {
@@ -669,6 +852,20 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
   }
 
   json(res, 200, { registrations: await getAdminRows(url) });
+}
+
+async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse) {
+  if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  const database = await snapshot();
+  const logs = database.auditLogs
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 50);
+
+  json(res, 200, { logs });
 }
 
 function escapeCsv(value: unknown) {
@@ -682,17 +879,45 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
   }
 
   const rows = await getAdminRows(url);
-  const headers = ['id', 'nome', 'email', 'telefone', 'distancia', 'lote', 'camisa', 'status', 'pagamento', 'valor', 'criado_em'];
+  const headers = [
+    'id',
+    'nome',
+    'email',
+    'cpf',
+    'telefone',
+    'nascimento',
+    'idade',
+    'sexo',
+    'contato_emergencia',
+    'telefone_emergencia',
+    'distancia',
+    'lote',
+    'camisa',
+    'status',
+    'pagamento',
+    'check_in',
+    'kit',
+    'valor',
+    'criado_em',
+  ];
   const lines = rows.map((row) => [
     row.id,
     row.fullName,
     row.email,
+    row.cpfMasked,
     row.phone,
+    row.birthDate,
+    row.age ?? '',
+    row.gender,
+    row.emergencyContactName,
+    row.emergencyContactPhone,
     row.distance,
     row.lot,
     row.shirtSize,
     row.status,
     row.paymentStatus,
+    row.checkInStatus,
+    row.kitStatus,
     (row.amountCents / 100).toFixed(2),
     row.createdAt,
   ].map(escapeCsv).join(','));
@@ -739,6 +964,25 @@ createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/api/admin/registrations.csv') {
       await handleAdminRegistrationsCsv(req, res, url);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/admin/audit-logs') {
+      await handleAdminAuditLogs(req, res);
+      return;
+    }
+
+    const adminRegistrationAction = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/(check-in|kit)$/);
+
+    if (req.method === 'POST' && adminRegistrationAction) {
+      const registrationId = decodeURIComponent(adminRegistrationAction[1]);
+
+      if (adminRegistrationAction[2] === 'check-in') {
+        await handleAdminCheckIn(req, res, registrationId);
+        return;
+      }
+
+      await handleAdminKitDelivery(req, res, registrationId);
       return;
     }
 

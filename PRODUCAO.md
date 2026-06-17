@@ -34,7 +34,7 @@ Este checklist cobre seguranca, performance e operacao. O deploy em si fica a ca
 
 ## LGPD
 
-- Definir canal de atendimento para solicitacoes de titulares.
+- Canal de atendimento para solicitacoes de titulares: `funpacerunclub@gmail.com`.
 - Definir prazo de retencao dos dados apos o evento.
 - Limitar acesso ao painel administrativo.
 - Auditar exportacoes de inscritos.

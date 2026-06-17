@@ -1,5 +1,7 @@
 import type {
+  AdminAuditLogsResponse,
   AdminRegistrationsResponse,
+  AdminRegistrationActionResponse,
   AdminSummaryResponse,
   AvailabilityResponse,
   CreateRegistrationResponse,
@@ -116,14 +118,16 @@ function toQueryString(filters: Record<string, string>) {
   return query ? `?${query}` : '';
 }
 
-async function adminFetch<ResponsePayload>(path: string, adminKey: string) {
+async function adminFetch<ResponsePayload>(path: string, adminKey: string, init: RequestInit = {}) {
   let response: Response;
+  const headers = new Headers(init.headers);
+
+  headers.set('X-Admin-Key', adminKey);
 
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
-      headers: {
-        'X-Admin-Key': adminKey,
-      },
+      ...init,
+      headers,
     });
   } catch {
     throw new ApiError('Nao foi possivel conectar ao painel administrativo.');
@@ -147,6 +151,32 @@ export function getAdminRegistrations(adminKey: string, filters: Record<string, 
   return adminFetch<AdminRegistrationsResponse>(`/api/admin/registrations${toQueryString(filters)}`, adminKey);
 }
 
+export function getAdminAuditLogs(adminKey: string) {
+  return adminFetch<AdminAuditLogsResponse>('/api/admin/audit-logs', adminKey);
+}
+
 export function getAdminCsvUrl(filters: Record<string, string>) {
   return `${API_BASE_URL}/api/admin/registrations.csv${toQueryString(filters)}`;
+}
+
+function postAdminRegistrationAction(adminKey: string, registrationId: string, action: 'check-in' | 'kit') {
+  return adminFetch<AdminRegistrationActionResponse>(
+    `/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`,
+    adminKey,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function checkInAdminRegistration(adminKey: string, registrationId: string) {
+  return postAdminRegistrationAction(adminKey, registrationId, 'check-in');
+}
+
+export function deliverAdminKit(adminKey: string, registrationId: string) {
+  return postAdminRegistrationAction(adminKey, registrationId, 'kit');
 }

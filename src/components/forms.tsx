@@ -34,6 +34,8 @@ export function RegistrationSection() {
   const [availability, setAvailability] = useState<AvailabilityResponse | null>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const activeLot = availability?.lots.find((lot) => lot.status === 'active') || availability?.lots[0];
+  const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
+  const lotRemaining = activeLot?.remaining ?? eventInfo.currentLotCapacity;
   const selectedDistanceAvailability = availability?.distances.find((distance) => distance.name === formData.distance);
 
   useEffect(() => {
@@ -129,13 +131,13 @@ export function RegistrationSection() {
             <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
               <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Valor atual</p>
               <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
-                {activeLot ? (activeLot.priceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : 'A definir'}
+                {(lotPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
               </p>
             </div>
             <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
               <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Vagas lote</p>
               <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
-                {activeLot ? activeLot.remaining : '--'}
+                {lotRemaining}
               </p>
             </div>
           </div>

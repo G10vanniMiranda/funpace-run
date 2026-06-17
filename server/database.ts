@@ -72,6 +72,34 @@ export type PaymentEventRecord = {
   receivedAt: string;
 };
 
+export type CheckInRecord = {
+  id: string;
+  registrationId: string;
+  status: 'checked_in';
+  checkedInAt: string;
+  checkedInBy: string;
+  notes: string | null;
+};
+
+export type KitDeliveryRecord = {
+  id: string;
+  registrationId: string;
+  status: 'delivered';
+  deliveredAt: string;
+  deliveredBy: string;
+  notes: string | null;
+};
+
+export type AuditLogRecord = {
+  id: string;
+  actor: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  payload: unknown;
+  createdAt: string;
+};
+
 export type Database = {
   events: EventRecord[];
   distances: DistanceRecord[];
@@ -79,6 +107,9 @@ export type Database = {
   registrations: RegistrationRecord[];
   payments: PaymentRecord[];
   paymentEvents: PaymentEventRecord[];
+  checkIns: CheckInRecord[];
+  kitDeliveries: KitDeliveryRecord[];
+  auditLogs: AuditLogRecord[];
 };
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
@@ -95,6 +126,9 @@ const table = {
   registrations: '"run-registrations"',
   payments: '"run-payments"',
   paymentEvents: '"run-payment-events"',
+  checkIns: '"run-check-ins"',
+  kitDeliveries: '"run-kit-deliveries"',
+  auditLogs: '"run-audit-logs"',
 } as const;
 
 const initialDatabase: Database = {
@@ -134,8 +168,8 @@ const initialDatabase: Database = {
       id: 'lot-1',
       eventId: 'funpace-run-2026',
       name: 'Lote 1',
-      priceCents: 9900,
-      capacity: 250,
+      priceCents: 6999,
+      capacity: 100,
       soldCount: 0,
       status: 'active',
       startsAt: '2026-06-01T00:00:00-04:00',
@@ -145,6 +179,9 @@ const initialDatabase: Database = {
   registrations: [],
   payments: [],
   paymentEvents: [],
+  checkIns: [],
+  kitDeliveries: [],
+  auditLogs: [],
 };
 
 const pool = databaseUrl
@@ -168,7 +205,21 @@ function ensureJsonDatabase() {
 function readJsonDatabase(): Database {
   ensureJsonDatabase();
 
-  return JSON.parse(readFileSync(databasePath, 'utf8')) as Database;
+  return normalizeDatabase(JSON.parse(readFileSync(databasePath, 'utf8')) as Partial<Database>);
+}
+
+function normalizeDatabase(database: Partial<Database>): Database {
+  return {
+    events: database.events || [],
+    distances: database.distances || [],
+    lots: database.lots || [],
+    registrations: database.registrations || [],
+    payments: database.payments || [],
+    paymentEvents: database.paymentEvents || [],
+    checkIns: database.checkIns || [],
+    kitDeliveries: database.kitDeliveries || [],
+    auditLogs: database.auditLogs || [],
+  };
 }
 
 function writeJsonDatabase(database: Database) {
@@ -253,9 +304,40 @@ async function ensurePostgresDatabase(client: Queryable) {
       received_at text not null
     );
 
+    create table if not exists ${table.checkIns} (
+      id text primary key,
+      registration_id text not null references ${table.registrations}(id),
+      status text not null check (status in ('checked_in')),
+      checked_in_at text not null,
+      checked_in_by text not null,
+      notes text
+    );
+
+    create table if not exists ${table.kitDeliveries} (
+      id text primary key,
+      registration_id text not null references ${table.registrations}(id),
+      status text not null check (status in ('delivered')),
+      delivered_at text not null,
+      delivered_by text not null,
+      notes text
+    );
+
+    create table if not exists ${table.auditLogs} (
+      id text primary key,
+      actor text not null,
+      action text not null,
+      entity_type text not null,
+      entity_id text not null,
+      payload jsonb not null,
+      created_at text not null
+    );
+
     create index if not exists "run-registrations_cpf_hash_idx" on ${table.registrations}(cpf_hash);
     create index if not exists "run-registrations_status_idx" on ${table.registrations}(status);
     create index if not exists "run-payments_registration_id_idx" on ${table.payments}(registration_id);
+    create unique index if not exists "run-check-ins_registration_id_idx" on ${table.checkIns}(registration_id);
+    create unique index if not exists "run-kit-deliveries_registration_id_idx" on ${table.kitDeliveries}(registration_id);
+    create index if not exists "run-audit-logs_entity_idx" on ${table.auditLogs}(entity_type, entity_id);
   `);
 
   const existingEvents = await client.query(`select count(*)::int as count from ${table.events}`);
@@ -276,13 +358,16 @@ async function ensurePostgresReady() {
 async function readPostgresDatabase(client: Queryable): Promise<Database> {
   await ensurePostgresReady();
 
-  const [events, distances, lots, registrations, payments, paymentEvents] = await Promise.all([
+  const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs] = await Promise.all([
     client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`),
     client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`),
     client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`),
     client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at from ${table.registrations}`),
     client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at from ${table.payments}`),
     client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`),
+    client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`),
+    client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`),
+    client.query(`select id, actor, action, entity_type, entity_id, payload, created_at from ${table.auditLogs}`),
   ]);
 
   return {
@@ -346,6 +431,31 @@ async function readPostgresDatabase(client: Queryable): Promise<Database> {
       eventType: row.event_type,
       payload: row.payload,
       receivedAt: row.received_at,
+    })),
+    checkIns: checkIns.rows.map((row) => ({
+      id: row.id,
+      registrationId: row.registration_id,
+      status: row.status,
+      checkedInAt: row.checked_in_at,
+      checkedInBy: row.checked_in_by,
+      notes: row.notes,
+    })),
+    kitDeliveries: kitDeliveries.rows.map((row) => ({
+      id: row.id,
+      registrationId: row.registration_id,
+      status: row.status,
+      deliveredAt: row.delivered_at,
+      deliveredBy: row.delivered_by,
+      notes: row.notes,
+    })),
+    auditLogs: auditLogs.rows.map((row) => ({
+      id: row.id,
+      actor: row.actor,
+      action: row.action,
+      entityType: row.entity_type,
+      entityId: row.entity_id,
+      payload: row.payload,
+      createdAt: row.created_at,
     })),
   };
 }
@@ -443,6 +553,47 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          payload = excluded.payload,
          received_at = excluded.received_at`,
       [item.id, item.paymentId, item.providerEventId, item.eventType, item.payload, item.receivedAt],
+    );
+  }
+
+  for (const item of database.checkIns) {
+    await client.query(
+      `insert into ${table.checkIns} (id, registration_id, status, checked_in_at, checked_in_by, notes)
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (registration_id) do update set
+         status = excluded.status,
+         checked_in_at = excluded.checked_in_at,
+         checked_in_by = excluded.checked_in_by,
+         notes = excluded.notes`,
+      [item.id, item.registrationId, item.status, item.checkedInAt, item.checkedInBy, item.notes],
+    );
+  }
+
+  for (const item of database.kitDeliveries) {
+    await client.query(
+      `insert into ${table.kitDeliveries} (id, registration_id, status, delivered_at, delivered_by, notes)
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (registration_id) do update set
+         status = excluded.status,
+         delivered_at = excluded.delivered_at,
+         delivered_by = excluded.delivered_by,
+         notes = excluded.notes`,
+      [item.id, item.registrationId, item.status, item.deliveredAt, item.deliveredBy, item.notes],
+    );
+  }
+
+  for (const item of database.auditLogs) {
+    await client.query(
+      `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7)
+       on conflict (id) do update set
+         actor = excluded.actor,
+         action = excluded.action,
+         entity_type = excluded.entity_type,
+         entity_id = excluded.entity_id,
+         payload = excluded.payload,
+         created_at = excluded.created_at`,
+      [item.id, item.actor, item.action, item.entityType, item.entityId, item.payload, item.createdAt],
     );
   }
 }

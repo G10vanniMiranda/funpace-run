@@ -4,6 +4,8 @@ export type ShirtSize = 'P' | 'M' | 'G' | 'GG';
 
 export type Gender = 'female' | 'male' | 'non_binary' | 'prefer_not_to_answer';
 
+export type AdminGender = Gender | '';
+
 export type RegistrationFormData = {
   fullName: string;
   email: string;
@@ -72,6 +74,8 @@ export type AdminSummaryResponse = {
     paid: number;
     pending: number;
     revenueCents: number;
+    checkIns: number;
+    kitDeliveries: number;
   };
   byStatus: Record<string, number>;
   byDistance: Array<{
@@ -96,7 +100,23 @@ export type AdminRegistration = {
   id: string;
   fullName: string;
   email: string;
+  cpfMasked: string;
   phone: string;
+  birthDate: string;
+  age: number | null;
+  gender: AdminGender;
+  emergencyContactName: string;
+  emergencyContactPhone: string;
+  city: string | null;
+  state: string | null;
+  team: string | null;
+  bibNumber: string | null;
+  checkInStatus: 'not_started' | 'checked_in';
+  checkInAt: string | null;
+  checkInBy: string | null;
+  kitStatus: 'not_delivered' | 'delivered';
+  kitDeliveredAt: string | null;
+  kitDeliveredBy: string | null;
   distance: string;
   distanceId: string;
   lot: string;
@@ -110,4 +130,22 @@ export type AdminRegistration = {
 
 export type AdminRegistrationsResponse = {
   registrations: AdminRegistration[];
+};
+
+export type AdminRegistrationActionResponse = {
+  registration: AdminRegistration;
+};
+
+export type AdminAuditLog = {
+  id: string;
+  actor: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  payload: unknown;
+  createdAt: string;
+};
+
+export type AdminAuditLogsResponse = {
+  logs: AdminAuditLog[];
 };

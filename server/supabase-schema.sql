@@ -65,9 +65,40 @@ create table if not exists "run-payment-events" (
   received_at text not null
 );
 
+create table if not exists "run-check-ins" (
+  id text primary key,
+  registration_id text not null references "run-registrations"(id),
+  status text not null check (status in ('checked_in')),
+  checked_in_at text not null,
+  checked_in_by text not null,
+  notes text
+);
+
+create table if not exists "run-kit-deliveries" (
+  id text primary key,
+  registration_id text not null references "run-registrations"(id),
+  status text not null check (status in ('delivered')),
+  delivered_at text not null,
+  delivered_by text not null,
+  notes text
+);
+
+create table if not exists "run-audit-logs" (
+  id text primary key,
+  actor text not null,
+  action text not null,
+  entity_type text not null,
+  entity_id text not null,
+  payload jsonb not null,
+  created_at text not null
+);
+
 create index if not exists "run-registrations_cpf_hash_idx" on "run-registrations"(cpf_hash);
 create index if not exists "run-registrations_status_idx" on "run-registrations"(status);
 create index if not exists "run-payments_registration_id_idx" on "run-payments"(registration_id);
+create unique index if not exists "run-check-ins_registration_id_idx" on "run-check-ins"(registration_id);
+create unique index if not exists "run-kit-deliveries_registration_id_idx" on "run-kit-deliveries"(registration_id);
+create index if not exists "run-audit-logs_entity_idx" on "run-audit-logs"(entity_type, entity_id);
 
 insert into "run-events" (id, name, slug, status, date, start_time, location_name, city, state)
 values (
@@ -94,11 +125,17 @@ values (
   'lot-1',
   'funpace-run-2026',
   'Lote 1',
-  9900,
-  250,
+  6999,
+  100,
   0,
   'active',
   '2026-06-01T00:00:00-04:00',
   '2026-07-31T23:59:59-04:00'
 )
 on conflict (id) do nothing;
+
+update "run-lots"
+set
+  price_cents = 6999,
+  capacity = 100
+where id = 'lot-1';

@@ -1,3 +1,6 @@
+import { eventInfo } from '../config/event';
+import type { ReactNode } from 'react';
+
 export function PrivacyPage() {
   return (
     <LegalPage title="Politica de privacidade">
@@ -14,8 +17,8 @@ export function PrivacyPage() {
         usadas apenas para operacao da corrida e armazenadas com cuidado.
       </p>
       <p>
-        Para producao, defina canal oficial para solicitacoes LGPD, prazo de retencao, operador de pagamento,
-        encarregado/responsavel e politica de descarte apos o evento.
+        Solicitacoes relacionadas a privacidade, acesso, correcao ou exclusao de dados podem ser enviadas para
+        {' '}<a href={`mailto:${eventInfo.contactEmail}`} className="text-brand underline">{eventInfo.contactEmail}</a>.
       </p>
     </LegalPage>
   );
@@ -39,6 +42,10 @@ export function TermsPage() {
         Esta pagina e uma base operacional. Antes da abertura oficial de vendas, o texto final deve ser validado
         pela organizacao e, idealmente, por assessoria juridica.
       </p>
+      <p>
+        Duvidas sobre inscricao, regulamento ou atendimento podem ser enviadas para
+        {' '}<a href={`mailto:${eventInfo.contactEmail}`} className="text-brand underline">{eventInfo.contactEmail}</a>.
+      </p>
     </LegalPage>
   );
 }
@@ -61,4 +68,3 @@ function LegalPage({ title, children }: { title: string; children: ReactNode }) 
     </main>
   );
 }
-import type { ReactNode } from 'react';

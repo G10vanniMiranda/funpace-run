@@ -1,5 +1,5 @@
 import { motion } from 'motion/react';
-import { Instagram, Menu, Twitter, X, Youtube } from 'lucide-react';
+import { Instagram, Menu, X } from 'lucide-react';
 import { useState } from 'react';
 import { eventInfo } from '../config/event';
 
@@ -114,19 +114,25 @@ export function Footer() {
           <p className="text-zinc-400 font-mono text-sm max-w-sm">
             Destrua seus limites. Corrida oficial em {eventInfo.city}, Brasil - 2026.
           </p>
+          <a
+            href={`mailto:${eventInfo.contactEmail}`}
+            className="font-mono text-sm text-zinc-400 transition-colors hover:text-brand"
+          >
+            {eventInfo.contactEmail}
+          </a>
         </div>
         
         <div className="flex w-full flex-col gap-4 md:w-auto">
           <h3 className="font-bold uppercase tracking-widest text-sm text-zinc-500 mb-2">Conecte-se</h3>
           <div className="flex gap-4">
-            <a href="#" className="w-12 h-12 rounded-full border border-zinc-700 flex items-center justify-center hover:bg-white hover:text-black transition-colors">
+            <a
+              href={eventInfo.instagramUrl}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Instagram oficial do FunPace"
+              className="w-12 h-12 rounded-full border border-zinc-700 flex items-center justify-center hover:bg-white hover:text-black transition-colors"
+            >
               <Instagram className="w-5 h-5" />
-            </a>
-            <a href="#" className="w-12 h-12 rounded-full border border-zinc-700 flex items-center justify-center hover:bg-white hover:text-black transition-colors">
-              <Twitter className="w-5 h-5" />
-            </a>
-            <a href="#" className="w-12 h-12 rounded-full border border-zinc-700 flex items-center justify-center hover:bg-white hover:text-black transition-colors">
-              <Youtube className="w-5 h-5" />
             </a>
           </div>
           <div className="mt-8 text-xs text-zinc-600 font-mono">

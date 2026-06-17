@@ -3,6 +3,8 @@ export const eventInfo = {
   edition: 'Season 01',
   city: 'Porto Velho',
   state: 'RO',
+  contactEmail: 'funpacerunclub@gmail.com',
+  instagramUrl: 'https://www.instagram.com/fun__pace/',
   dateLabel: '12 de Setembro, 2026',
   startTimeLabel: '06:00',
   startsAt: '2026-09-12T06:00:00-04:00',
@@ -20,6 +22,8 @@ export const eventInfo = {
     { value: 'prefer_not_to_answer', label: 'Prefiro nao informar' },
   ],
   currentLot: 'Lote 1',
+  currentLotPriceCents: 6999,
+  currentLotCapacity: 100,
   offerNote: 'Inscricao confirmada somente apos pagamento aprovado.',
   kitItems: [
     'Camisa alta tecnologia Dri-Fit UV',
