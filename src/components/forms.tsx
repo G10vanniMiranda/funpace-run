@@ -4,6 +4,7 @@ import { eventInfo } from '../config/event';
 import { ApiError, createRegistration, getAvailability } from '../lib/api';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
+import { Reveal } from './premium';
 
 const initialRegistration: RegistrationFormData = {
   fullName: '',
@@ -21,7 +22,7 @@ const initialRegistration: RegistrationFormData = {
   privacyAccepted: false,
 };
 
-const inputClass = 'w-full min-w-0 bg-zinc-100 p-3.5 sm:p-4 border-b-2 border-black focus:outline-none focus:bg-zinc-200 transition-colors text-sm sm:text-base';
+const inputClass = 'premium-input w-full min-w-0 bg-zinc-100 p-3.5 sm:p-4 border-b-2 border-black focus:outline-none focus:bg-zinc-200 transition-colors text-sm sm:text-base';
 const errorClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-wider text-red-700 leading-relaxed';
 const labelClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-widest leading-relaxed';
 
@@ -119,7 +120,7 @@ export function RegistrationSection() {
   return (
     <section id="register" className="relative z-20 scroll-mt-24 bg-brand px-4 py-16 text-black sm:px-6 md:py-24 lg:py-32">
       <div className="mx-auto grid max-w-7xl grid-cols-1 gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16 xl:gap-24">
-        <div className="flex min-w-0 flex-col">
+        <Reveal className="flex min-w-0 flex-col">
           <h2 className="mb-5 font-display text-[clamp(2.8rem,13vw,4.5rem)] font-black uppercase leading-none tracking-tighter md:mb-6">
             Não fique <br />para trás.
           </h2>
@@ -142,7 +143,7 @@ export function RegistrationSection() {
             </div>
           </div>
 
-          <div className="mb-8 rounded border border-black/10 bg-black/5 p-4 sm:p-6">
+          <div className="premium-card mb-8 rounded border-black/10 bg-black/5 p-4 text-black shadow-none sm:p-6">
             <h3 className="mb-4 font-black uppercase tracking-widest">O que inclui o KIT?</h3>
             <ul className="space-y-3 text-sm font-medium leading-relaxed">
               {eventInfo.kitItems.map((item) => (
@@ -153,9 +154,9 @@ export function RegistrationSection() {
               ))}
             </ul>
           </div>
-        </div>
+        </Reveal>
 
-        <div className="min-w-0 bg-white p-4 pt-7 shadow-2xl sm:p-6 sm:pt-8 md:p-8 md:pt-10 xl:p-12">
+        <Reveal className="min-w-0 bg-white p-4 pt-7 shadow-2xl sm:p-6 sm:pt-8 md:p-8 md:pt-10 xl:p-12" delay={0.08}>
           <h3 className="mb-7 font-display text-[clamp(1.7rem,7vw,2.65rem)] font-black uppercase leading-[0.95] tracking-tighter md:mb-8">
             Inscricao - {eventInfo.currentLot}
           </h3>
@@ -210,9 +211,6 @@ export function RegistrationSection() {
                   ))}
                 </select>
               </Field>
-              <Field label="Contato de emergencia" error={errors.emergencyContactName}>
-                <input required type="text" value={formData.emergencyContactName} onChange={(event) => updateField('emergencyContactName', event.target.value)} className={inputClass} placeholder="Nome do contato" aria-invalid={Boolean(errors.emergencyContactName)} />
-              </Field>
             </div>
 
             <div className="space-y-3 border border-black/10 bg-black/5 p-3.5 sm:p-4">
@@ -235,7 +233,7 @@ export function RegistrationSection() {
             <button
               type="submit"
               disabled={status === 'submitting'}
-              className="group relative mt-4 flex min-h-14 w-full items-center justify-center gap-3 overflow-hidden bg-black p-4 text-center text-xs font-black uppercase tracking-widest text-white transition-colors hover:bg-zinc-800 disabled:opacity-70 sm:justify-between sm:p-6 sm:text-sm"
+              className="premium-button group relative mt-4 flex min-h-14 w-full items-center justify-center gap-3 overflow-hidden bg-black p-4 text-center text-xs font-black uppercase tracking-widest text-white transition-colors hover:bg-zinc-800 disabled:opacity-70 sm:justify-between sm:p-6 sm:text-sm"
             >
               <span className="relative z-10 min-w-0">
                 {status === 'submitting' && 'CRIANDO INSCRICAO'}
@@ -259,7 +257,7 @@ export function RegistrationSection() {
               * O envio ainda nao cria inscricao paga. A confirmacao dependera do gateway e do webhook.
             </p>
           </form>
-        </div>
+        </Reveal>
       </div>
     </section>
   );
@@ -300,7 +298,7 @@ export function SponsorSection() {
 
   return (
     <section className="relative border-y border-zinc-900 bg-zinc-950 px-4 py-16 sm:px-6 md:py-24">
-      <div className="relative z-10 mx-auto max-w-4xl border border-zinc-800 bg-black/50 p-5 text-center shadow-2xl backdrop-blur-sm sm:p-8 md:p-16">
+      <Reveal className="premium-card relative z-10 mx-auto max-w-4xl p-5 text-center sm:p-8 md:p-16">
         <Building className="mx-auto mb-6 h-12 w-12 text-brand" />
         <h2 className="mb-4 font-display text-[clamp(2.4rem,10vw,3rem)] font-black uppercase leading-none tracking-tighter text-white">
           Seja um Parceiro
@@ -321,11 +319,11 @@ export function SponsorSection() {
               className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors md:col-span-2 resize-none"
             />
           </div>
-          <button type="submit" className="min-h-14 w-full bg-white p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-brand">
+          <button type="submit" className="premium-button min-h-14 w-full bg-white p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-brand">
             {success ? 'ENVIADO COM SUCESSO' : 'ENVIAR PROPOSTA'}
           </button>
         </form>
-      </div>
+      </Reveal>
 
       <div className="pointer-events-none absolute left-1/2 top-1/2 z-0 w-full -translate-x-1/2 -translate-y-1/2 select-none overflow-hidden text-center opacity-5">
         <h2 className="whitespace-nowrap font-display text-[15vw] font-black uppercase leading-none">

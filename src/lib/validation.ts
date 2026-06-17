@@ -73,10 +73,6 @@ export function validateRegistration(data: RegistrationFormData) {
     errors.gender = 'Selecione uma opcao.';
   }
 
-  if (!data.emergencyContactName.trim()) {
-    errors.emergencyContactName = 'Informe o contato de emergencia.';
-  }
-
   if (!data.termsAccepted) {
     errors.termsAccepted = 'Aceite o termo de responsabilidade.';
   }

@@ -1,10 +1,11 @@
 import { motion } from 'motion/react';
 import { Instagram, Menu, X } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { eventInfo } from '../config/event';
 
 export function Navbar() {
   const [isOpen, setIsOpen] = useState(false);
+  const [isScrolled, setIsScrolled] = useState(false);
   const links = [
     { href: '#about', label: 'A Prova' },
     { href: '#map', label: 'Percurso' },
@@ -12,17 +13,29 @@ export function Navbar() {
     { href: '#faq', label: 'FAQ' },
   ];
 
+  useEffect(() => {
+    const onScroll = () => setIsScrolled(window.scrollY > 24);
+
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
   return (
-    <nav className="fixed top-0 left-0 w-full z-50 px-4 py-3 text-white sm:px-6 sm:py-4">
-      <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-3">
+    <nav className="fixed left-0 top-0 z-50 w-full px-4 py-3 text-white sm:px-6 sm:py-4">
+      <div className={`mx-auto flex w-full max-w-7xl items-center justify-between gap-3 border px-3 py-2 transition-all duration-300 sm:px-4 ${
+        isScrolled ? 'border-white/10 bg-black/80 shadow-2xl shadow-black/25 backdrop-blur-md' : 'border-transparent bg-transparent'
+      }`}>
         <a href="/" className="font-display text-lg font-bold uppercase tracking-tighter sm:text-xl">
           Funpace Run
         </a>
 
         <div className="hidden items-center gap-6 text-xs font-bold uppercase tracking-widest lg:flex">
           {links.map((link) => (
-            <a key={link.href} href={link.href} className="hover:text-brand transition-colors">
+            <a key={link.href} href={link.href} className="group relative py-2 text-zinc-300 transition-colors hover:text-white">
               {link.label}
+              <span className="absolute inset-x-0 -bottom-0.5 h-px origin-left scale-x-0 bg-brand transition-transform duration-300 group-hover:scale-x-100" />
             </a>
           ))}
         </div>
@@ -30,7 +43,7 @@ export function Navbar() {
         <div className="flex items-center gap-2">
           <a
             href="#register"
-            className="rounded-full bg-white px-4 py-2 text-xs font-bold uppercase tracking-wider text-black transition-colors hover:bg-brand sm:px-5"
+            className="premium-button rounded-full bg-white px-4 py-2 text-xs font-bold uppercase tracking-wider text-black transition-colors hover:bg-brand sm:px-5"
           >
             Participar
           </a>
@@ -39,7 +52,7 @@ export function Navbar() {
             aria-label={isOpen ? 'Fechar menu' : 'Abrir menu'}
             aria-expanded={isOpen}
             onClick={() => setIsOpen((current) => !current)}
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-black/70 backdrop-blur lg:hidden"
+            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-black/80 backdrop-blur-sm transition-colors hover:border-brand lg:hidden"
           >
             {isOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
@@ -47,7 +60,7 @@ export function Navbar() {
       </div>
 
       {isOpen && (
-        <div className="mx-auto mt-3 w-full max-w-7xl border border-white/10 bg-black/95 p-3 shadow-2xl backdrop-blur lg:hidden">
+        <div className="mx-auto mt-3 w-full max-w-7xl border border-white/10 bg-black/90 p-3 shadow-2xl backdrop-blur-md lg:hidden">
           <div className="grid gap-1">
             {links.map((link) => (
               <a
@@ -68,11 +81,13 @@ export function Navbar() {
 
 export function Marquee() {
   return (
-    <div className="relative z-10 flex w-full overflow-hidden whitespace-nowrap border-y-2 border-black bg-brand py-2.5 text-black sm:py-3">
+    <div className="relative z-10 flex w-full overflow-hidden whitespace-nowrap border-y border-black bg-brand py-2.5 text-black shadow-[0_0_40px_rgba(215,255,0,0.18)] sm:py-3">
       <motion.div 
         className="flex shrink-0 gap-6 font-display text-base font-bold uppercase tracking-tighter sm:gap-8 sm:text-xl"
-        animate={{ x: [0, -1036] }}
-        transition={{ repeat: Infinity, duration: 15, ease: "linear" }}
+        initial={{ x: 0 }}
+        whileInView={{ x: -120 }}
+        viewport={{ once: true, amount: 0.5 }}
+        transition={{ duration: 1.8, ease: 'easeOut' }}
       >
         <span>NO EXCUSES</span>
         <span>•</span>

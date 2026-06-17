@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { motion } from 'motion/react';
+import { motion, useReducedMotion } from 'motion/react';
 import { ArrowRight, Calendar, Clock, MapPin } from 'lucide-react';
 import { eventInfo } from '../config/event';
 
 function Countdown() {
+  const reducedMotion = useReducedMotion();
   const [timeLeft, setTimeLeft] = useState({
     days: 0,
     hours: 0,
@@ -42,64 +43,77 @@ function Countdown() {
 
   return (
     <div className="mt-8 grid w-full max-w-88 grid-cols-4 gap-2 isolate sm:max-w-none sm:flex md:mt-12">
-      {timeBlocks.map((block) => (
-        <div key={block.label} className="flex min-w-0 flex-col">
-          <div className="flex aspect-square w-full min-w-0 items-center justify-center rounded border border-zinc-800 bg-zinc-900 font-mono text-[clamp(1.25rem,8vw,2rem)] font-bold text-white sm:h-20 sm:w-20 md:h-24 md:w-24 md:text-5xl">
+      {timeBlocks.map((block, index) => (
+        <motion.div
+          key={block.label}
+          className="flex min-w-0 flex-col"
+          initial={reducedMotion ? false : { opacity: 0, y: 14 }}
+          animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
+          transition={{ duration: 0.55, delay: 0.72 + index * 0.06, ease: 'easeOut' }}
+        >
+          <div className="premium-counter flex aspect-square w-full min-w-0 items-center justify-center rounded border border-white/10 font-mono text-[clamp(1.25rem,8vw,2rem)] font-bold text-white sm:h-20 sm:w-20 md:h-24 md:w-24 md:text-5xl">
             {block.value.toString().padStart(2, '0')}
           </div>
           <span className="mt-2 text-center text-[9px] font-bold uppercase tracking-[0.12em] text-zinc-500 sm:text-[10px] md:text-xs md:tracking-widest">
             {block.label}
           </span>
-        </div>
+        </motion.div>
       ))}
     </div>
   );
 }
 
 export function Hero() {
+  const reducedMotion = useReducedMotion();
+  const heroItems = [
+    { icon: Calendar, label: 'Data', value: eventInfo.dateLabel },
+    { icon: Clock, label: 'Largada', value: `${eventInfo.startTimeLabel} - ${eventInfo.distances.join(' / ')}` },
+    { icon: MapPin, label: 'Local', value: eventInfo.locationLabel },
+  ];
+
   return (
     <section className="relative flex min-h-190 flex-col justify-end overflow-hidden px-4 pb-14 pt-28 sm:min-h-205 sm:px-6 sm:pb-20 md:min-h-[92svh] md:pb-28">
-      <div className="pointer-events-none absolute right-0 top-0 h-full w-full select-none overflow-hidden opacity-30 sm:w-2/3">
-        <div className="absolute -right-1/3 top-32 h-[min(74vw,800px)] w-[min(74vw,800px)] rounded-full border border-brand/20 blur-[1px] sm:top-1/4" />
-        <div className="absolute -right-1/2 top-44 h-[min(74vw,800px)] w-[min(74vw,800px)] rounded-full border border-brand/10 blur-[2px] sm:top-1/3" />
-      </div>
-
-      <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-size-[24px_24px]" />
+      <div className="premium-aurora" />
+      <div className="premium-grid" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_18%,rgba(215,255,0,0.14),transparent_24rem),linear-gradient(to_bottom,transparent,rgba(0,0,0,0.78))]" />
+      <div className="technical-line left-[6%] top-[28%] w-[34vw]" />
+      <div className="technical-line right-[8%] top-[62%] w-[24vw] [animation-delay:1.4s]" />
+      <div className="pointer-events-none absolute -right-48 top-24 h-[min(72vw,740px)] w-[min(72vw,740px)] rounded-full border border-brand/15 shadow-[0_0_120px_rgba(215,255,0,0.08)]" />
 
       <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col items-start">
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
+          initial={reducedMotion ? false : { opacity: 0, y: 20, filter: 'blur(3px)' }}
+          animate={reducedMotion ? undefined : { opacity: 1, y: 0, filter: 'blur(0px)' }}
           transition={{ duration: 0.8, ease: 'easeOut' }}
           className="mb-5 flex max-w-full items-center gap-3 text-brand sm:gap-4 md:mb-10"
         >
-          <div className="h-0.5 w-8 shrink-0 bg-brand sm:w-12" />
+          <div className="h-0.5 w-8 shrink-0 bg-brand shadow-[0_0_18px_rgba(215,255,0,0.55)] sm:w-12" />
           <span className="min-w-0 text-xs font-bold uppercase tracking-widest sm:text-sm md:text-base">
             {eventInfo.edition} - {eventInfo.city}
           </span>
         </motion.div>
 
         <motion.h1
-          className="ml-[-0.04em] max-w-full font-display text-[clamp(3.7rem,18vw,12rem)] font-black uppercase leading-[0.82] tracking-tighter text-white mix-blend-exclusion sm:text-[clamp(5.8rem,12vw,12rem)]"
-          initial={{ opacity: 0, y: 50 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 1, delay: 0.2, ease: 'easeOut' }}
+          className="ml-[-0.04em] max-w-full font-display text-[clamp(3.7rem,18vw,12rem)] font-black uppercase leading-[0.82] tracking-tighter text-white sm:text-[clamp(5.8rem,12vw,12rem)]"
+          initial={reducedMotion ? false : { opacity: 0, y: 50, clipPath: 'inset(0 0 24% 0)' }}
+          animate={reducedMotion ? undefined : { opacity: 1, y: 0, clipPath: 'inset(0 0 0% 0)' }}
+          transition={{ duration: 1, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
         >
           FUNPACE<br />
-          <span className="text-zinc-800 [-webkit-text-stroke:1px_white] sm:[-webkit-text-stroke:2px_white]">
+          <span className="text-black [-webkit-text-stroke:1px_white] drop-shadow-[0_0_28px_rgba(255,255,255,0.08)] sm:[-webkit-text-stroke:2px_white]">
             RUN 2026
           </span>
         </motion.h1>
 
         <motion.div
           className="mt-7 flex w-full max-w-3xl flex-col gap-4 sm:mt-8 sm:flex-row sm:items-center"
-          initial={{ opacity: 0, y: 24 }}
-          animate={{ opacity: 1, y: 0 }}
+          initial={reducedMotion ? false : { opacity: 0, y: 24 }}
+          animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.35, ease: 'easeOut' }}
         >
           <a
             href="#register"
-            className="flex min-h-14 w-full items-center justify-center gap-3 bg-brand px-5 py-4 text-center text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white sm:w-auto sm:justify-start sm:px-6 sm:text-sm"
+            className="premium-button flex min-h-14 w-full items-center justify-center gap-3 bg-brand px-5 py-4 text-center text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white sm:w-auto sm:justify-start sm:px-6 sm:text-sm"
           >
             <span>Garantir inscricao - {eventInfo.currentLot}</span>
             <ArrowRight className="h-5 w-5 shrink-0" />
@@ -110,42 +124,32 @@ export function Hero() {
         </motion.div>
 
         <motion.div
-          className="mt-9 grid w-full max-w-4xl grid-cols-1 gap-6 border-t border-zinc-800 pt-7 sm:grid-cols-2 md:mt-12 md:grid-cols-3 md:gap-10 md:pt-8 lg:gap-16"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
+          className="mt-9 grid w-full max-w-4xl grid-cols-1 gap-3 border-t border-white/10 pt-7 sm:grid-cols-2 md:mt-12 md:grid-cols-3 md:gap-4 md:pt-8"
+          initial={reducedMotion ? false : { opacity: 0 }}
+          animate={reducedMotion ? undefined : { opacity: 1 }}
           transition={{ duration: 1, delay: 0.5 }}
         >
-          <div className="flex min-w-0 gap-4">
-            <Calendar className="h-6 w-6 shrink-0 text-brand" />
-            <div className="min-w-0">
-              <div className="text-sm font-bold uppercase tracking-widest text-white">Data</div>
-              <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">{eventInfo.dateLabel}</div>
-            </div>
-          </div>
-
-          <div className="flex min-w-0 gap-4">
-            <Clock className="h-6 w-6 shrink-0 text-brand" />
-            <div className="min-w-0">
-              <div className="text-sm font-bold uppercase tracking-widest text-white">Largada</div>
-              <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">
-                {eventInfo.startTimeLabel} - {eventInfo.distances.join(' / ')}
+          {heroItems.map(({ icon: Icon, label, value }, index) => (
+            <motion.div
+              key={label}
+              className="premium-card flex min-w-0 gap-4 p-4 sm:col-span-1"
+              initial={reducedMotion ? false : { opacity: 0, y: 16 }}
+              animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.48 + index * 0.08, ease: 'easeOut' }}
+            >
+              <Icon className="h-6 w-6 shrink-0 text-brand" />
+              <div className="min-w-0">
+                <div className="text-sm font-bold uppercase tracking-widest text-white">{label}</div>
+                <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">{value}</div>
               </div>
-            </div>
-          </div>
-
-          <div className="flex min-w-0 gap-4 sm:col-span-2 md:col-span-1">
-            <MapPin className="h-6 w-6 shrink-0 text-brand" />
-            <div className="min-w-0">
-              <div className="text-sm font-bold uppercase tracking-widest text-white">Local</div>
-              <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">{eventInfo.locationLabel}</div>
-            </div>
-          </div>
+            </motion.div>
+          ))}
         </motion.div>
 
         <motion.div
           className="w-full"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
+          initial={reducedMotion ? false : { opacity: 0, y: 20 }}
+          animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.7 }}
         >
           <Countdown />

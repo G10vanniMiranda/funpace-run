@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import { Reveal } from './premium';
 
 const faqs = [
   {
@@ -30,25 +31,25 @@ export function FAQSection() {
 
   return (
     <section id="faq" className="mx-auto max-w-4xl scroll-mt-24 border-t border-zinc-900 px-4 py-16 sm:px-6 md:py-24">
-      <div className="mb-10 md:mb-16">
+      <Reveal className="mb-10 md:mb-16">
         <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase tracking-tighter">
           INTEL. <span className="text-zinc-700">(FAQ)</span>
         </h2>
         <p className="mt-4 border-b border-zinc-800 pb-6 font-mono text-xs uppercase leading-relaxed tracking-widest text-zinc-500 sm:text-sm md:pb-8">
           Tire suas duvidas antes de ir para a pista.
         </p>
-      </div>
+      </Reveal>
 
-      <div className="flex flex-col border-t border-zinc-800">
+      <Reveal className="premium-card flex flex-col border-white/10">
         {faqs.map((faq, index) => {
           const isOpen = openIndex === index;
 
           return (
-            <div key={faq.question} className="border-b border-zinc-800">
+            <div key={faq.question} className="border-b border-white/10 last:border-b-0">
               <button
                 type="button"
                 onClick={() => setOpenIndex(isOpen ? null : index)}
-                className="flex w-full items-center justify-between gap-4 py-5 text-left transition-colors hover:text-brand sm:py-6"
+                className="flex w-full items-center justify-between gap-4 px-4 py-5 text-left transition-colors hover:bg-white/3 hover:text-brand sm:px-6 sm:py-6"
               >
                 <span className="min-w-0 pr-2 text-base font-bold leading-snug sm:text-lg md:text-xl">{faq.question}</span>
                 <ChevronDown className={`h-6 w-6 shrink-0 transition-transform duration-300 ${isOpen ? 'rotate-180 text-brand' : 'text-zinc-500'}`} />
@@ -61,7 +62,7 @@ export function FAQSection() {
                     exit={{ height: 0, opacity: 0 }}
                     className="overflow-hidden"
                   >
-                    <p className="pb-6 pr-2 font-mono text-sm leading-relaxed text-zinc-400 sm:pr-12 md:pb-8">
+                    <p className="px-4 pb-6 pr-2 font-mono text-sm leading-relaxed text-zinc-400 sm:px-6 sm:pr-12 md:pb-8">
                       {faq.answer}
                     </p>
                   </motion.div>
@@ -70,7 +71,7 @@ export function FAQSection() {
             </div>
           );
         })}
-      </div>
+      </Reveal>
     </section>
   );
 }

@@ -254,7 +254,7 @@ export function AdminPage() {
       <div className="fixed inset-0 pointer-events-none bg-[radial-gradient(circle_at_top_left,rgba(215,255,0,0.12),transparent_32rem),linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-[size:auto,36px_36px,36px_36px]" />
 
       <div className="relative flex min-h-screen">
-        <aside className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 w-[280px] border-r border-white/10 bg-zinc-950/95 px-3 py-4 backdrop-blur-xl transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
+        <aside className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 w-[280px] border-r border-white/10 bg-zinc-950/95 px-3 py-4 backdrop-blur-sm transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
           <Sidebar
             activeNav={activeNav}
             onSelect={(label) => {
@@ -349,7 +349,7 @@ function LoginScreen({
   return (
     <main className="flex min-h-screen items-center bg-black px-4 py-12 text-white sm:px-6 md:py-20">
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_center,rgba(215,255,0,0.14),transparent_28rem)]" />
-      <form onSubmit={onSubmit} className="relative mx-auto w-full max-w-xl border border-white/10 bg-zinc-950/90 p-5 shadow-2xl backdrop-blur sm:p-8 md:p-12">
+      <form onSubmit={onSubmit} className="relative mx-auto w-full max-w-xl border border-white/10 bg-zinc-950/95 p-5 shadow-2xl sm:p-8 md:p-12">
         <ShieldCheck className="mb-8 h-12 w-12 text-brand" />
         <p className="mb-3 text-xs font-black uppercase tracking-[0.28em] text-brand">Centro de comando</p>
         <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FunPace Run</h1>
@@ -436,7 +436,7 @@ function Topbar({
   onExport: () => void;
 }) {
   return (
-    <header className="sticky top-0 z-20 border-b border-white/10 bg-black/75 px-4 py-3 backdrop-blur-xl sm:px-6 lg:px-8">
+    <header className="sticky top-0 z-20 border-b border-white/10 bg-black/85 px-4 py-3 backdrop-blur-sm sm:px-6 lg:px-8">
       <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <button
@@ -480,7 +480,7 @@ function EventHero({ summary, dashboard }: { summary: AdminSummaryResponse | nul
   const activeLot = summary?.lots.find((lot) => lot.status === 'active') || summary?.lots[0];
 
   return (
-    <section className="grid gap-4 overflow-hidden border border-white/10 bg-zinc-950/70 p-4 shadow-2xl backdrop-blur md:p-6 xl:grid-cols-[1.4fr_0.6fr]">
+    <section className="grid gap-4 overflow-hidden border border-white/10 bg-zinc-950/85 p-4 shadow-2xl md:p-6 xl:grid-cols-[1.4fr_0.6fr]">
       <div className="min-w-0">
         <div className="mb-6 flex flex-wrap items-center gap-2">
           <StatusPill status="published" label="Publicado" />
@@ -748,7 +748,7 @@ function AthleteDrawer({
   const canOperate = registration.status === 'paid';
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/75">
       <button type="button" aria-label="Fechar detalhes" className="absolute inset-0" onClick={onClose} />
       <aside className="relative h-full w-full max-w-xl overflow-y-auto border-l border-white/10 bg-zinc-950 p-5 shadow-2xl sm:p-6">
         <div className="mb-6 flex items-start justify-between gap-4">
