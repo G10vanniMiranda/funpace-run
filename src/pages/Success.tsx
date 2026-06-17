@@ -42,17 +42,17 @@ export function SuccessPage() {
   }, [registrationId]);
 
   return (
-    <main className="min-h-screen bg-black text-white px-6 py-20 flex items-center">
-      <section className="max-w-3xl mx-auto border border-zinc-800 bg-zinc-950 p-8 md:p-12">
+    <main className="flex min-h-screen items-center bg-black px-4 py-12 text-white sm:px-6 md:py-20">
+      <section className="mx-auto w-full max-w-3xl border border-zinc-800 bg-zinc-950 p-5 sm:p-8 md:p-12">
         <CheckCircle2 className="w-12 h-12 text-brand mb-8" />
-        <h1 className="font-display text-5xl md:text-7xl font-black uppercase tracking-tighter leading-none mb-6">
+        <h1 className="mb-6 font-display text-[clamp(2.6rem,12vw,4.5rem)] font-black uppercase leading-none tracking-tighter">
           {status ? statusLabels[status] : 'Pagamento em confirmacao'}.
         </h1>
         <p className="text-zinc-400 font-mono leading-relaxed mb-8">
           {message}
         </p>
         {registrationId && (
-          <p className="text-sm font-bold uppercase tracking-widest text-brand">Inscricao: {registrationId}</p>
+          <p className="break-words text-sm font-bold uppercase tracking-widest text-brand">Inscricao: {registrationId}</p>
         )}
         {captureMethod && (
           <p className="mt-3 text-xs font-bold uppercase tracking-widest text-zinc-500">Metodo: {captureMethod}</p>
@@ -61,11 +61,11 @@ export function SuccessPage() {
           <p className="mt-3 text-xs font-bold uppercase tracking-widest text-zinc-500">Transacao: {transactionNsu}</p>
         )}
         {receiptUrl && (
-          <a href={receiptUrl} className="inline-flex mt-8 mr-3 border border-zinc-700 px-6 py-4 font-black uppercase tracking-widest text-sm">
+          <a href={receiptUrl} className="mr-3 mt-8 inline-flex min-h-12 items-center border border-zinc-700 px-5 py-3 text-sm font-black uppercase tracking-widest sm:px-6 sm:py-4">
             Ver comprovante
           </a>
         )}
-        <a href="/" className="inline-flex mt-10 bg-brand text-black px-6 py-4 font-black uppercase tracking-widest text-sm">
+        <a href="/" className="mt-6 inline-flex min-h-12 items-center bg-brand px-5 py-3 text-sm font-black uppercase tracking-widest text-black sm:mt-10 sm:px-6 sm:py-4">
           Voltar para a landing
         </a>
       </section>

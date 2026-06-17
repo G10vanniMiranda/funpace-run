@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { MapPin, Calendar, Clock, ArrowRight } from 'lucide-react';
+import { ArrowRight, Calendar, Clock, MapPin } from 'lucide-react';
 import { eventInfo } from '../config/event';
 
 function Countdown() {
@@ -41,13 +41,13 @@ function Countdown() {
   ];
 
   return (
-    <div className="flex gap-2 isolate mt-8 md:mt-12">
-      {timeBlocks.map((block, i) => (
-        <div key={i} className="flex flex-col">
-          <div className="bg-zinc-900 border border-zinc-800 text-white font-mono text-2xl md:text-5xl font-bold w-16 h-16 md:w-24 md:h-24 flex items-center justify-center rounded">
+    <div className="mt-8 grid w-full max-w-[22rem] grid-cols-4 gap-2 isolate sm:max-w-none sm:flex md:mt-12">
+      {timeBlocks.map((block) => (
+        <div key={block.label} className="flex min-w-0 flex-col">
+          <div className="flex aspect-square w-full min-w-0 items-center justify-center rounded border border-zinc-800 bg-zinc-900 font-mono text-[clamp(1.25rem,8vw,2rem)] font-bold text-white sm:h-20 sm:w-20 md:h-24 md:w-24 md:text-5xl">
             {block.value.toString().padStart(2, '0')}
           </div>
-          <span className="text-[10px] md:text-xs font-bold uppercase tracking-widest text-zinc-500 mt-2 text-center">
+          <span className="mt-2 text-center text-[9px] font-bold uppercase tracking-[0.12em] text-zinc-500 sm:text-[10px] md:text-xs md:tracking-widest">
             {block.label}
           </span>
         </div>
@@ -58,94 +58,98 @@ function Countdown() {
 
 export function Hero() {
   return (
-    <section className="relative min-h-[95vh] flex flex-col justify-end pb-24 md:pb-32 px-6 overflow-hidden">
-      {/* Background Graphic elements */}
-      <div className="absolute top-0 right-0 w-2/3 h-full overflow-hidden opacity-30 select-none pointer-events-none">
-        <div className="absolute -right-1/4 top-1/4 w-[800px] h-[800px] rounded-full border border-brand/20 blur-[1px]"></div>
-        <div className="absolute -right-1/3 top-1/3 w-[800px] h-[800px] rounded-full border border-brand/10 blur-[2px]"></div>
+    <section className="relative flex min-h-[760px] flex-col justify-end overflow-hidden px-4 pb-14 pt-28 sm:min-h-[820px] sm:px-6 sm:pb-20 md:min-h-[92svh] md:pb-28">
+      <div className="pointer-events-none absolute right-0 top-0 h-full w-full select-none overflow-hidden opacity-30 sm:w-2/3">
+        <div className="absolute -right-1/3 top-32 h-[min(74vw,800px)] w-[min(74vw,800px)] rounded-full border border-brand/20 blur-[1px] sm:top-1/4" />
+        <div className="absolute -right-1/2 top-44 h-[min(74vw,800px)] w-[min(74vw,800px)] rounded-full border border-brand/10 blur-[2px] sm:top-1/3" />
       </div>
-      
-      {/* Decorative lines */}
-      <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]"></div>
 
-      <div className="max-w-7xl mx-auto w-full relative z-10 flex flex-col items-start">
-        <motion.div 
+      <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]" />
+
+      <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col items-start">
+        <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, ease: "easeOut" }}
-          className="flex items-center gap-4 mb-6 md:mb-10 text-brand"
+          transition={{ duration: 0.8, ease: 'easeOut' }}
+          className="mb-5 flex max-w-full items-center gap-3 text-brand sm:gap-4 md:mb-10"
         >
-          <div className="h-[2px] w-12 bg-brand"></div>
-          <span className="uppercase font-bold tracking-widest text-sm md:text-base">{eventInfo.edition} • {eventInfo.city}</span>
+          <div className="h-[2px] w-8 shrink-0 bg-brand sm:w-12" />
+          <span className="min-w-0 text-xs font-bold uppercase tracking-widest sm:text-sm md:text-base">
+            {eventInfo.edition} - {eventInfo.city}
+          </span>
         </motion.div>
 
-        <motion.h1 
-          className="font-display font-black text-[12vw] sm:text-[10vw] leading-[0.8] tracking-tighter uppercase ml-[-0.05em] text-white mix-blend-exclusion"
+        <motion.h1
+          className="ml-[-0.04em] max-w-full font-display text-[clamp(3.7rem,18vw,12rem)] font-black uppercase leading-[0.82] tracking-tighter text-white mix-blend-exclusion sm:text-[clamp(5.8rem,12vw,12rem)]"
           initial={{ opacity: 0, y: 50 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 1, delay: 0.2, ease: "easeOut" }}
+          transition={{ duration: 1, delay: 0.2, ease: 'easeOut' }}
         >
           FUNPACE<br />
-          <span className="text-zinc-800" style={{ WebkitTextStroke: '2px white' }}>RUN 2026</span>
+          <span className="text-zinc-800 [-webkit-text-stroke:1px_white] sm:[-webkit-text-stroke:2px_white]">
+            RUN 2026
+          </span>
         </motion.h1>
 
         <motion.div
-          className="mt-8 flex flex-col sm:flex-row gap-4 sm:items-center"
+          className="mt-7 flex w-full max-w-3xl flex-col gap-4 sm:mt-8 sm:flex-row sm:items-center"
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.35, ease: "easeOut" }}
+          transition={{ duration: 0.8, delay: 0.35, ease: 'easeOut' }}
         >
           <a
             href="#register"
-            className="bg-brand text-black px-6 py-4 font-black uppercase tracking-widest text-sm flex items-center gap-3 hover:bg-white transition-colors"
+            className="flex min-h-14 w-full items-center justify-center gap-3 bg-brand px-5 py-4 text-center text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white sm:w-auto sm:justify-start sm:px-6 sm:text-sm"
           >
-            Garantir inscricao - {eventInfo.currentLot}
-            <ArrowRight className="w-5 h-5" />
+            <span>Garantir inscricao - {eventInfo.currentLot}</span>
+            <ArrowRight className="h-5 w-5 shrink-0" />
           </a>
-          <p className="max-w-md text-sm md:text-base text-zinc-300 font-mono">
+          <p className="max-w-md font-mono text-sm leading-relaxed text-zinc-300 md:text-base">
             Corrida oficial FunPace com {eventInfo.distances.join(' e ')}, kit atleta, chip e medalha finisher.
           </p>
         </motion.div>
 
-        <motion.div 
-          className="flex flex-col md:flex-row gap-8 md:gap-16 mt-12 w-full max-w-4xl border-t border-zinc-800 pt-8"
+        <motion.div
+          className="mt-9 grid w-full max-w-4xl grid-cols-1 gap-6 border-t border-zinc-800 pt-7 sm:grid-cols-2 md:mt-12 md:grid-cols-3 md:gap-10 md:pt-8 lg:gap-16"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 1, delay: 0.5 }}
         >
-          <div className="flex gap-4">
-            <Calendar className="w-6 h-6 text-brand shrink-0" />
-            <div>
-              <div className="font-bold text-white uppercase tracking-widest text-sm">Data</div>
-              <div className="text-zinc-400 font-mono mt-1">{eventInfo.dateLabel}</div>
-            </div>
-          </div>
-          
-          <div className="flex gap-4">
-            <Clock className="w-6 h-6 text-brand shrink-0" />
-            <div>
-              <div className="font-bold text-white uppercase tracking-widest text-sm">Largada</div>
-              <div className="text-zinc-400 font-mono mt-1">{eventInfo.startTimeLabel} • {eventInfo.distances.join(' / ')}</div>
+          <div className="flex min-w-0 gap-4">
+            <Calendar className="h-6 w-6 shrink-0 text-brand" />
+            <div className="min-w-0">
+              <div className="text-sm font-bold uppercase tracking-widest text-white">Data</div>
+              <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">{eventInfo.dateLabel}</div>
             </div>
           </div>
 
-          <div className="flex gap-4">
-            <MapPin className="w-6 h-6 text-brand shrink-0" />
-            <div>
-              <div className="font-bold text-white uppercase tracking-widest text-sm">Local</div>
-              <div className="text-zinc-400 font-mono mt-1">{eventInfo.locationLabel}</div>
+          <div className="flex min-w-0 gap-4">
+            <Clock className="h-6 w-6 shrink-0 text-brand" />
+            <div className="min-w-0">
+              <div className="text-sm font-bold uppercase tracking-widest text-white">Largada</div>
+              <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">
+                {eventInfo.startTimeLabel} - {eventInfo.distances.join(' / ')}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex min-w-0 gap-4 sm:col-span-2 md:col-span-1">
+            <MapPin className="h-6 w-6 shrink-0 text-brand" />
+            <div className="min-w-0">
+              <div className="text-sm font-bold uppercase tracking-widest text-white">Local</div>
+              <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">{eventInfo.locationLabel}</div>
             </div>
           </div>
         </motion.div>
 
         <motion.div
-           initial={{ opacity: 0, y: 20 }}
-           animate={{ opacity: 1, y: 0 }}
-           transition={{ duration: 0.8, delay: 0.7 }}
+          className="w-full"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.8, delay: 0.7 }}
         >
           <Countdown />
         </motion.div>
-
       </div>
     </section>
   );

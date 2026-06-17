@@ -1,65 +1,67 @@
 import { useState } from 'react';
 import { ChevronDown } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 
 const faqs = [
   {
-    question: "Posso alterar minha distância após a inscrição?",
-    answer: "Sim. A alteração de distância pode ser feita gratuitamente através do seu painel de corredor até 15 dias antes da prova. Alterações de Lote (ex: 5k para 10k) poderão sofrer cobrança da diferença de valor."
+    question: 'Posso alterar minha distancia apos a inscricao?',
+    answer: 'Sim. A alteracao de distancia pode ser feita gratuitamente atraves do seu painel de corredor ate 15 dias antes da prova. Alteracoes de lote poderao sofrer cobranca da diferenca de valor.',
   },
   {
-    question: "Onde e quando será a retirada dos kits?",
-    answer: "A retirada dos kits do Lote 1 acontecerá nos dias 10 e 11 de Setembro, na Running Store Oficial em Porto Velho. O local exato e horários serão enviados por email com antecedência."
+    question: 'Onde e quando sera a retirada dos kits?',
+    answer: 'A retirada dos kits do Lote 1 acontecera nos dias 10 e 11 de Setembro, na Running Store Oficial em Porto Velho. O local exato e horarios serao enviados por email com antecedencia.',
   },
   {
-    question: "Teremos guarda-volumes no local da prova?",
-    answer: "Sim! Haverá um complexo de guarda-volumes organizado e seguro na arena do evento, abrindo às 05:00 AM e fechando 1h após a chegada do último atleta."
+    question: 'Teremos guarda-volumes no local da prova?',
+    answer: 'Sim. Havera um complexo de guarda-volumes organizado e seguro na arena do evento, abrindo as 05:00 AM e fechando 1h apos a chegada do ultimo atleta.',
   },
   {
-    question: "Existem blocos (pelotões) de largada baseados no pace?",
-    answer: "Absolutamente. Ao se inscrever, você seleciona seu pace estimado, e entregaremos as pulseiras de pelotão no kit para garantir uma largada fluida e focada em performance."
+    question: 'Existem blocos de largada baseados no pace?',
+    answer: 'Absolutamente. Ao se inscrever, voce seleciona seu pace estimado, e entregaremos as pulseiras de pelotao no kit para garantir uma largada fluida e focada em performance.',
   },
   {
-    question: "A corrida acontece se chover?",
-    answer: "Sim. A Funpace Run é uma prova 'No Excuses'. O evento ocorre sob chuva, desde que não haja risco de segurança estrutural aos participantes avaliado pelos órgãos oficiais."
-  }
+    question: 'A corrida acontece se chover?',
+    answer: "Sim. A Funpace Run e uma prova 'No Excuses'. O evento ocorre sob chuva, desde que nao haja risco de seguranca estrutural aos participantes avaliado pelos orgaos oficiais.",
+  },
 ];
 
 export function FAQSection() {
   const [openIndex, setOpenIndex] = useState<number | null>(0);
 
   return (
-    <section id="faq" className="py-24 px-6 max-w-4xl mx-auto border-t border-zinc-900">
-      <div className="mb-16">
-        <h2 className="font-display text-5xl md:text-6xl font-black uppercase tracking-tighter">
+    <section id="faq" className="mx-auto max-w-4xl scroll-mt-24 border-t border-zinc-900 px-4 py-16 sm:px-6 md:py-24">
+      <div className="mb-10 md:mb-16">
+        <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase tracking-tighter">
           INTEL. <span className="text-zinc-700">(FAQ)</span>
         </h2>
-        <p className="text-zinc-500 font-mono text-sm mt-4 uppercase tracking-widest border-b border-zinc-800 pb-8">
-          Tire suas dúvidas antes de ir para a pista.
+        <p className="mt-4 border-b border-zinc-800 pb-6 font-mono text-xs uppercase leading-relaxed tracking-widest text-zinc-500 sm:text-sm md:pb-8">
+          Tire suas duvidas antes de ir para a pista.
         </p>
       </div>
 
       <div className="flex flex-col border-t border-zinc-800">
-        {faqs.map((faq, idx) => {
-          const isOpen = openIndex === idx;
+        {faqs.map((faq, index) => {
+          const isOpen = openIndex === index;
+
           return (
-            <div key={idx} className="border-b border-zinc-800">
-              <button 
-                onClick={() => setOpenIndex(isOpen ? null : idx)}
-                className="w-full py-6 flex justify-between items-center text-left hover:text-brand transition-colors"
+            <div key={faq.question} className="border-b border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setOpenIndex(isOpen ? null : index)}
+                className="flex w-full items-center justify-between gap-4 py-5 text-left transition-colors hover:text-brand sm:py-6"
               >
-                <span className="font-bold text-lg md:text-xl pr-8">{faq.question}</span>
-                <ChevronDown className={`w-6 h-6 shrink-0 transition-transform duration-300 ${isOpen ? 'rotate-180 text-brand' : 'text-zinc-500'}`} />
+                <span className="min-w-0 pr-2 text-base font-bold leading-snug sm:text-lg md:text-xl">{faq.question}</span>
+                <ChevronDown className={`h-6 w-6 shrink-0 transition-transform duration-300 ${isOpen ? 'rotate-180 text-brand' : 'text-zinc-500'}`} />
               </button>
               <AnimatePresence>
                 {isOpen && (
                   <motion.div
                     initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
+                    animate={{ height: 'auto', opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}
                     className="overflow-hidden"
                   >
-                    <p className="pb-8 text-zinc-400 font-mono text-sm leading-relaxed pr-12">
+                    <p className="pb-6 pr-2 font-mono text-sm leading-relaxed text-zinc-400 sm:pr-12 md:pb-8">
                       {faq.answer}
                     </p>
                   </motion.div>

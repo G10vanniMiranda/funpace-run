@@ -97,10 +97,10 @@ export function AdminPage() {
 
   if (!adminKey || error === 'Acesso administrativo nao autorizado.') {
     return (
-      <main className="min-h-screen bg-black text-white px-6 py-20 flex items-center">
-        <form onSubmit={handleLogin} className="max-w-xl mx-auto w-full border border-zinc-800 bg-zinc-950 p-8 md:p-12">
+      <main className="flex min-h-screen items-center bg-black px-4 py-12 text-white sm:px-6 md:py-20">
+        <form onSubmit={handleLogin} className="mx-auto w-full max-w-xl border border-zinc-800 bg-zinc-950 p-5 sm:p-8 md:p-12">
           <ShieldCheck className="w-12 h-12 text-brand mb-8" />
-          <h1 className="font-display text-5xl font-black uppercase tracking-tighter mb-4">Admin FunPace Run</h1>
+          <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FunPace Run</h1>
           <p className="text-zinc-400 font-mono text-sm mb-8">
             Informe a chave administrativa local para acessar inscritos, vendas e exportacao.
           </p>
@@ -112,7 +112,7 @@ export function AdminPage() {
             placeholder="ADMIN_API_KEY"
           />
           {error && <p className="mt-4 text-sm font-bold uppercase tracking-wider text-brand">{error}</p>}
-          <button className="mt-6 w-full bg-brand text-black p-4 font-black uppercase tracking-widest text-sm">
+          <button className="mt-6 min-h-14 w-full bg-brand p-4 text-sm font-black uppercase tracking-widest text-black">
             Entrar
           </button>
         </form>
@@ -121,27 +121,27 @@ export function AdminPage() {
   }
 
   return (
-    <main className="min-h-screen bg-black text-white px-6 py-10">
-      <div className="max-w-7xl mx-auto">
-        <header className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-10">
+    <main className="min-h-screen bg-black px-4 py-8 text-white sm:px-6 sm:py-10">
+      <div className="mx-auto max-w-7xl">
+        <header className="mb-8 flex flex-col justify-between gap-6 md:mb-10 md:flex-row md:items-end">
           <div>
             <p className="text-brand font-bold uppercase tracking-widest text-xs mb-3">Painel administrativo</p>
-            <h1 className="font-display text-5xl md:text-7xl font-black uppercase tracking-tighter leading-none">
+            <h1 className="font-display text-[clamp(2.6rem,12vw,4.5rem)] font-black uppercase leading-none tracking-tighter">
               Inscritos e vendas
             </h1>
           </div>
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-3">
             <button
               type="button"
               onClick={() => void loadAdminData()}
-              className="bg-zinc-900 border border-zinc-800 px-4 py-3 font-bold uppercase tracking-widest text-xs flex items-center gap-2 hover:border-brand"
+              className="flex min-h-11 items-center gap-2 border border-zinc-800 bg-zinc-900 px-4 py-3 text-xs font-bold uppercase tracking-widest hover:border-brand"
             >
               <RefreshCcw className="w-4 h-4" /> Atualizar
             </button>
             <button
               type="button"
               onClick={() => void downloadCsv()}
-              className="bg-brand text-black px-4 py-3 font-black uppercase tracking-widest text-xs flex items-center gap-2"
+              className="flex min-h-11 items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase tracking-widest text-black"
             >
               <Download className="w-4 h-4" /> CSV
             </button>
@@ -149,7 +149,7 @@ export function AdminPage() {
         </header>
 
         {summary && (
-          <section className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <section className="mb-8 grid grid-cols-1 gap-3 min-[380px]:grid-cols-2 lg:grid-cols-4 lg:gap-4">
             <Metric label="Inscricoes" value={summary.totals.registrations.toString()} />
             <Metric label="Pagas" value={summary.totals.paid.toString()} />
             <Metric label="Pendentes" value={summary.totals.pending.toString()} />
@@ -157,8 +157,8 @@ export function AdminPage() {
           </section>
         )}
 
-        <section className="border border-zinc-800 bg-zinc-950 p-4 mb-8">
-          <form onSubmit={handleSearch} className="grid grid-cols-1 md:grid-cols-[1fr_180px_180px_160px] gap-3">
+        <section className="mb-8 border border-zinc-800 bg-zinc-950 p-3 sm:p-4">
+          <form onSubmit={handleSearch} className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_180px_180px_160px]">
             <div className="relative">
               <Search className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500" />
               <input
@@ -203,7 +203,7 @@ export function AdminPage() {
         {error && <p className="mb-6 border border-brand p-4 text-brand font-bold uppercase tracking-widest text-xs">{error}</p>}
         {loading && <p className="mb-6 text-zinc-500 font-mono text-sm">Carregando painel...</p>}
 
-        <section className="border border-zinc-800 overflow-x-auto">
+        <section className="overflow-x-auto border border-zinc-800">
           <table className="w-full min-w-[980px] text-left">
             <thead className="bg-zinc-950 text-zinc-500 uppercase tracking-widest text-xs">
               <tr>

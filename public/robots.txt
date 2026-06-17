@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://funpace-run.vercel.app/sitemap.xml
+Sitemap: https://funpace.club/sitemap.xml

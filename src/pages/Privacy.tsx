@@ -45,16 +45,16 @@ export function TermsPage() {
 
 function LegalPage({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <main className="min-h-screen bg-black text-white px-6 py-20">
-      <article className="max-w-4xl mx-auto border border-zinc-800 bg-zinc-950 p-8 md:p-12">
+    <main className="min-h-screen bg-black px-4 py-12 text-white sm:px-6 md:py-20">
+      <article className="mx-auto max-w-4xl border border-zinc-800 bg-zinc-950 p-5 sm:p-8 md:p-12">
         <p className="text-brand font-bold uppercase tracking-widest text-xs mb-4">FunPace Run</p>
-        <h1 className="font-display text-5xl md:text-7xl font-black uppercase tracking-tighter leading-none mb-10">
+        <h1 className="mb-8 font-display text-[clamp(2.6rem,12vw,4.5rem)] font-black uppercase leading-none tracking-tighter md:mb-10">
           {title}
         </h1>
         <div className="space-y-6 text-zinc-300 font-mono text-sm leading-relaxed">
           {children}
         </div>
-        <a href="/" className="inline-flex mt-10 bg-brand text-black px-6 py-4 font-black uppercase tracking-widest text-sm">
+        <a href="/" className="mt-10 inline-flex min-h-12 items-center bg-brand px-5 py-3 text-sm font-black uppercase tracking-widest text-black sm:px-6 sm:py-4">
           Voltar
         </a>
       </article>

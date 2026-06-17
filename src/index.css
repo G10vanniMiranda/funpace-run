@@ -12,8 +12,27 @@
 }
 
 @layer base {
+  html {
+    @apply scroll-smooth overflow-x-hidden;
+  }
+
   body {
     @apply bg-dark text-zinc-50 font-sans antialiased overflow-x-hidden;
+  }
+
+  img,
+  svg,
+  video,
+  canvas {
+    @apply max-w-full;
+  }
+
+  button {
+    @apply cursor-pointer;
+  }
+
+  button:disabled {
+    @apply cursor-not-allowed;
   }
   
   ::selection {

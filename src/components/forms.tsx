@@ -1,9 +1,9 @@
-import { type FormEvent, useEffect, useState } from 'react';
-import { ArrowRight, Zap, Building } from 'lucide-react';
+import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
+import { ArrowRight, Building, Zap } from 'lucide-react';
 import { eventInfo } from '../config/event';
 import { ApiError, createRegistration, getAvailability } from '../lib/api';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
-import type { AvailabilityResponse, RegistrationErrors, RegistrationFormData, RaceDistance, Gender, ShirtSize } from '../types/registration';
+import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 
 const initialRegistration: RegistrationFormData = {
   fullName: '',
@@ -21,8 +21,9 @@ const initialRegistration: RegistrationFormData = {
   privacyAccepted: false,
 };
 
-const inputClass = 'w-full bg-zinc-100 p-4 border-b-2 border-black focus:outline-none focus:bg-zinc-200 transition-colors';
-const errorClass = 'text-xs font-bold uppercase tracking-wider text-red-700';
+const inputClass = 'w-full min-w-0 bg-zinc-100 p-3.5 sm:p-4 border-b-2 border-black focus:outline-none focus:bg-zinc-200 transition-colors text-sm sm:text-base';
+const errorClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-wider text-red-700 leading-relaxed';
+const labelClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-widest leading-relaxed';
 
 export function RegistrationSection() {
   const [status, setStatus] = useState<null | 'submitting' | 'checkout_pending' | 'api_error'>(null);
@@ -68,8 +69,8 @@ export function RegistrationSection() {
     }
   };
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
     setSubmitAttempted(true);
     setApiMessage('');
     setRegistrationId('');
@@ -114,256 +115,156 @@ export function RegistrationSection() {
   };
 
   return (
-    <section id="register" className="py-32 px-6 bg-brand text-black relative z-20">
-      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-16 lg:gap-24">
-        <div className="flex flex-col">
-          <h2 className="font-display text-5xl md:text-7xl font-black uppercase tracking-tighter leading-none mb-6">
-            Não fique <br/>para trás.
+    <section id="register" className="relative z-20 scroll-mt-24 bg-brand px-4 py-16 text-black sm:px-6 md:py-24 lg:py-32">
+      <div className="mx-auto grid max-w-7xl grid-cols-1 gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16 xl:gap-24">
+        <div className="flex min-w-0 flex-col">
+          <h2 className="mb-5 font-display text-[clamp(2.8rem,13vw,4.5rem)] font-black uppercase leading-none tracking-tighter md:mb-6">
+            Nao fique <br />para tras.
           </h2>
-          <p className="font-medium text-lg md:text-xl max-w-md opacity-80 mb-10">
+          <p className="mb-8 max-w-md text-base font-medium leading-relaxed opacity-80 sm:text-lg md:mb-10 md:text-xl">
             As vagas do {eventInfo.currentLot} serao liberadas com pagamento online. A vaga so sera garantida apos pagamento aprovado.
           </p>
 
-          <div className="grid grid-cols-2 gap-3 max-w-md mb-8">
-            <div className="border border-black/10 bg-black/5 p-4">
-              <p className="text-xs font-black uppercase tracking-widest opacity-60">Valor atual</p>
-              <p className="font-mono text-2xl font-black">
+          <div className="mb-6 grid max-w-md grid-cols-2 gap-3 sm:mb-8">
+            <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
+              <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Valor atual</p>
+              <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
                 {activeLot ? (activeLot.priceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : 'A definir'}
               </p>
             </div>
-            <div className="border border-black/10 bg-black/5 p-4">
-              <p className="text-xs font-black uppercase tracking-widest opacity-60">Vagas lote</p>
-              <p className="font-mono text-2xl font-black">{activeLot ? activeLot.remaining : '--'}</p>
+            <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
+              <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Vagas lote</p>
+              <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
+                {activeLot ? activeLot.remaining : '--'}
+              </p>
             </div>
           </div>
 
-          <div className="bg-black/5 p-6 rounded mb-8 border border-black/10">
-            <h3 className="font-black uppercase tracking-widest mb-4">O que inclui o KIT?</h3>
-            <ul className="space-y-3 font-medium text-sm">
+          <div className="mb-8 rounded border border-black/10 bg-black/5 p-4 sm:p-6">
+            <h3 className="mb-4 font-black uppercase tracking-widest">O que inclui o KIT?</h3>
+            <ul className="space-y-3 text-sm font-medium leading-relaxed">
               {eventInfo.kitItems.map((item) => (
-                <li key={item} className="flex items-center gap-3"><Zap className="w-4 h-4" /> {item}</li>
+                <li key={item} className="flex items-start gap-3">
+                  <Zap className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{item}</span>
+                </li>
               ))}
             </ul>
           </div>
         </div>
 
-        <div className="bg-white p-8 md:p-12 shadow-2xl">
-          <h3 className="font-display font-black text-3xl uppercase tracking-tighter mb-8">
-            Inscrição • {eventInfo.currentLot}
+        <div className="min-w-0 bg-white p-4 shadow-2xl sm:p-6 md:p-8 xl:p-12">
+          <h3 className="mb-6 font-display text-[clamp(1.8rem,8vw,3rem)] font-black uppercase leading-none tracking-tighter md:mb-8">
+            Inscricao - {eventInfo.currentLot}
           </h3>
-          
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">Nome Completo</label>
-                <input
-                  required
-                  type="text"
-                  value={formData.fullName}
-                  onChange={(event) => updateField('fullName', event.target.value)}
-                  className={inputClass}
-                  placeholder="Nome e sobrenome"
-                  aria-invalid={Boolean(errors.fullName)}
-                />
-                {errors.fullName && <p className={errorClass}>{errors.fullName}</p>}
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">E-mail</label>
-                <input
-                  required
-                  type="email"
-                  value={formData.email}
-                  onChange={(event) => updateField('email', event.target.value)}
-                  className={inputClass}
-                  placeholder="voce@email.com"
-                  aria-invalid={Boolean(errors.email)}
-                />
-                {errors.email && <p className={errorClass}>{errors.email}</p>}
-              </div>
+
+          <form onSubmit={handleSubmit} className="space-y-5 sm:space-y-6">
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
+              <Field label="Nome Completo" error={errors.fullName}>
+                <input required type="text" value={formData.fullName} onChange={(event) => updateField('fullName', event.target.value)} className={inputClass} placeholder="Nome e sobrenome" aria-invalid={Boolean(errors.fullName)} />
+              </Field>
+              <Field label="E-mail" error={errors.email}>
+                <input required type="email" value={formData.email} onChange={(event) => updateField('email', event.target.value)} className={inputClass} placeholder="voce@email.com" aria-invalid={Boolean(errors.email)} />
+              </Field>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">CPF</label>
-                <input
-                  required
-                  type="text"
-                  inputMode="numeric"
-                  value={formData.cpf}
-                  onChange={(event) => updateField('cpf', formatCpf(event.target.value))}
-                  className={inputClass}
-                  placeholder="000.000.000-00"
-                  aria-invalid={Boolean(errors.cpf)}
-                />
-                {errors.cpf && <p className={errorClass}>{errors.cpf}</p>}
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">Telefone / WhatsApp</label>
-                <input
-                  required
-                  type="tel"
-                  inputMode="tel"
-                  value={formData.phone}
-                  onChange={(event) => updateField('phone', formatPhone(event.target.value))}
-                  className={inputClass}
-                  placeholder="(69) 99999-9999"
-                  aria-invalid={Boolean(errors.phone)}
-                />
-                {errors.phone && <p className={errorClass}>{errors.phone}</p>}
-              </div>
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
+              <Field label="CPF" error={errors.cpf}>
+                <input required type="text" inputMode="numeric" value={formData.cpf} onChange={(event) => updateField('cpf', formatCpf(event.target.value))} className={inputClass} placeholder="000.000.000-00" aria-invalid={Boolean(errors.cpf)} />
+              </Field>
+              <Field label="Telefone / WhatsApp" error={errors.phone}>
+                <input required type="tel" inputMode="tel" value={formData.phone} onChange={(event) => updateField('phone', formatPhone(event.target.value))} className={inputClass} placeholder="(69) 99999-9999" aria-invalid={Boolean(errors.phone)} />
+              </Field>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">Data de nascimento</label>
-                <input
-                  required
-                  type="date"
-                  value={formData.birthDate}
-                  onChange={(event) => updateField('birthDate', event.target.value)}
-                  className={inputClass}
-                  aria-invalid={Boolean(errors.birthDate)}
-                />
-                {errors.birthDate && <p className={errorClass}>{errors.birthDate}</p>}
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">Sexo</label>
-                <select
-                  required
-                  value={formData.gender}
-                  onChange={(event) => updateField('gender', event.target.value as Gender)}
-                  className={`${inputClass} cursor-pointer appearance-none`}
-                  aria-invalid={Boolean(errors.gender)}
-                >
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
+              <Field label="Data de nascimento" error={errors.birthDate}>
+                <input required type="date" value={formData.birthDate} onChange={(event) => updateField('birthDate', event.target.value)} className={inputClass} aria-invalid={Boolean(errors.birthDate)} />
+              </Field>
+              <Field label="Sexo" error={errors.gender}>
+                <select required value={formData.gender} onChange={(event) => updateField('gender', event.target.value as Gender)} className={`${inputClass} cursor-pointer appearance-none`} aria-invalid={Boolean(errors.gender)}>
                   <option value="">Selecione</option>
                   {eventInfo.genderOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
-                {errors.gender && <p className={errorClass}>{errors.gender}</p>}
-              </div>
+              </Field>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">Distância</label>
-                <select
-                  value={formData.distance}
-                  onChange={(event) => updateField('distance', event.target.value as RaceDistance)}
-                  className={`${inputClass} cursor-pointer appearance-none`}
-                >
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
+              <Field label="Distancia">
+                <select value={formData.distance} onChange={(event) => updateField('distance', event.target.value as RaceDistance)} className={`${inputClass} cursor-pointer appearance-none`}>
                   {eventInfo.distanceOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
                 {selectedDistanceAvailability && (
-                  <p className="text-xs font-bold uppercase tracking-wider opacity-60">
+                  <p className="text-[11px] font-bold uppercase leading-relaxed tracking-wider opacity-60 sm:text-xs">
                     {selectedDistanceAvailability.remaining} vagas restantes nesta distancia.
                   </p>
                 )}
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">Tamanho da Camisa</label>
-                <select
-                  value={formData.shirtSize}
-                  onChange={(event) => updateField('shirtSize', event.target.value as ShirtSize)}
-                  className={`${inputClass} cursor-pointer appearance-none`}
-                >
+              </Field>
+              <Field label="Tamanho da Camisa">
+                <select value={formData.shirtSize} onChange={(event) => updateField('shirtSize', event.target.value as ShirtSize)} className={`${inputClass} cursor-pointer appearance-none`}>
                   {eventInfo.shirtSizes.map((size) => (
                     <option key={size}>{size}</option>
                   ))}
                 </select>
-              </div>
+              </Field>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">Contato de emergência</label>
-                <input
-                  required
-                  type="text"
-                  value={formData.emergencyContactName}
-                  onChange={(event) => updateField('emergencyContactName', event.target.value)}
-                  className={inputClass}
-                  placeholder="Nome do contato"
-                  aria-invalid={Boolean(errors.emergencyContactName)}
-                />
-                {errors.emergencyContactName && <p className={errorClass}>{errors.emergencyContactName}</p>}
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest">Telefone de emergência</label>
-                <input
-                  required
-                  type="tel"
-                  inputMode="tel"
-                  value={formData.emergencyContactPhone}
-                  onChange={(event) => updateField('emergencyContactPhone', formatPhone(event.target.value))}
-                  className={inputClass}
-                  placeholder="(69) 99999-9999"
-                  aria-invalid={Boolean(errors.emergencyContactPhone)}
-                />
-                {errors.emergencyContactPhone && <p className={errorClass}>{errors.emergencyContactPhone}</p>}
-              </div>
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
+              <Field label="Contato de emergencia" error={errors.emergencyContactName}>
+                <input required type="text" value={formData.emergencyContactName} onChange={(event) => updateField('emergencyContactName', event.target.value)} className={inputClass} placeholder="Nome do contato" aria-invalid={Boolean(errors.emergencyContactName)} />
+              </Field>
+              <Field label="Telefone de emergencia" error={errors.emergencyContactPhone}>
+                <input required type="tel" inputMode="tel" value={formData.emergencyContactPhone} onChange={(event) => updateField('emergencyContactPhone', formatPhone(event.target.value))} className={inputClass} placeholder="(69) 99999-9999" aria-invalid={Boolean(errors.emergencyContactPhone)} />
+              </Field>
             </div>
 
-            <div className="space-y-3 border border-black/10 bg-black/5 p-4">
-              <label className="flex items-start gap-3 text-sm font-bold">
-                <input
-                  type="checkbox"
-                  checked={formData.termsAccepted}
-                  onChange={(event) => updateField('termsAccepted', event.target.checked)}
-                  className="mt-1 h-4 w-4 accent-black"
-                />
-                <span>Li e aceito o termo de responsabilidade da prova.</span>
-              </label>
+            <div className="space-y-3 border border-black/10 bg-black/5 p-3.5 sm:p-4">
+              <Checkbox checked={formData.termsAccepted} onChange={(checked) => updateField('termsAccepted', checked)}>
+                Li e aceito o termo de responsabilidade da prova.
+              </Checkbox>
               {errors.termsAccepted && <p className={errorClass}>{errors.termsAccepted}</p>}
 
-              <label className="flex items-start gap-3 text-sm font-bold">
-                <input
-                  type="checkbox"
-                  checked={formData.regulationAccepted}
-                  onChange={(event) => updateField('regulationAccepted', event.target.checked)}
-                  className="mt-1 h-4 w-4 accent-black"
-                />
-                <span>Li e aceito o <a href="/regulamento" className="underline">regulamento oficial</a> do FunPace Run.</span>
-              </label>
+              <Checkbox checked={formData.regulationAccepted} onChange={(checked) => updateField('regulationAccepted', checked)}>
+                Li e aceito o <a href="/regulamento" className="underline">regulamento oficial</a> do FunPace Run.
+              </Checkbox>
               {errors.regulationAccepted && <p className={errorClass}>{errors.regulationAccepted}</p>}
 
-              <label className="flex items-start gap-3 text-sm font-bold">
-                <input
-                  type="checkbox"
-                  checked={formData.privacyAccepted}
-                  onChange={(event) => updateField('privacyAccepted', event.target.checked)}
-                  className="mt-1 h-4 w-4 accent-black"
-                />
-                <span>Autorizo o uso dos meus dados para processar a inscricao, conforme a <a href="/privacidade" className="underline">politica de privacidade</a>.</span>
-              </label>
+              <Checkbox checked={formData.privacyAccepted} onChange={(checked) => updateField('privacyAccepted', checked)}>
+                Autorizo o uso dos meus dados para processar a inscricao, conforme a <a href="/privacidade" className="underline">politica de privacidade</a>.
+              </Checkbox>
               {errors.privacyAccepted && <p className={errorClass}>{errors.privacyAccepted}</p>}
             </div>
 
-            <button 
-              type="submit" 
+            <button
+              type="submit"
               disabled={status === 'submitting'}
-              className="w-full bg-black text-white hover:bg-zinc-800 transition-colors p-6 font-black uppercase tracking-widest text-sm flex items-center justify-between group mt-4 relative overflow-hidden"
+              className="group relative mt-4 flex min-h-14 w-full items-center justify-center gap-3 overflow-hidden bg-black p-4 text-center text-xs font-black uppercase tracking-widest text-white transition-colors hover:bg-zinc-800 disabled:opacity-70 sm:justify-between sm:p-6 sm:text-sm"
             >
-              <span className="relative z-10">
+              <span className="relative z-10 min-w-0">
                 {status === 'submitting' && 'CRIANDO INSCRICAO'}
                 {status === 'checkout_pending' && 'CHECKOUT EM IMPLANTACAO'}
                 {status !== 'submitting' && status !== 'checkout_pending' && 'CONTINUAR PARA CHECKOUT'}
               </span>
-              <ArrowRight className="w-5 h-5 relative z-10 group-hover:translate-x-2 transition-transform" />
+              <ArrowRight className="relative z-10 h-5 w-5 shrink-0 transition-transform group-hover:translate-x-2" />
             </button>
+
             {status === 'checkout_pending' && (
-              <p className="border border-black/20 bg-black/5 p-3 text-xs font-bold uppercase tracking-wider">
+              <p className="border border-black/20 bg-black/5 p-3 text-xs font-bold uppercase leading-relaxed tracking-wider">
                 {apiMessage} ID: {registrationId}. {eventInfo.offerNote}
               </p>
             )}
             {status === 'api_error' && (
-              <p className="border border-red-800 bg-red-100 p-3 text-xs font-bold uppercase tracking-wider text-red-800">
+              <p className="border border-red-800 bg-red-100 p-3 text-xs font-bold uppercase leading-relaxed tracking-wider text-red-800">
                 {apiMessage}
               </p>
             )}
-            <p className="text-xs text-center font-medium opacity-60">* O envio ainda nao cria inscricao paga. A confirmacao dependera do gateway e do webhook.</p>
+            <p className="text-center text-xs font-medium leading-relaxed opacity-60">
+              * O envio ainda nao cria inscricao paga. A confirmacao dependera do gateway e do webhook.
+            </p>
           </form>
         </div>
       </div>
@@ -371,47 +272,70 @@ export function RegistrationSection() {
   );
 }
 
+function Field({ label, error, children }: { label: string; error?: string; children: ReactNode }) {
+  return (
+    <div className="min-w-0 space-y-2">
+      <label className={labelClass}>{label}</label>
+      {children}
+      {error && <p className={errorClass}>{error}</p>}
+    </div>
+  );
+}
+
+function Checkbox({ checked, onChange, children }: { checked: boolean; onChange: (checked: boolean) => void; children: ReactNode }) {
+  return (
+    <label className="flex items-start gap-3 text-sm font-bold leading-relaxed">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="mt-1 h-4 w-4 shrink-0 accent-black"
+      />
+      <span className="min-w-0">{children}</span>
+    </label>
+  );
+}
+
 export function SponsorSection() {
   const [success, setSuccess] = useState(false);
 
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = (event: FormEvent) => {
+    event.preventDefault();
     setSuccess(true);
     setTimeout(() => setSuccess(false), 3000);
   };
 
   return (
-    <section className="py-24 px-6 bg-zinc-950 border-t border-zinc-900 border-b relative">
-      <div className="max-w-4xl mx-auto text-center border p-8 md:p-16 border-zinc-800 relative z-10 bg-black/50 backdrop-blur-sm shadow-2xl">
-        <Building className="w-12 h-12 text-brand mx-auto mb-6" />
-        <h2 className="font-display text-4xl md:text-5xl font-black uppercase tracking-tighter mb-4 text-white">
+    <section className="relative border-y border-zinc-900 bg-zinc-950 px-4 py-16 sm:px-6 md:py-24">
+      <div className="relative z-10 mx-auto max-w-4xl border border-zinc-800 bg-black/50 p-5 text-center shadow-2xl backdrop-blur-sm sm:p-8 md:p-16">
+        <Building className="mx-auto mb-6 h-12 w-12 text-brand" />
+        <h2 className="mb-4 font-display text-[clamp(2.4rem,10vw,3rem)] font-black uppercase leading-none tracking-tighter text-white">
           Seja um Parceiro
         </h2>
-        <p className="text-zinc-400 font-mono text-sm max-w-lg mx-auto mb-10">
-          Posicione sua marca em um evento premium focado em performance, saúde e inovação. Preencha os dados e nossa equipe de branding entrará em contato.
+        <p className="mx-auto mb-8 max-w-lg font-mono text-sm leading-relaxed text-zinc-400 md:mb-10">
+          Posicione sua marca em um evento premium focado em performance, saude e inovacao. Preencha os dados e nossa equipe de branding entrara em contato.
         </p>
 
-        <form onSubmit={handleSubmit} className="text-left space-y-6 max-w-2xl mx-auto">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-             <input required type="text" placeholder="Nome da Empresa" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors" />
-             <input required type="text" placeholder="Seu Nome / Cargo" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors" />
-             <input required type="email" placeholder="E-mail Corporativo" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors md:col-span-2" />
-             <textarea 
-               required 
-               placeholder="Como gostaria de se envolver no evento? (Ex: Patrocínio Master, Ativação Tenda, etc)" 
-               rows={4} 
-               className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors md:col-span-2 resize-none" 
-             />
+        <form onSubmit={handleSubmit} className="mx-auto max-w-2xl space-y-5 text-left sm:space-y-6">
+          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
+            <input required type="text" placeholder="Nome da Empresa" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors" />
+            <input required type="text" placeholder="Seu Nome / Cargo" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors" />
+            <input required type="email" placeholder="E-mail Corporativo" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors md:col-span-2" />
+            <textarea
+              required
+              placeholder="Como gostaria de se envolver no evento? (Ex: Patrocinio Master, Ativacao Tenda, etc)"
+              rows={4}
+              className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors md:col-span-2 resize-none"
+            />
           </div>
-          <button type="submit" className="w-full bg-white text-black p-4 font-black uppercase tracking-widest hover:bg-brand transition-colors text-sm">
-             {success ? 'ENVIADO COM SUCESSO' : 'ENVIAR PROPOSTA'}
+          <button type="submit" className="min-h-14 w-full bg-white p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-brand">
+            {success ? 'ENVIADO COM SUCESSO' : 'ENVIAR PROPOSTA'}
           </button>
         </form>
       </div>
-      
-      {/* Decorative text behind */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full text-center overflow-hidden opacity-5 pointer-events-none select-none z-0">
-        <h2 className="font-display font-black text-[15vw] leading-none uppercase whitespace-nowrap">
+
+      <div className="pointer-events-none absolute left-1/2 top-1/2 z-0 w-full -translate-x-1/2 -translate-y-1/2 select-none overflow-hidden text-center opacity-5">
+        <h2 className="whitespace-nowrap font-display text-[15vw] font-black uppercase leading-none">
           SPONSORSHIP
         </h2>
       </div>
