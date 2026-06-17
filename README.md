@@ -60,6 +60,7 @@ INFINITEPAY_HANDLE="sua-infinite-tag-sem-cifrao"
 APP_URL="https://funpace.club"
 API_PUBLIC_URL="https://funpace.club"
 PAYMENT_WEBHOOK_SECRET="um-token-forte"
+PENDING_PAYMENT_TTL_MINUTES="30"
 ```
 
 The registration API sends `POST https://api.checkout.infinitepay.io/links` with `handle`, `items`, `order_nsu`, `redirect_url`, `webhook_url` and `customer`.
@@ -71,6 +72,8 @@ https://funpace.club/api/webhooks/payment?token=PAYMENT_WEBHOOK_SECRET
 ```
 
 The webhook payload is matched by `order_nsu`; the API validates the amount and marks the registration as `paid` when InfinitePay sends `paid: true`.
+
+Pending registrations expire after `PENDING_PAYMENT_TTL_MINUTES`. When a pending registration expires, its lot capacity is released and the registration/payment status becomes `expired`.
 
 ## Local Backup
 

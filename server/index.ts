@@ -1,8 +1,9 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
-import { snapshot, transaction, type Database, type PaymentRecord, type RegistrationRecord } from './database';
+import { transaction, type Database, type PaymentRecord, type RegistrationRecord } from './database';
 import { createInfinitePayCheckout } from './infinitepay';
 
 const port = Number(process.env.API_PORT || 3001);
@@ -17,6 +18,10 @@ const infinitePayHandle = process.env.INFINITEPAY_HANDLE || '';
 const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
 const isProduction = process.env.NODE_ENV === 'production';
+const pendingPaymentTtlMinutesInput = Number(process.env.PENDING_PAYMENT_TTL_MINUTES || 30);
+const pendingPaymentTtlMinutes = Number.isFinite(pendingPaymentTtlMinutesInput)
+  ? Math.max(pendingPaymentTtlMinutesInput, 1)
+  : 30;
 
 if (isProduction && adminApiKey === 'change-me') {
   throw new Error('ADMIN_API_KEY must be changed in production.');
@@ -226,6 +231,74 @@ function getRegistrationDescription(distanceName: string, lotName: string) {
   return `Inscricao FunPace Run 2026 - ${distanceName} - ${lotName}`;
 }
 
+function getPendingPaymentExpiresAt(createdAt: string) {
+  return new Date(new Date(createdAt).getTime() + pendingPaymentTtlMinutes * 60_000).toISOString();
+}
+
+function getRegistrationExpiresAt(registration: RegistrationRecord) {
+  return registration.expiresAt || getPendingPaymentExpiresAt(registration.createdAt);
+}
+
+function releaseRegistrationCapacity(database: Database, registration: RegistrationRecord) {
+  const lot = database.lots.find((item) => item.id === registration.lotId);
+
+  if (lot && lot.soldCount > 0) {
+    lot.soldCount -= 1;
+
+    if (lot.status === 'sold_out' && lot.soldCount < lot.capacity) {
+      lot.status = 'active';
+    }
+  }
+}
+
+function claimRegistrationCapacity(database: Database, registration: RegistrationRecord) {
+  const lot = database.lots.find((item) => item.id === registration.lotId);
+
+  if (!lot) {
+    return;
+  }
+
+  lot.soldCount += 1;
+
+  if (lot.soldCount >= lot.capacity) {
+    lot.status = 'sold_out';
+  }
+}
+
+function expirePendingPayments(database: Database, now = new Date()) {
+  let expiredCount = 0;
+
+  for (const registration of database.registrations) {
+    if (registration.status !== 'pending_payment') {
+      continue;
+    }
+
+    const expiresAt = getRegistrationExpiresAt(registration);
+
+    registration.expiresAt = expiresAt;
+
+    if (new Date(expiresAt).getTime() > now.getTime()) {
+      continue;
+    }
+
+    registration.status = 'expired';
+    registration.updatedAt = now.toISOString();
+    expiredCount += 1;
+
+    const payment = database.payments.find((item) => item.registrationId === registration.id);
+
+    if (payment) {
+      payment.status = 'expired';
+      payment.updatedAt = now.toISOString();
+      payment.expiresAt = payment.expiresAt || expiresAt;
+    }
+
+    releaseRegistrationCapacity(database, registration);
+  }
+
+  return expiredCount;
+}
+
 function toPaymentProviderStatus(status: unknown): RegistrationStatus {
   if (status === 'paid' || status === true) {
     return 'paid';
@@ -257,12 +330,7 @@ async function markPaymentCreationFailed(registrationId: string) {
     if (registration?.status === 'pending_payment') {
       registration.status = 'payment_failed';
       registration.updatedAt = now;
-
-      const lot = database.lots.find((item) => item.id === registration.lotId);
-
-      if (lot && lot.soldCount > 0) {
-        lot.soldCount -= 1;
-      }
+      releaseRegistrationCapacity(database, registration);
     }
 
     if (payment) {
@@ -301,6 +369,8 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   const hash = cpfHash(payload.cpf);
 
   const response = await transaction<PendingCheckout>((database) => {
+    expirePendingPayments(database);
+
     const event = database.events.find((item) => item.slug === 'funpace-run-2026' && item.status === 'published');
 
     if (!event) {
@@ -356,6 +426,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         registrationStatus: existing.status,
         checkoutStatus: payment?.checkoutUrl ? 'created' : 'not_configured',
         checkoutUrl: payment?.checkoutUrl || null,
+        expiresAt: existing.expiresAt || null,
         message: existing.status === 'paid'
           ? 'Ja existe uma inscricao paga para este CPF.'
           : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
@@ -368,6 +439,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     }
 
     const now = new Date().toISOString();
+    const expiresAt = getPendingPaymentExpiresAt(now);
     const registration: RegistrationRecord = {
       id: randomUUID(),
       eventId: event.id,
@@ -379,6 +451,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       payload,
       createdAt: now,
       updatedAt: now,
+      expiresAt,
     };
     const payment: PaymentRecord = {
       id: randomUUID(),
@@ -390,6 +463,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       checkoutUrl: null,
       createdAt: now,
       updatedAt: now,
+      expiresAt,
     };
 
     activeLot.soldCount += 1;
@@ -402,6 +476,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       registrationStatus: registration.status,
       checkoutStatus: 'not_configured',
       checkoutUrl: null,
+      expiresAt,
       message: paymentProvider === 'infinitepay'
         ? 'Inscricao criada. Redirecionando para o checkout InfinitePay.'
         : 'Inscricao pre-criada. Configure um adaptador de pagamento real para gerar checkout.',
@@ -506,6 +581,8 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   }
 
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    expirePendingPayments(database);
+
     const registration = database.registrations.find((item) => item.id === registrationId);
 
     if (!registration) {
@@ -524,14 +601,32 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       return { statusCode: 200, payload: { ok: true, duplicated: true } };
     }
 
+    const previousStatus = registration.status;
+    const wasExpired = previousStatus === 'expired';
+    const shouldReleaseCapacity = (
+      ['pending_payment', 'paid'].includes(previousStatus)
+      && ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(nextStatus)
+    );
+
     registration.status = nextStatus;
     registration.updatedAt = now;
+
+    if (nextStatus === 'paid') {
+      registration.expiresAt = null;
+
+      if (wasExpired) {
+        claimRegistrationCapacity(database, registration);
+      }
+    } else if (shouldReleaseCapacity) {
+      releaseRegistrationCapacity(database, registration);
+    }
 
     if (payment) {
       payment.provider = 'infinitepay';
       payment.providerPaymentId = event.transaction_nsu || event.invoice_slug || event.slug || payment.providerPaymentId;
       payment.status = nextStatus;
       payment.updatedAt = now;
+      payment.expiresAt = nextStatus === 'paid' ? null : payment.expiresAt;
     }
 
     database.paymentEvents.push({
@@ -552,7 +647,10 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
 async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
   const id = url.pathname.split('/').at(-1) || '';
-  const database = await snapshot();
+  const database = await transaction((currentDatabase) => {
+    expirePendingPayments(currentDatabase);
+    return currentDatabase;
+  });
   const registration = database.registrations.find((item) => item.id === id);
 
   if (!registration) {
@@ -568,11 +666,15 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     lotId: registration.lotId,
     createdAt: registration.createdAt,
     updatedAt: registration.updatedAt,
+    expiresAt: registration.expiresAt || null,
   });
 }
 
 async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse) {
-  const database = await snapshot();
+  const database = await transaction((currentDatabase) => {
+    expirePendingPayments(currentDatabase);
+    return currentDatabase;
+  });
   const event = database.events.find((item) => item.slug === 'funpace-run-2026');
 
   if (!event) {
@@ -612,7 +714,10 @@ async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse)
 }
 
 async function getAdminRows(url: URL) {
-  const database = await snapshot();
+  const database = await transaction((currentDatabase) => {
+    expirePendingPayments(currentDatabase);
+    return currentDatabase;
+  });
   const lotId = url.searchParams.get('lotId') || '';
   const distanceId = url.searchParams.get('distanceId') || '';
   const status = url.searchParams.get('status') || '';
@@ -676,6 +781,7 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     paymentStatus: payment?.status || registration.status,
     amountCents: registration.amountCents,
     createdAt: registration.createdAt,
+    expiresAt: registration.expiresAt || null,
   };
 }
 
@@ -684,7 +790,10 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const database = await snapshot();
+  const database = await transaction((currentDatabase) => {
+    expirePendingPayments(currentDatabase);
+    return currentDatabase;
+  });
   const paid = database.registrations.filter((item) => item.status === 'paid');
   const pending = database.registrations.filter((item) => item.status === 'pending_payment');
   const revenueCents = paid.reduce((total, item) => total + item.amountCents, 0);
@@ -859,7 +968,10 @@ async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const database = await snapshot();
+  const database = await transaction((currentDatabase) => {
+    expirePendingPayments(currentDatabase);
+    return currentDatabase;
+  });
   const logs = database.auditLogs
     .slice()
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -925,7 +1037,7 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
   csv(res, 'funpace-run-inscritos.csv', [headers.join(','), ...lines].join('\n'));
 }
 
-createServer(async (req, res) => {
+export async function handleApiRequest(req: IncomingMessage, res: ServerResponse) {
   setCors(req, res);
 
   if (req.method === 'OPTIONS') {
@@ -995,6 +1107,10 @@ createServer(async (req, res) => {
   } catch {
     json(res, 500, { message: 'Erro interno da API.' });
   }
-}).listen(port, () => {
-  console.log(`FunPace Run API listening on http://localhost:${port}`);
-});
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  createServer(handleApiRequest).listen(port, () => {
+    console.log(`FunPace Run API listening on http://localhost:${port}`);
+  });
+}

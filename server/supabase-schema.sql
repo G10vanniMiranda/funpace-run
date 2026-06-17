@@ -41,7 +41,8 @@ create table if not exists "run-registrations" (
   amount_cents integer not null,
   payload jsonb not null,
   created_at text not null,
-  updated_at text not null
+  updated_at text not null,
+  expires_at text
 );
 
 create table if not exists "run-payments" (
@@ -53,7 +54,8 @@ create table if not exists "run-payments" (
   provider_payment_id text,
   checkout_url text,
   created_at text not null,
-  updated_at text not null
+  updated_at text not null,
+  expires_at text
 );
 
 create table if not exists "run-payment-events" (
@@ -99,6 +101,9 @@ create index if not exists "run-payments_registration_id_idx" on "run-payments"(
 create unique index if not exists "run-check-ins_registration_id_idx" on "run-check-ins"(registration_id);
 create unique index if not exists "run-kit-deliveries_registration_id_idx" on "run-kit-deliveries"(registration_id);
 create index if not exists "run-audit-logs_entity_idx" on "run-audit-logs"(entity_type, entity_id);
+
+alter table "run-registrations" add column if not exists expires_at text;
+alter table "run-payments" add column if not exists expires_at text;
 
 insert into "run-events" (id, name, slug, status, date, start_time, location_name, city, state)
 values (

@@ -47,31 +47,11 @@ function isValidCpf(cpf: string) {
   return calculateDigit(10) === Number(digits[9]) && calculateDigit(11) === Number(digits[10]);
 }
 
-function getAge(birthDate: string) {
-  const date = new Date(`${birthDate}T00:00:00`);
-
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  const today = new Date();
-  let age = today.getFullYear() - date.getFullYear();
-  const monthDiff = today.getMonth() - date.getMonth();
-
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < date.getDate())) {
-    age -= 1;
-  }
-
-  return age;
-}
-
 export function validateRegistration(data: RegistrationFormData) {
   const errors: RegistrationErrors = {};
   const nameParts = data.fullName.trim().split(/\s+/).filter(Boolean);
   const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim());
   const phoneDigits = onlyDigits(data.phone);
-  const emergencyPhoneDigits = onlyDigits(data.emergencyContactPhone);
-  const age = getAge(data.birthDate);
 
   if (nameParts.length < 2) {
     errors.fullName = 'Informe nome e sobrenome.';
@@ -89,20 +69,12 @@ export function validateRegistration(data: RegistrationFormData) {
     errors.phone = 'Informe um WhatsApp valido com DDD.';
   }
 
-  if (age === null || age < 14 || age > 100) {
-    errors.birthDate = 'Informe uma data de nascimento valida.';
-  }
-
   if (!data.gender) {
     errors.gender = 'Selecione uma opcao.';
   }
 
   if (!data.emergencyContactName.trim()) {
     errors.emergencyContactName = 'Informe o contato de emergencia.';
-  }
-
-  if (emergencyPhoneDigits.length < 10) {
-    errors.emergencyContactPhone = 'Informe um telefone de emergencia valido.';
   }
 
   if (!data.termsAccepted) {

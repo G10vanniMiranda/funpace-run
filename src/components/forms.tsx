@@ -121,7 +121,7 @@ export function RegistrationSection() {
       <div className="mx-auto grid max-w-7xl grid-cols-1 gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16 xl:gap-24">
         <div className="flex min-w-0 flex-col">
           <h2 className="mb-5 font-display text-[clamp(2.8rem,13vw,4.5rem)] font-black uppercase leading-none tracking-tighter md:mb-6">
-            Nao fique <br />para tras.
+            Não fique <br />para trás.
           </h2>
           <p className="mb-8 max-w-md text-base font-medium leading-relaxed opacity-80 sm:text-lg md:mb-10 md:text-xl">
             As vagas do {eventInfo.currentLot} serao liberadas com pagamento online. A vaga so sera garantida apos pagamento aprovado.
@@ -155,8 +155,8 @@ export function RegistrationSection() {
           </div>
         </div>
 
-        <div className="min-w-0 bg-white p-4 shadow-2xl sm:p-6 md:p-8 xl:p-12">
-          <h3 className="mb-6 font-display text-[clamp(1.8rem,8vw,3rem)] font-black uppercase leading-none tracking-tighter md:mb-8">
+        <div className="min-w-0 bg-white p-4 pt-7 shadow-2xl sm:p-6 sm:pt-8 md:p-8 md:pt-10 xl:p-12">
+          <h3 className="mb-7 font-display text-[clamp(1.7rem,7vw,2.65rem)] font-black uppercase leading-[0.95] tracking-tighter md:mb-8">
             Inscricao - {eventInfo.currentLot}
           </h3>
 
@@ -180,9 +180,6 @@ export function RegistrationSection() {
             </div>
 
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
-              <Field label="Data de nascimento" error={errors.birthDate}>
-                <input required type="date" value={formData.birthDate} onChange={(event) => updateField('birthDate', event.target.value)} className={inputClass} aria-invalid={Boolean(errors.birthDate)} />
-              </Field>
               <Field label="Sexo" error={errors.gender}>
                 <select required value={formData.gender} onChange={(event) => updateField('gender', event.target.value as Gender)} className={`${inputClass} cursor-pointer appearance-none`} aria-invalid={Boolean(errors.gender)}>
                   <option value="">Selecione</option>
@@ -191,9 +188,6 @@ export function RegistrationSection() {
                   ))}
                 </select>
               </Field>
-            </div>
-
-            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
               <Field label="Distancia">
                 <select value={formData.distance} onChange={(event) => updateField('distance', event.target.value as RaceDistance)} className={`${inputClass} cursor-pointer appearance-none`}>
                   {eventInfo.distanceOptions.map((option) => (
@@ -206,6 +200,9 @@ export function RegistrationSection() {
                   </p>
                 )}
               </Field>
+            </div>
+
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
               <Field label="Tamanho da Camisa">
                 <select value={formData.shirtSize} onChange={(event) => updateField('shirtSize', event.target.value as ShirtSize)} className={`${inputClass} cursor-pointer appearance-none`}>
                   {eventInfo.shirtSizes.map((size) => (
@@ -213,14 +210,8 @@ export function RegistrationSection() {
                   ))}
                 </select>
               </Field>
-            </div>
-
-            <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
               <Field label="Contato de emergencia" error={errors.emergencyContactName}>
                 <input required type="text" value={formData.emergencyContactName} onChange={(event) => updateField('emergencyContactName', event.target.value)} className={inputClass} placeholder="Nome do contato" aria-invalid={Boolean(errors.emergencyContactName)} />
-              </Field>
-              <Field label="Telefone de emergencia" error={errors.emergencyContactPhone}>
-                <input required type="tel" inputMode="tel" value={formData.emergencyContactPhone} onChange={(event) => updateField('emergencyContactPhone', formatPhone(event.target.value))} className={inputClass} placeholder="(69) 99999-9999" aria-invalid={Boolean(errors.emergencyContactPhone)} />
               </Field>
             </div>
 

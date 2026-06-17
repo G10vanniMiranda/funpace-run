@@ -41,7 +41,7 @@ function Countdown() {
   ];
 
   return (
-    <div className="mt-8 grid w-full max-w-[22rem] grid-cols-4 gap-2 isolate sm:max-w-none sm:flex md:mt-12">
+    <div className="mt-8 grid w-full max-w-88 grid-cols-4 gap-2 isolate sm:max-w-none sm:flex md:mt-12">
       {timeBlocks.map((block) => (
         <div key={block.label} className="flex min-w-0 flex-col">
           <div className="flex aspect-square w-full min-w-0 items-center justify-center rounded border border-zinc-800 bg-zinc-900 font-mono text-[clamp(1.25rem,8vw,2rem)] font-bold text-white sm:h-20 sm:w-20 md:h-24 md:w-24 md:text-5xl">
@@ -58,13 +58,13 @@ function Countdown() {
 
 export function Hero() {
   return (
-    <section className="relative flex min-h-[760px] flex-col justify-end overflow-hidden px-4 pb-14 pt-28 sm:min-h-[820px] sm:px-6 sm:pb-20 md:min-h-[92svh] md:pb-28">
+    <section className="relative flex min-h-190 flex-col justify-end overflow-hidden px-4 pb-14 pt-28 sm:min-h-205 sm:px-6 sm:pb-20 md:min-h-[92svh] md:pb-28">
       <div className="pointer-events-none absolute right-0 top-0 h-full w-full select-none overflow-hidden opacity-30 sm:w-2/3">
         <div className="absolute -right-1/3 top-32 h-[min(74vw,800px)] w-[min(74vw,800px)] rounded-full border border-brand/20 blur-[1px] sm:top-1/4" />
         <div className="absolute -right-1/2 top-44 h-[min(74vw,800px)] w-[min(74vw,800px)] rounded-full border border-brand/10 blur-[2px] sm:top-1/3" />
       </div>
 
-      <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]" />
+      <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-size-[24px_24px]" />
 
       <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col items-start">
         <motion.div
@@ -73,7 +73,7 @@ export function Hero() {
           transition={{ duration: 0.8, ease: 'easeOut' }}
           className="mb-5 flex max-w-full items-center gap-3 text-brand sm:gap-4 md:mb-10"
         >
-          <div className="h-[2px] w-8 shrink-0 bg-brand sm:w-12" />
+          <div className="h-0.5 w-8 shrink-0 bg-brand sm:w-12" />
           <span className="min-w-0 text-xs font-bold uppercase tracking-widest sm:text-sm md:text-base">
             {eventInfo.edition} - {eventInfo.city}
           </span>

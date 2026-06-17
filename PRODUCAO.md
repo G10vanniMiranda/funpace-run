@@ -10,6 +10,7 @@ Este checklist cobre seguranca, performance e operacao. O deploy em si fica a ca
 - Definir `INFINITEPAY_HANDLE` com a InfiniteTag da conta, sem o simbolo `$`.
 - Definir `APP_URL` e `API_PUBLIC_URL` com URLs HTTPS publicas.
 - Configurar `PAYMENT_WEBHOOK_SECRET` forte.
+- Definir `PENDING_PAYMENT_TTL_MINUTES` conforme a janela operacional do checkout.
 - Configurar/testar o webhook da InfinitePay apontando para `/api/webhooks/payment?token=PAYMENT_WEBHOOK_SECRET`.
 - Criar as tabelas do Supabase com `server/supabase-schema.sql`.
 - Definir `DATABASE_PROVIDER=supabase`, `DATABASE_URL` e `DATABASE_SSL=true`.

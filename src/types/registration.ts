@@ -40,6 +40,16 @@ export type CreateRegistrationResponse = {
   checkoutStatus: CheckoutStatus;
   checkoutUrl: string | null;
   message: string;
+  expiresAt?: string | null;
+};
+
+export type RegistrationStatusResponse = {
+  registrationId: string;
+  status: RegistrationStatus;
+  amountCents: number;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string | null;
 };
 
 export type AvailabilityResponse = {
@@ -126,6 +136,7 @@ export type AdminRegistration = {
   paymentStatus: RegistrationStatus;
   amountCents: number;
   createdAt: string;
+  expiresAt: string | null;
 };
 
 export type AdminRegistrationsResponse = {
