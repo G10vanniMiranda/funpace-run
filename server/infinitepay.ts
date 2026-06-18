@@ -27,7 +27,21 @@ type InfinitePayLinksResponse = {
   invoice_url?: string;
   slug?: string;
   invoice_slug?: string;
+  message?: string;
+  error?: string;
 };
+
+export class InfinitePayError extends Error {
+  statusCode?: number;
+  payload: unknown;
+
+  constructor(message: string, statusCode?: number, payload?: unknown) {
+    super(message);
+    this.name = 'InfinitePayError';
+    this.statusCode = statusCode;
+    this.payload = payload;
+  }
+}
 
 function normalizePhone(phone: string) {
   const digits = phone.replace(/\D/g, '');
@@ -77,13 +91,17 @@ export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput)
   const payload = await response.json().catch(() => null) as InfinitePayLinksResponse | null;
 
   if (!response.ok || !payload) {
-    throw new Error('InfinitePay nao criou o link de pagamento.');
+    throw new InfinitePayError(
+      payload?.message || payload?.error || 'InfinitePay nao criou o link de pagamento.',
+      response.status,
+      payload,
+    );
   }
 
   const checkoutUrl = getCheckoutUrl(payload);
 
   if (!checkoutUrl) {
-    throw new Error('InfinitePay respondeu sem URL de checkout.');
+    throw new InfinitePayError('InfinitePay respondeu sem URL de checkout.', response.status, payload);
   }
 
   return {

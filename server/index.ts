@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
 import { pingDatabase, transaction, type Database, type PaymentRecord, type RegistrationRecord } from './database';
-import { createInfinitePayCheckout } from './infinitepay';
+import { createInfinitePayCheckout, InfinitePayError } from './infinitepay';
 
 const port = Number(process.env.API_PORT || 3001);
 const defaultAllowedOrigins = [
@@ -22,7 +22,7 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || defaultAllowedOrigins.joi
 const appUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
 const apiPublicUrl = (process.env.API_PUBLIC_URL || appUrl).replace(/\/$/, '');
 const paymentProvider = process.env.PAYMENT_PROVIDER || '';
-const infinitePayHandle = process.env.INFINITEPAY_HANDLE || '';
+const infinitePayHandle = process.env.INFINITEPAY_HANDLE || process.env.INFINITIPAY_HANDLE || '';
 const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
 const isProduction = process.env.NODE_ENV === 'production';
@@ -59,6 +59,10 @@ function json(res: ServerResponse, statusCode: number, payload: unknown) {
   res.end(JSON.stringify(payload));
 }
 
+function createErrorId() {
+  return `err_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+}
+
 function logRequest(req: IncomingMessage, statusCode: number, message: string) {
   console.log(JSON.stringify({
     at: new Date().toISOString(),
@@ -70,14 +74,18 @@ function logRequest(req: IncomingMessage, statusCode: number, message: string) {
   }));
 }
 
-function logServerError(req: IncomingMessage, error: unknown) {
+function logServerError(req: IncomingMessage, error: unknown, errorId = createErrorId()) {
   console.error(JSON.stringify({
     at: new Date().toISOString(),
+    errorId,
     method: req.method,
     path: req.url?.split('?')[0],
     requestId: Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'],
     error: error instanceof Error ? error.message : 'Unknown error',
+    stack: error instanceof Error ? error.stack : undefined,
   }));
+
+  return errorId;
 }
 
 function csv(res: ServerResponse, filename: string, content: string) {
@@ -206,13 +214,19 @@ function getAge(birthDate: string) {
 
 function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData {
   return {
-    ...input,
-    fullName: input.fullName.trim(),
-    email: input.email.trim().toLowerCase(),
-    cpf: input.cpf.trim(),
-    phone: input.phone.trim(),
-    emergencyContactName: input.emergencyContactName.trim(),
-    emergencyContactPhone: input.emergencyContactPhone.trim(),
+    fullName: String(input.fullName || '').trim(),
+    email: String(input.email || '').trim().toLowerCase(),
+    cpf: String(input.cpf || '').trim(),
+    phone: String(input.phone || '').trim(),
+    birthDate: String(input.birthDate || '').trim(),
+    gender: input.gender || '',
+    shirtSize: input.shirtSize || 'M',
+    distance: input.distance || '10K',
+    emergencyContactName: String(input.emergencyContactName || '').trim(),
+    emergencyContactPhone: String(input.emergencyContactPhone || '').trim(),
+    termsAccepted: Boolean(input.termsAccepted),
+    regulationAccepted: Boolean(input.regulationAccepted),
+    privacyAccepted: Boolean(input.privacyAccepted),
   };
 }
 
@@ -549,13 +563,16 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
         response.checkoutStatus = 'created';
         response.checkoutUrl = checkout.checkoutUrl;
-      } catch {
+      } catch (error) {
+        const errorId = logServerError(req, error);
         await markPaymentCreationFailed(response.registrationId);
         response.statusCode = 502;
         response.registrationStatus = 'payment_failed';
         response.checkoutStatus = 'not_configured';
         response.checkoutUrl = null;
-        response.message = 'Nao foi possivel criar o checkout InfinitePay. Tente novamente em instantes.';
+        response.message = error instanceof InfinitePayError
+          ? `Nao foi possivel criar o checkout InfinitePay. Tente novamente em instantes. Codigo: ${errorId}.`
+          : `Erro no gateway de pagamento. Tente novamente em instantes. Codigo: ${errorId}.`;
       }
     }
   }
@@ -747,7 +764,9 @@ async function handleHealth(req: IncomingMessage, res: ServerResponse) {
     databaseProvider: process.env.DATABASE_PROVIDER || 'auto',
     databaseUrlConfigured: Boolean(process.env.DATABASE_URL),
     paymentProvider: paymentProvider || 'not_configured',
-    infinitePayHandleConfigured: Boolean(infinitePayHandle),
+    infinitePayHandleConfigured: Boolean(process.env.INFINITEPAY_HANDLE),
+    infinitePayLegacyHandleConfigured: Boolean(process.env.INFINITIPAY_HANDLE),
+    infinitePayEffectiveHandleConfigured: Boolean(infinitePayHandle),
     webhookSecretConfigured: Boolean(webhookSecret),
     adminApiKeyConfigured: Boolean(adminApiKey && adminApiKey !== 'change-me'),
   };
@@ -764,7 +783,7 @@ async function handleHealth(req: IncomingMessage, res: ServerResponse) {
     });
     logRequest(req, 200, 'health_ok');
   } catch (error) {
-    logServerError(req, error);
+    const errorId = logServerError(req, error);
     json(res, 503, {
       ok: false,
       service: 'funpace-run-api',
@@ -772,6 +791,7 @@ async function handleHealth(req: IncomingMessage, res: ServerResponse) {
       database: { ok: false },
       checks,
       message: 'Banco de dados indisponivel.',
+      errorId,
     });
   }
 }
@@ -1173,8 +1193,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     json(res, 404, { message: 'Rota nao encontrada.' });
   } catch (error) {
-    logServerError(req, error);
-    json(res, 500, { message: 'Erro interno da API.' });
+    const errorId = logServerError(req, error);
+    json(res, 500, {
+      message: `Erro interno. Nossa equipe ja foi notificada. Codigo: ${errorId}.`,
+      errorId,
+    });
   }
 }
 
