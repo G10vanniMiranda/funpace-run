@@ -11,7 +11,7 @@ function createErrorId() {
 
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   try {
-    const { handleApiRequest } = await import('../server/index');
+    const { handleApiRequest } = await import('../server/index.ts');
     return await handleApiRequest(req, res);
   } catch (error) {
     const errorId = createErrorId();
@@ -26,9 +26,17 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       stack: error instanceof Error ? error.stack : undefined,
     }));
 
+    const debugEnabled = process.env.API_DEBUG_ERRORS === 'true';
+
     writeJson(res, 500, {
       message: 'Erro interno. Nossa equipe ja foi notificada.',
       errorId,
+      debug: debugEnabled && error instanceof Error
+        ? {
+          message: error.message,
+          stack: error.stack,
+        }
+        : undefined,
     });
   }
 }
