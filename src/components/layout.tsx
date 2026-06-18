@@ -6,7 +6,6 @@ export function Navbar() {
   const [isOpen, setIsOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
   const links = [
-    { href: '#about', label: 'A Prova' },
     { href: '#map', label: 'Percurso' },
     { href: '#register', label: 'Inscricoes' },
     { href: '#faq', label: 'FAQ' },
@@ -101,9 +100,6 @@ export function Footer() {
             Funpace<br />
             <span className="text-zinc-500 stroke-text">Run</span>
           </h2>
-          <p className="text-zinc-400 font-mono text-sm max-w-sm">
-            Destrua seus limites. Corrida oficial em {eventInfo.city}, Brasil - 2026.
-          </p>
           <a
             href={`mailto:${eventInfo.contactEmail}`}
             className="font-mono text-sm text-zinc-400 transition-colors hover:text-brand"

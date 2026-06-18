@@ -1,10 +1,10 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { validateRegistration } from '../src/lib/validation';
+import { validateRegistration } from '../src/lib/validation.js';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
-import { pingDatabase, transaction, type Database, type PaymentRecord, type RegistrationRecord } from './database';
-import { createInfinitePayCheckout, InfinitePayError } from './infinitepay';
+import { pingDatabase, transaction, type Database, type PartnershipLeadRecord, type PartnershipLeadStatus, type PaymentRecord, type RegistrationRecord } from './database.js';
+import { createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 
 const port = Number(process.env.API_PORT || 3001);
 const defaultAllowedOrigins = [
@@ -24,6 +24,7 @@ const apiPublicUrl = (process.env.API_PUBLIC_URL || appUrl).replace(/\/$/, '');
 const paymentProvider = process.env.PAYMENT_PROVIDER || '';
 const infinitePayHandle = process.env.INFINITEPAY_HANDLE || process.env.INFINITIPAY_HANDLE || '';
 const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
+const partnershipWebhookUrl = process.env.PARTNERSHIP_WEBHOOK_URL || '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
 const isProduction = process.env.NODE_ENV === 'production';
 const pendingPaymentTtlMinutesInput = Number(process.env.PENDING_PAYMENT_TTL_MINUTES || 30);
@@ -32,6 +33,7 @@ const pendingPaymentTtlMinutes = Number.isFinite(pendingPaymentTtlMinutesInput)
   : 30;
 
 const rateLimit = new Map<string, { count: number; resetAt: number }>();
+const partnershipRateLimit = new Map<string, { count: number; resetAt: number }>();
 
 function setCors(req: IncomingMessage, res: ServerResponse) {
   const origin = req.headers.origin;
@@ -139,6 +141,20 @@ function isRateLimited(req: IncomingMessage) {
   return bucket.count > 30;
 }
 
+function isPartnershipRateLimited(req: IncomingMessage) {
+  const key = getClientKey(req);
+  const now = Date.now();
+  const bucket = partnershipRateLimit.get(key);
+
+  if (!bucket || bucket.resetAt < now) {
+    partnershipRateLimit.set(key, { count: 1, resetAt: now + 60 * 60_000 });
+    return false;
+  }
+
+  bucket.count += 1;
+  return bucket.count > 5;
+}
+
 function readBody(req: IncomingMessage) {
   return new Promise<string>((resolve, reject) => {
     let body = '';
@@ -228,6 +244,101 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
     regulationAccepted: Boolean(input.regulationAccepted),
     privacyAccepted: Boolean(input.privacyAccepted),
   };
+}
+
+type PartnershipLeadPayload = {
+  companyName?: string;
+  contactName?: string;
+  contactRole?: string;
+  corporateEmail?: string;
+  involvementMessage?: string;
+  website?: string;
+};
+
+function compactText(value: unknown, maxLength: number) {
+  return String(value || '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function sanitizePartnershipLead(input: PartnershipLeadPayload) {
+  return {
+    companyName: compactText(input.companyName, 140),
+    contactName: compactText(input.contactName, 120),
+    contactRole: compactText(input.contactRole, 120),
+    corporateEmail: compactText(input.corporateEmail, 180).toLowerCase(),
+    involvementMessage: compactText(input.involvementMessage, 2000),
+    website: compactText(input.website, 180),
+  };
+}
+
+function validatePartnershipLead(payload: ReturnType<typeof sanitizePartnershipLead>) {
+  const errors: Record<string, string> = {};
+  const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payload.corporateEmail);
+
+  if (!payload.companyName) {
+    errors.companyName = 'Informe o nome da empresa.';
+  }
+
+  if (!payload.contactName) {
+    errors.contactName = 'Informe o nome do contato.';
+  }
+
+  if (!payload.contactRole) {
+    errors.contactRole = 'Informe o cargo ou area do contato.';
+  }
+
+  if (!emailIsValid) {
+    errors.corporateEmail = 'Informe um e-mail corporativo valido.';
+  }
+
+  if (payload.involvementMessage.length < 10) {
+    errors.involvementMessage = 'Descreva como a empresa gostaria de participar.';
+  }
+
+  return errors;
+}
+
+function toAdminPartnershipLead(lead: PartnershipLeadRecord) {
+  return {
+    id: lead.id,
+    companyName: lead.companyName,
+    contactName: lead.contactName,
+    contactRole: lead.contactRole,
+    corporateEmail: lead.corporateEmail,
+    involvementMessage: lead.involvementMessage,
+    status: lead.status,
+    source: lead.source,
+    createdAt: lead.createdAt,
+    updatedAt: lead.updatedAt,
+  };
+}
+
+async function notifyPartnershipTeam(lead: PartnershipLeadRecord) {
+  if (!partnershipWebhookUrl) {
+    return;
+  }
+
+  try {
+    await fetch(partnershipWebhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'partnership.lead_created',
+        lead: toAdminPartnershipLead(lead),
+      }),
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      at: new Date().toISOString(),
+      error: error instanceof Error ? error.message : 'Unknown partnership notification error',
+      message: 'partnership_notification_failed',
+    }));
+  }
 }
 
 function verifyWebhookSignature(rawBody: string, signature: string | undefined) {
@@ -580,6 +691,68 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   const { statusCode, amountCents: _amountCents, description: _description, ...payloadResponse } = response;
   logRequest(req, statusCode, response.registrationId ? 'registration_processed' : 'registration_rejected');
   json(res, statusCode, payloadResponse);
+}
+
+async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse) {
+  if (!requireJson(req, res)) {
+    return;
+  }
+
+  if (isPartnershipRateLimited(req)) {
+    json(res, 429, { message: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' });
+    return;
+  }
+
+  const rawBody = await readBody(req);
+  const parsedBody = parseJsonBody<PartnershipLeadPayload>(rawBody);
+
+  if (!parsedBody) {
+    json(res, 400, { message: 'JSON invalido.' });
+    return;
+  }
+
+  const payload = sanitizePartnershipLead(parsedBody);
+
+  if (payload.website) {
+    json(res, 201, {
+      id: '',
+      message: 'Proposta enviada com sucesso. Nossa equipe entrara em contato em breve.',
+    });
+    return;
+  }
+
+  const errors = validatePartnershipLead(payload);
+
+  if (Object.keys(errors).length > 0) {
+    json(res, 422, { message: 'Dados da proposta invalidos.', errors });
+    return;
+  }
+
+  const lead = await transaction<PartnershipLeadRecord>((database) => {
+    const now = new Date().toISOString();
+    const nextLead: PartnershipLeadRecord = {
+      id: randomUUID(),
+      companyName: payload.companyName,
+      contactName: payload.contactName,
+      contactRole: payload.contactRole,
+      corporateEmail: payload.corporateEmail,
+      involvementMessage: payload.involvementMessage,
+      status: 'new',
+      source: 'site',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    database.partnershipLeads.push(nextLead);
+    return nextLead;
+  });
+
+  await notifyPartnershipTeam(lead);
+  logRequest(req, 201, 'partnership_lead_created');
+  json(res, 201, {
+    id: lead.id,
+    message: 'Proposta enviada com sucesso. Nossa equipe entrara em contato em breve.',
+  });
 }
 
 async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
@@ -1063,6 +1236,66 @@ async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse) {
   json(res, 200, { logs });
 }
 
+async function handleAdminPartnerships(req: IncomingMessage, res: ServerResponse) {
+  if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  const database = await transaction((currentDatabase) => currentDatabase);
+  const partnerships = database.partnershipLeads
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map(toAdminPartnershipLead);
+
+  json(res, 200, { partnerships });
+}
+
+async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerResponse, partnershipId: string) {
+  if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  if (!requireJson(req, res)) {
+    return;
+  }
+
+  const rawBody = await readBody(req);
+  const payload = parseJsonBody<{ status?: PartnershipLeadStatus }>(rawBody);
+  const allowedStatuses: PartnershipLeadStatus[] = ['new', 'contacted', 'negotiating', 'approved', 'rejected'];
+  const nextStatus = payload?.status;
+
+  if (!nextStatus || !allowedStatuses.includes(nextStatus)) {
+    json(res, 422, { message: 'Status de parceria invalido.' });
+    return;
+  }
+
+  const actor = getAdminActor(req);
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const lead = database.partnershipLeads.find((item) => item.id === partnershipId);
+
+    if (!lead) {
+      return { statusCode: 404, payload: { message: 'Proposta de parceria nao encontrada.' } };
+    }
+
+    lead.status = nextStatus;
+    lead.updatedAt = new Date().toISOString();
+
+    database.auditLogs.push({
+      id: randomUUID(),
+      actor,
+      action: 'partnership.status_updated',
+      entityType: 'partnership',
+      entityId: lead.id,
+      payload: { status: nextStatus },
+      createdAt: new Date().toISOString(),
+    });
+
+    return { statusCode: 200, payload: { partnership: toAdminPartnershipLead(lead) } };
+  });
+
+  json(res, result.statusCode, result.payload);
+}
+
 function escapeCsv(value: unknown) {
   const text = String(value ?? '');
   return `"${text.replace(/"/g, '""')}"`;
@@ -1120,6 +1353,43 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
   csv(res, 'funpace-run-inscritos.csv', [headers.join(','), ...lines].join('\n'));
 }
 
+async function handleAdminPartnershipsCsv(req: IncomingMessage, res: ServerResponse) {
+  if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  const database = await transaction((currentDatabase) => currentDatabase);
+  const rows = database.partnershipLeads
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const headers = [
+    'id',
+    'empresa',
+    'contato',
+    'cargo',
+    'email',
+    'mensagem',
+    'status',
+    'origem',
+    'criado_em',
+    'atualizado_em',
+  ];
+  const lines = rows.map((row) => [
+    row.id,
+    row.companyName,
+    row.contactName,
+    row.contactRole,
+    row.corporateEmail,
+    row.involvementMessage,
+    row.status,
+    row.source,
+    row.createdAt,
+    row.updatedAt,
+  ].map(escapeCsv).join(','));
+
+  csv(res, 'funpace-run-parceiros.csv', [headers.join(','), ...lines].join('\n'));
+}
+
 export async function handleApiRequest(req: IncomingMessage, res: ServerResponse) {
   setCors(req, res);
 
@@ -1139,6 +1409,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     if (req.method === 'POST' && url.pathname === '/api/registrations') {
       await handleCreateRegistration(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/partnerships') {
+      await handleCreatePartnership(req, res);
       return;
     }
 
@@ -1169,6 +1444,23 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     if (req.method === 'GET' && url.pathname === '/api/admin/audit-logs') {
       await handleAdminAuditLogs(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/admin/partnerships') {
+      await handleAdminPartnerships(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/admin/partnerships.csv') {
+      await handleAdminPartnershipsCsv(req, res);
+      return;
+    }
+
+    const adminPartnershipAction = url.pathname.match(/^\/api\/admin\/partnerships\/([^/]+)\/status$/);
+
+    if (req.method === 'POST' && adminPartnershipAction) {
+      await handleAdminPartnershipStatus(req, res, decodeURIComponent(adminPartnershipAction[1]));
       return;
     }
 

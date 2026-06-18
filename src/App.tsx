@@ -1,5 +1,4 @@
 import { Navbar, Marquee, Footer } from "./components/layout";
-import { AboutSection } from "./components/about";
 import { Hero } from "./components/hero";
 import { RegistrationSection, SponsorSection } from "./components/forms";
 import { CourseMap, Gallery } from "./components/visuals";
@@ -39,7 +38,6 @@ export default function App() {
       <Navbar />
       <Hero />
       <Marquee />
-      <AboutSection />
       <RegistrationSection />
       <CourseMap />
       <Gallery />

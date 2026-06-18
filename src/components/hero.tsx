@@ -81,18 +81,6 @@ export function Hero() {
       <div className="pointer-events-none absolute -right-48 top-24 h-[min(72vw,740px)] w-[min(72vw,740px)] rounded-full border border-brand/15 shadow-[0_0_120px_rgba(215,255,0,0.08)]" />
 
       <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col items-start">
-        <motion.div
-          initial={reducedMotion ? false : { opacity: 0, y: 20, filter: 'blur(3px)' }}
-          animate={reducedMotion ? undefined : { opacity: 1, y: 0, filter: 'blur(0px)' }}
-          transition={{ duration: 0.8, ease: 'easeOut' }}
-          className="mb-5 flex max-w-full items-center gap-3 text-brand sm:gap-4 md:mb-10"
-        >
-          <div className="h-0.5 w-8 shrink-0 bg-brand shadow-[0_0_18px_rgba(215,255,0,0.55)] sm:w-12" />
-          <span className="min-w-0 text-xs font-bold uppercase tracking-widest sm:text-sm md:text-base">
-            {eventInfo.edition} - {eventInfo.city}
-          </span>
-        </motion.div>
-
         <motion.h1
           className="ml-[-0.04em] max-w-full font-display text-[clamp(3.7rem,18vw,12rem)] font-black uppercase leading-[0.82] tracking-tighter text-white sm:text-[clamp(5.8rem,12vw,12rem)]"
           initial={reducedMotion ? false : { opacity: 0, y: 50, clipPath: 'inset(0 0 24% 0)' }}
@@ -118,9 +106,6 @@ export function Hero() {
             <span>Garantir inscricao - {eventInfo.currentLot}</span>
             <ArrowRight className="h-5 w-5 shrink-0" />
           </a>
-          <p className="max-w-md font-mono text-sm leading-relaxed text-zinc-300 md:text-base">
-            Corrida oficial FunPace com {eventInfo.distances.join(' e ')}, kit atleta, chip e medalha finisher.
-          </p>
         </motion.div>
 
         <motion.div

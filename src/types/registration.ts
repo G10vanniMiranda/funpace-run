@@ -160,3 +160,45 @@ export type AdminAuditLog = {
 export type AdminAuditLogsResponse = {
   logs: AdminAuditLog[];
 };
+
+export type PartnershipLeadStatus =
+  | 'new'
+  | 'contacted'
+  | 'negotiating'
+  | 'approved'
+  | 'rejected';
+
+export type PartnershipLeadRequest = {
+  companyName: string;
+  contactName: string;
+  contactRole: string;
+  corporateEmail: string;
+  involvementMessage: string;
+  website?: string;
+};
+
+export type PartnershipLeadResponse = {
+  id: string;
+  message: string;
+};
+
+export type AdminPartnershipLead = {
+  id: string;
+  companyName: string;
+  contactName: string;
+  contactRole: string;
+  corporateEmail: string;
+  involvementMessage: string;
+  status: PartnershipLeadStatus;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AdminPartnershipsResponse = {
+  partnerships: AdminPartnershipLead[];
+};
+
+export type AdminPartnershipActionResponse = {
+  partnership: AdminPartnershipLead;
+};

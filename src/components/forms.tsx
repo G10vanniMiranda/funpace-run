@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import { AlertTriangle, ArrowRight, Building, CheckCircle2, Info, Loader2, XCircle, Zap } from 'lucide-react';
 import { eventInfo } from '../config/event';
-import { ApiError, createRegistration, getAvailability } from '../lib/api';
+import { ApiError, createPartnershipLead, createRegistration, getAvailability } from '../lib/api';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import { Reveal } from './premium';
@@ -36,7 +36,6 @@ export function RegistrationSection() {
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const activeLot = availability?.lots.find((lot) => lot.status === 'active') || availability?.lots[0];
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
-  const lotRemaining = activeLot?.remaining ?? eventInfo.currentLotCapacity;
   const selectedDistanceAvailability = availability?.distances.find((distance) => distance.name === formData.distance);
   const isSubmitting = status === 'submitting';
 
@@ -127,20 +126,14 @@ export function RegistrationSection() {
             Não fique <br />para trás.
           </h2>
           <p className="mb-8 max-w-md text-base font-medium leading-relaxed opacity-80 sm:text-lg md:mb-10 md:text-xl">
-            As vagas do {eventInfo.currentLot} serao liberadas com pagamento online. A vaga so sera garantida apos pagamento aprovado.
+            Garanta agora sua vaga no valor promocional do primeiro lote.
           </p>
 
-          <div className="mb-6 grid max-w-md grid-cols-2 gap-3 sm:mb-8">
+          <div className="mb-6 grid max-w-md grid-cols-1 gap-3 sm:mb-8">
             <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
               <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Valor atual</p>
               <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
                 {(lotPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
-              </p>
-            </div>
-            <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
-              <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Vagas lote</p>
-              <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
-                {lotRemaining}
               </p>
             </div>
           </div>
@@ -351,12 +344,99 @@ function AlertMessage({
 }
 
 export function SponsorSection() {
-  const [success, setSuccess] = useState(false);
+  const [formData, setFormData] = useState({
+    companyName: '',
+    contactNameRole: '',
+    corporateEmail: '',
+    involvementMessage: '',
+    website: '',
+  });
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState<null | 'submitting' | 'success' | 'error'>(null);
+  const isSubmitting = status === 'submitting';
 
-  const handleSubmit = (event: FormEvent) => {
+  const validateSponsor = () => {
+    const nextErrors: Record<string, string> = {};
+    const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.corporateEmail.trim());
+
+    if (!formData.companyName.trim()) {
+      nextErrors.companyName = 'Informe o nome da empresa.';
+    }
+
+    if (!formData.contactNameRole.trim()) {
+      nextErrors.contactNameRole = 'Informe seu nome e cargo.';
+    }
+
+    if (!emailIsValid) {
+      nextErrors.corporateEmail = 'Informe um e-mail corporativo valido.';
+    }
+
+    if (formData.involvementMessage.trim().length < 10) {
+      nextErrors.involvementMessage = 'Descreva como gostaria de participar.';
+    }
+
+    return nextErrors;
+  };
+
+  const updateSponsorField = (field: keyof typeof formData, value: string) => {
+    const nextData = { ...formData, [field]: value };
+
+    setFormData(nextData);
+
+    if (Object.keys(errors).length > 0) {
+      setErrors({});
+    }
+
+    if (status === 'error' || status === 'success') {
+      setStatus(null);
+    }
+  };
+
+  const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 3000);
+
+    if (isSubmitting) {
+      return;
+    }
+
+    const nextErrors = validateSponsor();
+    setErrors(nextErrors);
+
+    if (Object.keys(nextErrors).length > 0) {
+      setStatus('error');
+      return;
+    }
+
+    const [contactName, ...roleParts] = formData.contactNameRole.split('/').map((item) => item.trim()).filter(Boolean);
+
+    setStatus('submitting');
+
+    try {
+      await createPartnershipLead({
+        companyName: formData.companyName,
+        contactName: contactName || formData.contactNameRole,
+        contactRole: roleParts.join(' / ') || 'Nao informado',
+        corporateEmail: formData.corporateEmail,
+        involvementMessage: formData.involvementMessage,
+        website: formData.website,
+      });
+
+      setStatus('success');
+      setErrors({});
+      setFormData({
+        companyName: '',
+        contactNameRole: '',
+        corporateEmail: '',
+        involvementMessage: '',
+        website: '',
+      });
+    } catch (error) {
+      setStatus('error');
+
+      if (error instanceof ApiError && error.errors) {
+        setErrors(error.errors);
+      }
+    }
   };
 
   return (
@@ -364,27 +444,57 @@ export function SponsorSection() {
       <Reveal className="premium-card relative z-10 mx-auto max-w-4xl p-5 text-center sm:p-8 md:p-16">
         <Building className="mx-auto mb-6 h-12 w-12 text-brand" />
         <h2 className="mb-4 font-display text-[clamp(2.4rem,10vw,3rem)] font-black uppercase leading-none tracking-tighter text-white">
-          Seja um Parceiro
+          Seja um Patrocinador
         </h2>
         <p className="mx-auto mb-8 max-w-lg font-mono text-sm leading-relaxed text-zinc-400 md:mb-10">
           Posicione sua marca em um evento premium focado em performance, saude e inovacao. Preencha os dados e nossa equipe de branding entrara em contato.
         </p>
 
         <form onSubmit={handleSubmit} className="mx-auto max-w-2xl space-y-5 text-left sm:space-y-6">
+          <input
+            type="text"
+            value={formData.website}
+            onChange={(event) => updateSponsorField('website', event.target.value)}
+            className="hidden"
+            tabIndex={-1}
+            autoComplete="off"
+            aria-hidden="true"
+          />
           <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
-            <input required type="text" placeholder="Nome da Empresa" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors" />
-            <input required type="text" placeholder="Seu Nome / Cargo" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors" />
-            <input required type="email" placeholder="E-mail Corporativo" className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors md:col-span-2" />
-            <textarea
-              required
-              placeholder="Como gostaria de se envolver no evento? (Ex: Patrocinio Master, Ativacao Tenda, etc)"
-              rows={4}
-              className="bg-zinc-900 border border-zinc-800 p-4 text-white focus:border-brand focus:outline-none transition-colors md:col-span-2 resize-none"
-            />
+            <SponsorField error={errors.companyName}>
+              <input required type="text" value={formData.companyName} onChange={(event) => updateSponsorField('companyName', event.target.value)} placeholder="Nome da Empresa" className="w-full border border-zinc-800 bg-zinc-900 p-4 text-white transition-colors focus:border-brand focus:outline-none" />
+            </SponsorField>
+            <SponsorField error={errors.contactNameRole}>
+              <input required type="text" value={formData.contactNameRole} onChange={(event) => updateSponsorField('contactNameRole', event.target.value)} placeholder="Seu Nome / Cargo" className="w-full border border-zinc-800 bg-zinc-900 p-4 text-white transition-colors focus:border-brand focus:outline-none" />
+            </SponsorField>
+            <SponsorField error={errors.corporateEmail} className="md:col-span-2">
+              <input required type="email" value={formData.corporateEmail} onChange={(event) => updateSponsorField('corporateEmail', event.target.value)} placeholder="E-mail Corporativo" className="w-full border border-zinc-800 bg-zinc-900 p-4 text-white transition-colors focus:border-brand focus:outline-none" />
+            </SponsorField>
+            <SponsorField error={errors.involvementMessage} className="md:col-span-2">
+              <textarea
+                required
+                value={formData.involvementMessage}
+                onChange={(event) => updateSponsorField('involvementMessage', event.target.value)}
+                placeholder="Como gostaria de se envolver no evento? (Ex: Patrocinio Master, Ativacao Tenda, etc)"
+                rows={4}
+                className="w-full resize-none border border-zinc-800 bg-zinc-900 p-4 text-white transition-colors focus:border-brand focus:outline-none"
+              />
+            </SponsorField>
           </div>
-          <button type="submit" className="premium-button min-h-14 w-full bg-white p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-brand">
-            {success ? 'ENVIADO COM SUCESSO' : 'ENVIAR PROPOSTA'}
+          <button type="submit" disabled={isSubmitting} className="premium-button flex min-h-14 w-full items-center justify-center gap-2 bg-white p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-brand disabled:cursor-wait disabled:opacity-70">
+            {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+            {isSubmitting ? 'ENVIANDO PROPOSTA' : 'ENVIAR PROPOSTA'}
           </button>
+          {status === 'success' && (
+            <AlertMessage tone="success" title="Proposta enviada">
+              Proposta enviada com sucesso. Nossa equipe entrara em contato em breve.
+            </AlertMessage>
+          )}
+          {status === 'error' && (
+            <AlertMessage tone="error" title="Erro">
+              Nao foi possivel enviar sua proposta agora. Tente novamente em alguns instantes.
+            </AlertMessage>
+          )}
         </form>
       </Reveal>
 
@@ -394,5 +504,14 @@ export function SponsorSection() {
         </h2>
       </div>
     </section>
+  );
+}
+
+function SponsorField({ error, className = '', children }: { error?: string; className?: string; children: ReactNode }) {
+  return (
+    <div className={`min-w-0 ${className}`}>
+      {children}
+      {error && <p className="mt-2 text-xs font-bold uppercase tracking-wider text-brand">{error}</p>}
+    </div>
   );
 }

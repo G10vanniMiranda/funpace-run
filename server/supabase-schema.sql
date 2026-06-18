@@ -95,12 +95,27 @@ create table if not exists "run-audit-logs" (
   created_at text not null
 );
 
+create table if not exists "run-partnership-leads" (
+  id text primary key,
+  company_name text not null,
+  contact_name text not null,
+  contact_role text not null,
+  corporate_email text not null,
+  involvement_message text not null,
+  status text not null check (status in ('new', 'contacted', 'negotiating', 'approved', 'rejected')),
+  source text not null,
+  created_at text not null,
+  updated_at text not null
+);
+
 create index if not exists "run-registrations_cpf_hash_idx" on "run-registrations"(cpf_hash);
 create index if not exists "run-registrations_status_idx" on "run-registrations"(status);
 create index if not exists "run-payments_registration_id_idx" on "run-payments"(registration_id);
 create unique index if not exists "run-check-ins_registration_id_idx" on "run-check-ins"(registration_id);
 create unique index if not exists "run-kit-deliveries_registration_id_idx" on "run-kit-deliveries"(registration_id);
 create index if not exists "run-audit-logs_entity_idx" on "run-audit-logs"(entity_type, entity_id);
+create index if not exists "run-partnership-leads_status_idx" on "run-partnership-leads"(status);
+create index if not exists "run-partnership-leads_created_at_idx" on "run-partnership-leads"(created_at);
 
 alter table "run-registrations" add column if not exists expires_at text;
 alter table "run-payments" add column if not exists expires_at text;

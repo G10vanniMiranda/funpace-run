@@ -1,10 +1,14 @@
 import type {
   AdminAuditLogsResponse,
+  AdminPartnershipActionResponse,
+  AdminPartnershipsResponse,
   AdminRegistrationsResponse,
   AdminRegistrationActionResponse,
   AdminSummaryResponse,
   AvailabilityResponse,
   CreateRegistrationResponse,
+  PartnershipLeadRequest,
+  PartnershipLeadResponse,
   RegistrationFormData,
   RegistrationStatusResponse,
 } from '../types/registration';
@@ -271,6 +275,14 @@ export function getRegistrationStatus(registrationId: string) {
   });
 }
 
+export function createPartnershipLead(data: PartnershipLeadRequest) {
+  return apiFetch<PartnershipLeadResponse>('/api/partnerships', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    retry: true,
+  });
+}
+
 function toQueryString(filters: Record<string, string>) {
   const params = new URLSearchParams();
 
@@ -311,6 +323,28 @@ export function getAdminAuditLogs(adminKey: string) {
 
 export function getAdminCsvUrl(filters: Record<string, string>) {
   return getApiUrl(`/api/admin/registrations.csv${toQueryString(filters)}`);
+}
+
+export function getAdminPartnerships(adminKey: string) {
+  return adminFetch<AdminPartnershipsResponse>('/api/admin/partnerships', adminKey);
+}
+
+export function getAdminPartnershipsCsvUrl() {
+  return getApiUrl('/api/admin/partnerships.csv');
+}
+
+export function updateAdminPartnershipStatus(adminKey: string, partnershipId: string, status: string) {
+  return adminFetch<AdminPartnershipActionResponse>(
+    `/api/admin/partnerships/${encodeURIComponent(partnershipId)}/status`,
+    adminKey,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ status }),
+    },
+  );
 }
 
 function postAdminRegistrationAction(adminKey: string, registrationId: string, action: 'check-in' | 'kit') {

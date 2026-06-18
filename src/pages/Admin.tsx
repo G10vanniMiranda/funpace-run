@@ -19,6 +19,7 @@ import {
   FileText,
   Flag,
   Gift,
+  Handshake,
   LayoutDashboard,
   Loader2,
   Lock,
@@ -49,10 +50,13 @@ import {
   deliverAdminKit,
   getAdminAuditLogs,
   getAdminCsvUrl,
+  getAdminPartnerships,
+  getAdminPartnershipsCsvUrl,
   getAdminRegistrations,
   getAdminSummary,
+  updateAdminPartnershipStatus,
 } from '../lib/api';
-import type { AdminAuditLog, AdminRegistration, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
+import type { AdminAuditLog, AdminPartnershipLead, AdminRegistration, AdminSummaryResponse, PartnershipLeadStatus, RegistrationStatus } from '../types/registration';
 
 type AdminFilters = {
   status: string;
@@ -91,6 +95,7 @@ const navItems: Array<{ label: string; icon: LucideIcon; status?: 'soon' }> = [
   { label: 'Inscricoes', icon: Ticket },
   { label: 'Atletas', icon: Users },
   { label: 'Pagamentos', icon: CreditCard },
+  { label: 'Parceiros', icon: Handshake },
   { label: 'Lotes', icon: Flag },
   { label: 'Cupons', icon: Percent, status: 'soon' },
   { label: 'Check-in', icon: ClipboardCheck },
@@ -127,6 +132,7 @@ export function AdminPage() {
   const [draftKey, setDraftKey] = useState(adminKey);
   const [summary, setSummary] = useState<AdminSummaryResponse | null>(null);
   const [registrations, setRegistrations] = useState<AdminRegistration[]>([]);
+  const [partnerships, setPartnerships] = useState<AdminPartnershipLead[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
   const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '' });
   const [error, setError] = useState('');
@@ -157,6 +163,11 @@ export function AdminPage() {
       setSummary(summaryResponse);
       setRegistrations(registrationsResponse.registrations);
       setAuditLogs(auditLogsResponse.logs);
+
+      if (activeNav === 'Parceiros') {
+        const partnershipsResponse = await getAdminPartnerships(key);
+        setPartnerships(partnershipsResponse.partnerships);
+      }
     } catch (requestError) {
       const message = requestError instanceof ApiError
         ? requestError.message
@@ -169,7 +180,7 @@ export function AdminPage() {
 
   useEffect(() => {
     void loadAdminData();
-  }, [filters.status, filters.distanceId, filters.lotId]);
+  }, [filters.status, filters.distanceId, filters.lotId, activeNav]);
 
   const handleLogin = (event: FormEvent) => {
     event.preventDefault();
@@ -188,7 +199,7 @@ export function AdminPage() {
       return;
     }
 
-    const response = await fetch(csvUrl, {
+    const response = await fetch(activeNav === 'Parceiros' ? getAdminPartnershipsCsvUrl() : csvUrl, {
       headers: {
         'X-Admin-Key': adminKey,
       },
@@ -198,9 +209,21 @@ export function AdminPage() {
     const link = document.createElement('a');
 
     link.href = url;
-    link.download = 'funpace-run-inscritos.csv';
+    link.download = activeNav === 'Parceiros' ? 'funpace-run-parceiros.csv' : 'funpace-run-inscritos.csv';
     link.click();
     window.URL.revokeObjectURL(url);
+  };
+
+  const handlePartnershipStatus = async (partnershipId: string, status: PartnershipLeadStatus) => {
+    setError('');
+
+    try {
+      const response = await updateAdminPartnershipStatus(adminKey, partnershipId, status);
+      setPartnerships((current) => current.map((item) => (item.id === partnershipId ? response.partnership : item)));
+      await loadAdminData();
+    } catch (requestError) {
+      setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel atualizar a proposta.');
+    }
   };
 
   const updateRegistration = (registration: AdminRegistration) => {
@@ -287,39 +310,49 @@ export function AdminPage() {
               <StatusMessage tone="error" message={error} />
             )}
 
-            <EventHero summary={summary} dashboard={dashboard} />
+            {activeNav === 'Parceiros' ? (
+              <PartnershipsPanel
+                partnerships={partnerships}
+                loading={loading}
+                onStatusChange={handlePartnershipStatus}
+              />
+            ) : (
+              <>
+                <EventHero summary={summary} dashboard={dashboard} />
 
-            <KpiGrid dashboard={dashboard} loading={loading && !summary} />
+                <KpiGrid dashboard={dashboard} loading={loading && !summary} />
 
-            <div className="mt-6 grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
-              <Panel title="Inscricoes por dia" eyebrow="Performance comercial" action="Ultimos registros">
-                <TimelineChart data={dashboard.dailyRegistrations} />
-              </Panel>
+                <div className="mt-6 grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
+                  <Panel title="Inscricoes por dia" eyebrow="Performance comercial" action="Ultimos registros">
+                    <TimelineChart data={dashboard.dailyRegistrations} />
+                  </Panel>
 
-              <Panel title="Lotes e distancias" eyebrow="Capacidade">
-                <LotDistancePanel summary={summary} />
-              </Panel>
-            </div>
+                  <Panel title="Lotes e distancias" eyebrow="Capacidade">
+                    <LotDistancePanel summary={summary} />
+                  </Panel>
+                </div>
 
-            <div className="mt-4 grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-              <Panel title="Receita por dia" eyebrow="Financeiro">
-                <RevenueChart data={dashboard.dailyRevenue} />
-              </Panel>
+                <div className="mt-4 grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+                  <Panel title="Receita por dia" eyebrow="Financeiro">
+                    <RevenueChart data={dashboard.dailyRevenue} />
+                  </Panel>
 
-              <Panel title="Operacao presencial" eyebrow="Check-in, kit e logs">
-                <OperationsPanel auditLogs={auditLogs} />
-              </Panel>
-            </div>
+                  <Panel title="Operacao presencial" eyebrow="Check-in, kit e logs">
+                    <OperationsPanel auditLogs={auditLogs} />
+                  </Panel>
+                </div>
 
-            <RegistrationsPanel
-              summary={summary}
-              registrations={registrations}
-              filters={filters}
-              loading={loading}
-              onFiltersChange={setFilters}
-              onSearch={handleSearch}
-              onOpenRegistration={setSelectedRegistration}
-            />
+                <RegistrationsPanel
+                  summary={summary}
+                  registrations={registrations}
+                  filters={filters}
+                  loading={loading}
+                  onFiltersChange={setFilters}
+                  onSearch={handleSearch}
+                  onOpenRegistration={setSelectedRegistration}
+                />
+              </>
+            )}
           </div>
         </section>
       </div>
@@ -593,6 +626,107 @@ function KpiCard({
         <span>{detail}</span>
       </div>
     </div>
+  );
+}
+
+const partnershipStatusOptions: Array<{ value: PartnershipLeadStatus; label: string }> = [
+  { value: 'new', label: 'Novo' },
+  { value: 'contacted', label: 'Contatado' },
+  { value: 'negotiating', label: 'Negociando' },
+  { value: 'approved', label: 'Aprovado' },
+  { value: 'rejected', label: 'Rejeitado' },
+];
+
+const partnershipStatusLabels: Record<PartnershipLeadStatus, string> = {
+  new: 'Novo',
+  contacted: 'Contatado',
+  negotiating: 'Negociando',
+  approved: 'Aprovado',
+  rejected: 'Rejeitado',
+};
+
+function PartnershipsPanel({
+  partnerships,
+  loading,
+  onStatusChange,
+}: {
+  partnerships: AdminPartnershipLead[];
+  loading: boolean;
+  onStatusChange: (partnershipId: string, status: PartnershipLeadStatus) => void;
+}) {
+  return (
+    <section className="border border-white/10 bg-zinc-950/80">
+      <div className="border-b border-white/10 p-4 md:p-5">
+        <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-brand">Parceiros</p>
+            <h2 className="mt-2 text-2xl font-black tracking-tight">Propostas de parceria</h2>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
+              Leads comerciais enviados pelo formulario publico. Use o status para acompanhar contato, negociacao e aprovacao.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs font-bold uppercase tracking-widest text-zinc-500">
+            <span className="border border-white/10 px-2.5 py-1">{partnerships.length} propostas</span>
+            <span className="border border-white/10 px-2.5 py-1">Exportacao CSV no topo</span>
+          </div>
+        </div>
+      </div>
+
+      {loading && partnerships.length === 0 ? (
+        <TableSkeleton />
+      ) : partnerships.length === 0 ? (
+        <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+          <Handshake className="h-10 w-10 text-zinc-600" />
+          <h3 className="mt-5 text-xl font-black">Nenhuma proposta recebida</h3>
+          <p className="mt-2 max-w-md text-sm leading-relaxed text-zinc-500">
+            Quando uma empresa enviar interesse pelo site, a proposta aparecera nesta mesa comercial.
+          </p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1060px] text-left">
+            <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
+              <tr>
+                <th className="p-4">Empresa</th>
+                <th className="p-4">Contato</th>
+                <th className="p-4">Mensagem</th>
+                <th className="p-4">Status</th>
+                <th className="p-4">Recebido em</th>
+              </tr>
+            </thead>
+            <tbody>
+              {partnerships.map((partnership) => (
+                <tr key={partnership.id} className="border-t border-white/10 transition-colors hover:bg-white/[0.03]">
+                  <td className="p-4">
+                    <p className="font-bold">{partnership.companyName}</p>
+                    <p className="mt-1 font-mono text-xs text-zinc-500">{partnership.id}</p>
+                  </td>
+                  <td className="p-4">
+                    <p className="font-bold text-zinc-200">{partnership.contactName}</p>
+                    <p className="mt-1 text-sm text-zinc-500">{partnership.contactRole}</p>
+                    <p className="mt-1 font-mono text-xs text-zinc-400">{partnership.corporateEmail}</p>
+                  </td>
+                  <td className="max-w-xl p-4 text-sm leading-relaxed text-zinc-300">{partnership.involvementMessage}</td>
+                  <td className="p-4">
+                    <select
+                      value={partnership.status}
+                      onChange={(event) => onStatusChange(partnership.id, event.target.value as PartnershipLeadStatus)}
+                      className="min-h-10 border border-zinc-800 bg-black p-2 text-sm font-bold text-white outline-none transition-colors focus:border-brand"
+                    >
+                      {partnershipStatusOptions.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <p className="mt-2 text-xs font-black uppercase tracking-widest text-brand">{partnershipStatusLabels[partnership.status]}</p>
+                  </td>
+                  <td className="p-4 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(partnership.createdAt))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

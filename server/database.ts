@@ -102,6 +102,21 @@ export type AuditLogRecord = {
   createdAt: string;
 };
 
+export type PartnershipLeadStatus = 'new' | 'contacted' | 'negotiating' | 'approved' | 'rejected';
+
+export type PartnershipLeadRecord = {
+  id: string;
+  companyName: string;
+  contactName: string;
+  contactRole: string;
+  corporateEmail: string;
+  involvementMessage: string;
+  status: PartnershipLeadStatus;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type Database = {
   events: EventRecord[];
   distances: DistanceRecord[];
@@ -112,6 +127,7 @@ export type Database = {
   checkIns: CheckInRecord[];
   kitDeliveries: KitDeliveryRecord[];
   auditLogs: AuditLogRecord[];
+  partnershipLeads: PartnershipLeadRecord[];
 };
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
@@ -131,6 +147,7 @@ const table = {
   checkIns: '"run-check-ins"',
   kitDeliveries: '"run-kit-deliveries"',
   auditLogs: '"run-audit-logs"',
+  partnershipLeads: '"run-partnership-leads"',
 } as const;
 
 const initialDatabase: Database = {
@@ -184,6 +201,7 @@ const initialDatabase: Database = {
   checkIns: [],
   kitDeliveries: [],
   auditLogs: [],
+  partnershipLeads: [],
 };
 
 const pool = databaseUrl
@@ -221,6 +239,7 @@ function normalizeDatabase(database: Partial<Database>): Database {
     checkIns: database.checkIns || [],
     kitDeliveries: database.kitDeliveries || [],
     auditLogs: database.auditLogs || [],
+    partnershipLeads: database.partnershipLeads || [],
   };
 }
 
@@ -336,12 +355,27 @@ async function ensurePostgresDatabase(client: Queryable) {
       created_at text not null
     );
 
+    create table if not exists ${table.partnershipLeads} (
+      id text primary key,
+      company_name text not null,
+      contact_name text not null,
+      contact_role text not null,
+      corporate_email text not null,
+      involvement_message text not null,
+      status text not null check (status in ('new', 'contacted', 'negotiating', 'approved', 'rejected')),
+      source text not null,
+      created_at text not null,
+      updated_at text not null
+    );
+
     create index if not exists "run-registrations_cpf_hash_idx" on ${table.registrations}(cpf_hash);
     create index if not exists "run-registrations_status_idx" on ${table.registrations}(status);
     create index if not exists "run-payments_registration_id_idx" on ${table.payments}(registration_id);
     create unique index if not exists "run-check-ins_registration_id_idx" on ${table.checkIns}(registration_id);
     create unique index if not exists "run-kit-deliveries_registration_id_idx" on ${table.kitDeliveries}(registration_id);
     create index if not exists "run-audit-logs_entity_idx" on ${table.auditLogs}(entity_type, entity_id);
+    create index if not exists "run-partnership-leads_status_idx" on ${table.partnershipLeads}(status);
+    create index if not exists "run-partnership-leads_created_at_idx" on ${table.partnershipLeads}(created_at);
   `);
 
   await client.query(`alter table ${table.registrations} add column if not exists expires_at text`);
@@ -365,7 +399,7 @@ async function ensurePostgresReady() {
 async function readPostgresDatabase(client: Queryable): Promise<Database> {
   await ensurePostgresReady();
 
-  const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs] = await Promise.all([
+  const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs, partnershipLeads] = await Promise.all([
     client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`),
     client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`),
     client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`),
@@ -375,6 +409,7 @@ async function readPostgresDatabase(client: Queryable): Promise<Database> {
     client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`),
     client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`),
     client.query(`select id, actor, action, entity_type, entity_id, payload, created_at from ${table.auditLogs}`),
+    client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`),
   ]);
 
   return {
@@ -465,6 +500,18 @@ async function readPostgresDatabase(client: Queryable): Promise<Database> {
       entityId: row.entity_id,
       payload: row.payload,
       createdAt: row.created_at,
+    })),
+    partnershipLeads: partnershipLeads.rows.map((row) => ({
+      id: row.id,
+      companyName: row.company_name,
+      contactName: row.contact_name,
+      contactRole: row.contact_role,
+      corporateEmail: row.corporate_email,
+      involvementMessage: row.involvement_message,
+      status: row.status,
+      source: row.source,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     })),
   };
 }
@@ -605,6 +652,34 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          payload = excluded.payload,
          created_at = excluded.created_at`,
       [item.id, item.actor, item.action, item.entityType, item.entityId, item.payload, item.createdAt],
+    );
+  }
+
+  for (const item of database.partnershipLeads) {
+    await client.query(
+      `insert into ${table.partnershipLeads} (id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       on conflict (id) do update set
+         company_name = excluded.company_name,
+         contact_name = excluded.contact_name,
+         contact_role = excluded.contact_role,
+         corporate_email = excluded.corporate_email,
+         involvement_message = excluded.involvement_message,
+         status = excluded.status,
+         source = excluded.source,
+         updated_at = excluded.updated_at`,
+      [
+        item.id,
+        item.companyName,
+        item.contactName,
+        item.contactRole,
+        item.corporateEmail,
+        item.involvementMessage,
+        item.status,
+        item.source,
+        item.createdAt,
+        item.updatedAt,
+      ],
     );
   }
 }

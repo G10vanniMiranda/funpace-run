@@ -1,6 +1,6 @@
 import { motion, useScroll, useTransform } from 'motion/react';
 import { useRef } from 'react';
-import { ArrowRight, Map as MapIcon } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import { Reveal } from './premium';
 
 export function CourseMap() {
@@ -9,24 +9,11 @@ export function CourseMap() {
       <div className="premium-aurora opacity-30" />
       <div className="mx-auto flex max-w-7xl flex-col items-center gap-10 lg:flex-row lg:gap-20 xl:gap-24">
         <Reveal className="flex w-full min-w-0 flex-col gap-6 lg:w-1/3">
-          <div className="mb-1 flex items-center gap-3 text-brand sm:mb-4">
-            <MapIcon className="h-6 w-6 shrink-0" />
-            <span className="text-xs font-bold uppercase tracking-widest">Analise de Percurso</span>
-          </div>
-
           <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase leading-[0.9] tracking-tighter">
-            Terreno <br /><span className="text-zinc-600">Reconhecido</span>
+            Percurso
           </h2>
 
-          <p className="max-w-md font-mono text-sm leading-relaxed text-zinc-400">
-            Um percurso majoritariamente plano, desenhado para quebra de recordes pessoais (PRs). Altimetria controlada com poucas elevacoes e amplas vias retas.
-          </p>
-
           <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:mt-6 lg:grid-cols-1 lg:gap-4">
-            <div className="premium-card p-4">
-              <h4 className="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Ganho de Elevacao (10K)</h4>
-              <p className="font-mono text-xl font-bold text-white">+ 42m</p>
-            </div>
             <div className="premium-card p-4">
               <h4 className="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Postos de Hidratacao</h4>
               <p className="font-mono text-xl font-bold text-white">A cada 2.5km</p>
@@ -59,7 +46,7 @@ export function CourseMap() {
           </div>
         </Reveal>
       </div>
-    </section>
+    </section >
   );
 }
 
@@ -84,14 +71,14 @@ export function Gallery() {
     <section id="gallery" className="scroll-mt-24 overflow-hidden border-t border-zinc-900 bg-black py-16 md:py-24" ref={containerRef}>
       <Reveal className="mx-auto mb-10 flex max-w-7xl items-end justify-between px-4 sm:px-6 md:mb-16">
         <div>
-          <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase tracking-tighter">Energy</h2>
+          <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase tracking-tighter">ENERGIA FUNPACE</h2>
           <p className="mt-2 max-w-xl font-mono text-xs uppercase leading-relaxed tracking-widest text-zinc-500 sm:text-sm">
-            Energia visual da experiencia FunPace Run
+            ONDE NINGUÉM SOLTA A MÃO DE NINGUÉM
           </p>
         </div>
       </Reveal>
 
-      <div className="flex h-[420px] w-full items-center justify-center gap-3 overflow-hidden px-4 sm:h-[520px] md:h-[70vh] md:gap-8 md:px-8 lg:h-[80vh]">
+      <div className="flex h-105 w-full items-center justify-center gap-3 overflow-hidden px-4 sm:h-[520px] md:h-[70vh] md:gap-8 md:px-8 lg:h-[80vh]">
         <motion.div className="flex h-[135%] w-1/2 flex-col gap-3 md:h-[150%] md:w-1/3 md:gap-4" style={{ y: y1 }}>
           <img src={images[0]} alt="Runner" className="h-1/2 w-full object-cover object-center grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
           <img src={images[1]} alt="Shoes" className="h-1/2 w-full object-cover grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
