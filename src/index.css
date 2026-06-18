@@ -222,6 +222,21 @@ table tbody tr:hover {
   }
 }
 
+.marquee-track {
+  animation: marquee-scroll 18s linear infinite;
+  will-change: transform;
+}
+
+@keyframes marquee-scroll {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-50%);
+  }
+}
+
 .brutal-border {
   border: 2px solid white;
 }

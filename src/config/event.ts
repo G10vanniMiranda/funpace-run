@@ -10,10 +10,10 @@ export const eventInfo = {
   startsAt: '2026-09-12T06:00:00-04:00',
   locationName: 'Complexo Madeira Mamore',
   locationLabel: 'Complexo Madeira Mamore - RO',
-  distances: ['10K', '5K'],
+  distances: ['10 Km', '5 Km'],
   distanceOptions: [
-    { value: '10K', label: '10K' },
-    { value: '5K', label: '5K' },
+    { value: '10 Km', label: '10 Km' },
+    { value: '5 Km', label: '5 Km' },
   ],
   genderOptions: [
     { value: 'female', label: 'Feminino' },
@@ -26,10 +26,10 @@ export const eventInfo = {
   currentLotCapacity: 100,
   offerNote: 'Inscricao confirmada somente apos pagamento aprovado.',
   kitItems: [
-    'Camisa alta tecnologia Dri-Fit UV',
-    'Numero de peito e chip',
-    'Medalha finisher exclusiva',
-    'Acesso ao Recovery Lounge',
+    'Camiseta',
+    'Numero de peito',
+    'Medalha',
+    '+ Surpresas',
   ],
   shirtSizes: ['P', 'M', 'G', 'GG'],
 };

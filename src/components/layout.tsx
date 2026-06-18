@@ -1,4 +1,3 @@
-import { motion } from 'motion/react';
 import { Instagram, Menu, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { eventInfo } from '../config/event';
@@ -24,9 +23,8 @@ export function Navbar() {
 
   return (
     <nav className="fixed left-0 top-0 z-50 w-full px-4 py-3 text-white sm:px-6 sm:py-4">
-      <div className={`mx-auto flex w-full max-w-7xl items-center justify-between gap-3 border px-3 py-2 transition-all duration-300 sm:px-4 ${
-        isScrolled ? 'border-white/10 bg-black/80 shadow-2xl shadow-black/25 backdrop-blur-md' : 'border-transparent bg-transparent'
-      }`}>
+      <div className={`mx-auto flex w-full max-w-7xl items-center justify-between gap-3 border px-3 py-2 transition-all duration-300 sm:px-4 ${isScrolled ? 'border-white/10 bg-black/80 shadow-2xl shadow-black/25 backdrop-blur-md' : 'border-transparent bg-transparent'
+        }`}>
         <a href="/" className="font-display text-lg font-bold uppercase tracking-tighter sm:text-xl">
           Funpace Run
         </a>
@@ -80,39 +78,16 @@ export function Navbar() {
 }
 
 export function Marquee() {
+  const marqueeText = 'FUNPACE RUN EXPERIENCE - 10KM - 5KM';
+  const marqueeItems = Array.from({ length: 8 }, (_, index) => index);
+
   return (
     <div className="relative z-10 flex w-full overflow-hidden whitespace-nowrap border-y border-black bg-brand py-2.5 text-black shadow-[0_0_40px_rgba(215,255,0,0.18)] sm:py-3">
-      <motion.div 
-        className="flex shrink-0 gap-6 font-display text-base font-bold uppercase tracking-tighter sm:gap-8 sm:text-xl"
-        initial={{ x: 0 }}
-        whileInView={{ x: -120 }}
-        viewport={{ once: true, amount: 0.5 }}
-        transition={{ duration: 1.8, ease: 'easeOut' }}
-      >
-        <span>NO EXCUSES</span>
-        <span>•</span>
-        <span>{eventInfo.name}</span>
-        <span>•</span>
-        <span>{eventInfo.distances.join(' ')}</span>
-        <span>•</span>
-        <span>OUTWORK EVERYONE</span>
-        <span>•</span>
-        <span>NO EXCUSES</span>
-        <span>•</span>
-        <span>{eventInfo.name}</span>
-        <span>•</span>
-        <span>{eventInfo.distances.join(' ')}</span>
-        <span>•</span>
-        <span>OUTWORK EVERYONE</span>
-        <span>•</span>
-        <span>NO EXCUSES</span>
-        <span>•</span>
-        <span>{eventInfo.name}</span>
-        <span>•</span>
-        <span>{eventInfo.distances.join(' ')}</span>
-        <span>•</span>
-        <span>OUTWORK EVERYONE</span>
-      </motion.div>
+      <div className="marquee-track flex w-max shrink-0 gap-8 font-display text-base font-bold uppercase tracking-tighter sm:text-xl">
+        {[...marqueeItems, ...marqueeItems].map((_, index) => (
+          <span key={index}>{marqueeText}</span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -136,7 +111,7 @@ export function Footer() {
             {eventInfo.contactEmail}
           </a>
         </div>
-        
+
         <div className="flex w-full flex-col gap-4 md:w-auto">
           <h3 className="font-bold uppercase tracking-widest text-sm text-zinc-500 mb-2">Conecte-se</h3>
           <div className="flex gap-4">
