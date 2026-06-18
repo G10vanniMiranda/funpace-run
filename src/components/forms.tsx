@@ -1,5 +1,5 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
-import { ArrowRight, Building, Zap } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Building, CheckCircle2, Info, Loader2, XCircle, Zap } from 'lucide-react';
 import { eventInfo } from '../config/event';
 import { ApiError, createRegistration, getAvailability } from '../lib/api';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
@@ -38,6 +38,7 @@ export function RegistrationSection() {
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
   const lotRemaining = activeLot?.remaining ?? eventInfo.currentLotCapacity;
   const selectedDistanceAvailability = availability?.distances.find((distance) => distance.name === formData.distance);
+  const isSubmitting = status === 'submitting';
 
   useEffect(() => {
     let isMounted = true;
@@ -83,6 +84,7 @@ export function RegistrationSection() {
 
     if (Object.keys(validationErrors).length > 0) {
       setStatus(null);
+      setApiMessage('Existem campos invalidos. Confira os dados destacados.');
       return;
     }
 
@@ -189,8 +191,8 @@ export function RegistrationSection() {
                   ))}
                 </select>
               </Field>
-              <Field label="Distancia">
-                <select value={formData.distance} onChange={(event) => updateField('distance', event.target.value as RaceDistance)} className={`${inputClass} cursor-pointer appearance-none`}>
+              <Field label="Distancia" error={errors.distance}>
+                <select value={formData.distance} onChange={(event) => updateField('distance', event.target.value as RaceDistance)} className={`${inputClass} cursor-pointer appearance-none`} aria-invalid={Boolean(errors.distance)}>
                   {eventInfo.distanceOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
@@ -204,8 +206,8 @@ export function RegistrationSection() {
             </div>
 
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
-              <Field label="Tamanho da Camisa">
-                <select value={formData.shirtSize} onChange={(event) => updateField('shirtSize', event.target.value as ShirtSize)} className={`${inputClass} cursor-pointer appearance-none`}>
+              <Field label="Tamanho da Camisa" error={errors.shirtSize}>
+                <select value={formData.shirtSize} onChange={(event) => updateField('shirtSize', event.target.value as ShirtSize)} className={`${inputClass} cursor-pointer appearance-none`} aria-invalid={Boolean(errors.shirtSize)}>
                   {eventInfo.shirtSizes.map((size) => (
                     <option key={size}>{size}</option>
                   ))}
@@ -232,26 +234,47 @@ export function RegistrationSection() {
 
             <button
               type="submit"
-              disabled={status === 'submitting'}
+              disabled={isSubmitting}
+              aria-busy={isSubmitting}
               className="premium-button group relative mt-4 flex min-h-14 w-full items-center justify-center gap-3 overflow-hidden bg-black p-4 text-center text-xs font-black uppercase tracking-widest text-white transition-colors hover:bg-zinc-800 disabled:opacity-70 sm:justify-between sm:p-6 sm:text-sm"
             >
-              <span className="relative z-10 min-w-0">
-                {status === 'submitting' && 'CRIANDO INSCRICAO'}
+              <span className="relative z-10 flex min-w-0 items-center gap-2">
+                {status === 'submitting' && (
+                  <>
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                    <span>PREPARANDO SUA INSCRICAO...</span>
+                  </>
+                )}
                 {status === 'checkout_pending' && 'CHECKOUT EM IMPLANTACAO'}
                 {status !== 'submitting' && status !== 'checkout_pending' && 'CONTINUAR PARA CHECKOUT'}
               </span>
-              <ArrowRight className="relative z-10 h-5 w-5 shrink-0 transition-transform group-hover:translate-x-2" />
+              {status === 'submitting' ? (
+                <span className="relative z-10 font-mono text-[10px] opacity-70">AGUARDE</span>
+              ) : (
+                <ArrowRight className="relative z-10 h-5 w-5 shrink-0 transition-transform group-hover:translate-x-2" />
+              )}
             </button>
 
+            {status === 'submitting' && (
+              <AlertMessage tone="info" title="Informacao">
+                Preparando sua inscricao e conectando ao checkout. Nao feche esta tela.
+              </AlertMessage>
+            )}
+
             {status === 'checkout_pending' && (
-              <p className="border border-black/20 bg-black/5 p-3 text-xs font-bold uppercase leading-relaxed tracking-wider">
+              <AlertMessage tone="success" title="Inscricao criada">
                 {apiMessage} ID: {registrationId}. {eventInfo.offerNote}
-              </p>
+              </AlertMessage>
             )}
             {status === 'api_error' && (
-              <p className="border border-red-800 bg-red-100 p-3 text-xs font-bold uppercase leading-relaxed tracking-wider text-red-800">
+              <AlertMessage tone="error" title="Erro">
                 {apiMessage}
-              </p>
+              </AlertMessage>
+            )}
+            {submitAttempted && Object.keys(errors).length > 0 && status !== 'api_error' && (
+              <AlertMessage tone="warning" title="Atencao">
+                Existem campos invalidos. Corrija os dados destacados para continuar.
+              </AlertMessage>
             )}
             <p className="text-center text-xs font-medium leading-relaxed opacity-60">
               * O envio ainda nao cria inscricao paga. A confirmacao dependera do gateway e do webhook.
@@ -284,6 +307,46 @@ function Checkbox({ checked, onChange, children }: { checked: boolean; onChange:
       />
       <span className="min-w-0">{children}</span>
     </label>
+  );
+}
+
+function AlertMessage({
+  tone,
+  title,
+  children,
+}: {
+  tone: 'success' | 'warning' | 'error' | 'info';
+  title: string;
+  children: ReactNode;
+}) {
+  const styles = {
+    success: {
+      className: 'border-emerald-800 bg-emerald-50 text-emerald-900',
+      icon: CheckCircle2,
+    },
+    warning: {
+      className: 'border-amber-700 bg-amber-50 text-amber-900',
+      icon: AlertTriangle,
+    },
+    error: {
+      className: 'border-red-800 bg-red-50 text-red-900',
+      icon: XCircle,
+    },
+    info: {
+      className: 'border-sky-800 bg-sky-50 text-sky-900',
+      icon: Info,
+    },
+  }[tone];
+  const Icon = styles.icon;
+
+  return (
+    <div className={`flex gap-3 border p-3 text-xs font-bold uppercase leading-relaxed tracking-wider shadow-sm transition-opacity duration-300 ${styles.className}`} role={tone === 'error' ? 'alert' : 'status'}>
+      <Icon className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="min-w-0">
+        <p className="mb-1 font-black">{title}</p>
+        <p>{children}</p>
+      </div>
+    </div>
   );
 }
 

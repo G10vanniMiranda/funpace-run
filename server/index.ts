@@ -42,7 +42,7 @@ function setCors(req: IncomingMessage, res: ServerResponse) {
 
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Webhook-Signature,X-Admin-Key,X-Admin-Actor');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Webhook-Signature,X-Admin-Key,X-Admin-Actor,X-Request-ID');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');

@@ -1,5 +1,8 @@
 import type { RegistrationErrors, RegistrationFormData } from '../types/registration';
 
+const allowedDistances = new Set(['10K', '5K']);
+const allowedShirtSizes = new Set(['P', 'M', 'G', 'GG']);
+
 export function onlyDigits(value: string) {
   return value.replace(/\D/g, '');
 }
@@ -71,6 +74,14 @@ export function validateRegistration(data: RegistrationFormData) {
 
   if (!data.gender) {
     errors.gender = 'Selecione uma opcao.';
+  }
+
+  if (!allowedDistances.has(data.distance)) {
+    errors.distance = 'Selecione uma distancia valida.';
+  }
+
+  if (!allowedShirtSizes.has(data.shirtSize)) {
+    errors.shirtSize = 'Selecione um tamanho de camisa valido.';
   }
 
   if (!data.termsAccepted) {

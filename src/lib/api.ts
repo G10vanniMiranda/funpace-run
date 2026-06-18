@@ -9,88 +9,266 @@ import type {
   RegistrationStatusResponse,
 } from '../types/registration';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const configuredApiUrl = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const API_BASE_URL = configuredApiUrl || (import.meta.env.DEV ? 'http://localhost:3001' : '');
+const REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || 15_000);
+const RETRY_DELAYS_MS = [500, 1000, 2000];
+const isDevelopment = import.meta.env.DEV;
 
 type ApiErrorPayload = {
   message?: string;
   errors?: Record<string, string>;
 };
 
-export class ApiError extends Error {
-  errors?: Record<string, string>;
+type ApiRequestOptions = RequestInit & {
+  timeoutMs?: number;
+  retry?: boolean;
+  sensitive?: boolean;
+};
 
-  constructor(message: string, errors?: Record<string, string>) {
+type ApiMetrics = {
+  totalRequests: number;
+  totalErrors: number;
+  consecutiveFailures: number;
+  lastStatus: number | null;
+  lastDurationMs: number | null;
+};
+
+export const apiMetrics: ApiMetrics = {
+  totalRequests: 0,
+  totalErrors: 0,
+  consecutiveFailures: 0,
+  lastStatus: null,
+  lastDurationMs: null,
+};
+
+export class ApiError extends Error {
+  status?: number;
+  errors?: Record<string, string>;
+  code: string;
+  retryable: boolean;
+
+  constructor(message: string, options: {
+    status?: number;
+    errors?: Record<string, string>;
+    code?: string;
+    retryable?: boolean;
+  } = {}) {
     super(message);
     this.name = 'ApiError';
-    this.errors = errors;
+    this.status = options.status;
+    this.errors = options.errors;
+    this.code = options.code || 'api_error';
+    this.retryable = Boolean(options.retryable);
   }
 }
 
-export async function createRegistration(data: RegistrationFormData) {
-  let response: Response;
+function getApiUrl(path: string) {
+  return `${API_BASE_URL}${path}`;
+}
 
-  try {
-    response = await fetch(`${API_BASE_URL}/api/registrations`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(data),
+function createRequestId() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function sanitizePayload(payload: unknown) {
+  if (!payload || typeof payload !== 'object') {
+    return payload;
+  }
+
+  const hiddenFields = new Set(['cpf', 'phone', 'email', 'birthDate', 'emergencyContactPhone']);
+
+  return Object.fromEntries(
+    Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
+      key,
+      hiddenFields.has(key) ? '[redacted]' : value,
+    ]),
+  );
+}
+
+function logApiEvent(label: string, data: Record<string, unknown>) {
+  if (!isDevelopment) {
+    return;
+  }
+
+  console.groupCollapsed(`[FunPace API] ${label}`);
+  Object.entries(data).forEach(([key, value]) => console.log(key, value));
+  console.groupEnd();
+}
+
+function updateMetrics(status: number | null, durationMs: number, failed: boolean) {
+  apiMetrics.totalRequests += 1;
+  apiMetrics.lastStatus = status;
+  apiMetrics.lastDurationMs = durationMs;
+
+  if (failed) {
+    apiMetrics.totalErrors += 1;
+    apiMetrics.consecutiveFailures += 1;
+    return;
+  }
+
+  apiMetrics.consecutiveFailures = 0;
+}
+
+function getFriendlyHttpError(status: number, payload: ApiErrorPayload | null) {
+  const fallback: Record<number, string> = {
+    400: 'Os dados enviados sao invalidos.',
+    401: 'Sua sessao expirou. Faca login novamente.',
+    403: 'Voce nao possui permissao para esta acao.',
+    404: 'Servico nao encontrado.',
+    409: 'Ja existe uma inscricao ativa para este CPF ou as vagas estao indisponiveis.',
+    415: 'Formato da requisicao invalido.',
+    422: 'Existem campos invalidos. Confira os dados destacados.',
+    429: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.',
+    500: 'Erro interno. Nossa equipe ja foi notificada.',
+    502: 'Nao foi possivel criar o checkout no gateway. Tente novamente em instantes.',
+    503: 'Servico temporariamente indisponivel. Tente novamente em instantes.',
+    504: 'A conexao demorou mais do que o esperado. Verifique sua internet.',
+  };
+
+  return payload?.message || fallback[status] || 'Nao foi possivel concluir a solicitacao.';
+}
+
+function isRetryableStatus(status: number) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function parsePayload<ResponsePayload>(response: Response) {
+  return response.json().catch(() => null) as Promise<ResponsePayload | ApiErrorPayload | null>;
+}
+
+async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOptions = {}) {
+  const requestId = createRequestId();
+  const url = getApiUrl(path);
+  const retryEnabled = options.retry !== false;
+  const maxAttempts = retryEnabled ? RETRY_DELAYS_MS.length + 1 : 1;
+  const headers = new Headers(options.headers);
+
+  if (options.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  headers.set('Accept', 'application/json');
+  headers.set('X-Request-ID', requestId);
+
+  let lastError: ApiError | null = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS);
+
+    logApiEvent('request', {
+      requestId,
+      attempt,
+      url,
+      method: options.method || 'GET',
+      headers: Object.fromEntries(headers.entries()),
+      payload: options.sensitive ? '[hidden]' : sanitizePayload(options.body ? JSON.parse(String(options.body)) : null),
     });
-  } catch {
-    throw new ApiError('Nao foi possivel conectar a API de inscricao.');
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers,
+        signal: controller.signal,
+      });
+      const durationMs = Math.round(performance.now() - startedAt);
+      const payload = await parsePayload<ResponsePayload>(response);
+
+      updateMetrics(response.status, durationMs, !response.ok);
+      logApiEvent('response', {
+        requestId,
+        attempt,
+        durationMs,
+        status: response.status,
+        payload,
+        metrics: { ...apiMetrics },
+      });
+
+      if (response.ok) {
+        return payload as ResponsePayload;
+      }
+
+      const errorPayload = payload as ApiErrorPayload | null;
+      lastError = new ApiError(getFriendlyHttpError(response.status, errorPayload), {
+        status: response.status,
+        errors: errorPayload?.errors,
+        code: `http_${response.status}`,
+        retryable: isRetryableStatus(response.status),
+      });
+
+      if (!lastError.retryable || attempt === maxAttempts) {
+        throw lastError;
+      }
+    } catch (error) {
+      const durationMs = Math.round(performance.now() - startedAt);
+      const aborted = error instanceof DOMException && error.name === 'AbortError';
+
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
+      updateMetrics(null, durationMs, true);
+      lastError = new ApiError(
+        aborted
+          ? 'A conexao demorou mais do que o esperado. Verifique sua internet.'
+          : 'Nao foi possivel conectar ao servidor. Tente novamente em alguns instantes.',
+        {
+          code: aborted ? 'timeout' : 'network_error',
+          retryable: true,
+        },
+      );
+
+      logApiEvent('failure', {
+        requestId,
+        attempt,
+        durationMs,
+        error: lastError.message,
+        metrics: { ...apiMetrics },
+      });
+
+      if (attempt === maxAttempts) {
+        throw lastError;
+      }
+    } finally {
+      window.clearTimeout(timeout);
+    }
+
+    await delay(RETRY_DELAYS_MS[attempt - 1]);
   }
 
-  const payload = await response.json().catch(() => null) as ApiErrorPayload | CreateRegistrationResponse | null;
-
-  if (!response.ok) {
-    const errorPayload = payload as ApiErrorPayload | null;
-
-    throw new ApiError(
-      errorPayload?.message || 'Nao foi possivel criar a inscricao.',
-      errorPayload?.errors,
-    );
-  }
-
-  return payload as CreateRegistrationResponse;
+  throw lastError || new ApiError('Nao foi possivel concluir a solicitacao.');
 }
 
-export async function getAvailability() {
-  let response: Response;
-
-  try {
-    response = await fetch(`${API_BASE_URL}/api/availability`);
-  } catch {
-    throw new ApiError('Nao foi possivel carregar a disponibilidade.');
-  }
-
-  const payload = await response.json().catch(() => null) as ApiErrorPayload | AvailabilityResponse | null;
-
-  if (!response.ok) {
-    const errorPayload = payload as ApiErrorPayload | null;
-    throw new ApiError(errorPayload?.message || 'Nao foi possivel carregar a disponibilidade.');
-  }
-
-  return payload as AvailabilityResponse;
+export function createRegistration(data: RegistrationFormData) {
+  return apiFetch<CreateRegistrationResponse>('/api/registrations', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    retry: true,
+  });
 }
 
-export async function getRegistrationStatus(registrationId: string) {
-  let response: Response;
+export function getAvailability() {
+  return apiFetch<AvailabilityResponse>('/api/availability', {
+    retry: true,
+  });
+}
 
-  try {
-    response = await fetch(`${API_BASE_URL}/api/registrations/${registrationId}`);
-  } catch {
-    throw new ApiError('Nao foi possivel consultar a inscricao.');
-  }
-
-  const payload = await response.json().catch(() => null) as ApiErrorPayload | RegistrationStatusResponse | null;
-
-  if (!response.ok) {
-    const errorPayload = payload as ApiErrorPayload | null;
-    throw new ApiError(errorPayload?.message || 'Nao foi possivel consultar a inscricao.');
-  }
-
-  return payload as RegistrationStatusResponse;
+export function getRegistrationStatus(registrationId: string) {
+  return apiFetch<RegistrationStatusResponse>(`/api/registrations/${encodeURIComponent(registrationId)}`, {
+    retry: true,
+  });
 }
 
 function toQueryString(filters: Record<string, string>) {
@@ -107,28 +285,16 @@ function toQueryString(filters: Record<string, string>) {
 }
 
 async function adminFetch<ResponsePayload>(path: string, adminKey: string, init: RequestInit = {}) {
-  let response: Response;
   const headers = new Headers(init.headers);
 
   headers.set('X-Admin-Key', adminKey);
 
-  try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
-      ...init,
-      headers,
-    });
-  } catch {
-    throw new ApiError('Nao foi possivel conectar ao painel administrativo.');
-  }
-
-  const payload = await response.json().catch(() => null) as ApiErrorPayload | ResponsePayload | null;
-
-  if (!response.ok) {
-    const errorPayload = payload as ApiErrorPayload | null;
-    throw new ApiError(errorPayload?.message || 'Acesso administrativo indisponivel.');
-  }
-
-  return payload as ResponsePayload;
+  return apiFetch<ResponsePayload>(path, {
+    ...init,
+    headers,
+    retry: true,
+    sensitive: true,
+  });
 }
 
 export function getAdminSummary(adminKey: string) {
@@ -144,7 +310,7 @@ export function getAdminAuditLogs(adminKey: string) {
 }
 
 export function getAdminCsvUrl(filters: Record<string, string>) {
-  return `${API_BASE_URL}/api/admin/registrations.csv${toQueryString(filters)}`;
+  return getApiUrl(`/api/admin/registrations.csv${toQueryString(filters)}`);
 }
 
 function postAdminRegistrationAction(adminKey: string, registrationId: string, action: 'check-in' | 'kit') {

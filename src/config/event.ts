@@ -12,8 +12,8 @@ export const eventInfo = {
   locationLabel: 'Complexo Madeira Mamore - RO',
   distances: ['10 Km', '5 Km'],
   distanceOptions: [
-    { value: '10 Km', label: '10 Km' },
-    { value: '5 Km', label: '5 Km' },
+    { value: '10K', label: '10 Km' },
+    { value: '5K', label: '5 Km' },
   ],
   genderOptions: [
     { value: 'female', label: 'Feminino' },
