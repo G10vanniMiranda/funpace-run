@@ -650,3 +650,19 @@ export async function snapshot() {
 
   return readPostgresDatabase(requirePool());
 }
+
+export async function pingDatabase() {
+  if (!shouldUsePostgres()) {
+    ensureJsonDatabase();
+    return { provider: 'json', ok: true };
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('select 1');
+    return { provider: databaseProvider, ok: true };
+  } finally {
+    client.release();
+  }
+}

@@ -3,11 +3,19 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
-import { transaction, type Database, type PaymentRecord, type RegistrationRecord } from './database';
+import { pingDatabase, transaction, type Database, type PaymentRecord, type RegistrationRecord } from './database';
 import { createInfinitePayCheckout } from './infinitepay';
 
 const port = Number(process.env.API_PORT || 3001);
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
+const defaultAllowedOrigins = [
+  'https://funpace.club',
+  'https://www.funpace.club',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+];
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || defaultAllowedOrigins.join(','))
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
@@ -23,14 +31,6 @@ const pendingPaymentTtlMinutes = Number.isFinite(pendingPaymentTtlMinutesInput)
   ? Math.max(pendingPaymentTtlMinutesInput, 1)
   : 30;
 
-if (isProduction && adminApiKey === 'change-me') {
-  throw new Error('ADMIN_API_KEY must be changed in production.');
-}
-
-if (isProduction && paymentProvider === 'infinitepay' && !infinitePayHandle) {
-  throw new Error('INFINITEPAY_HANDLE must be configured in production.');
-}
-
 const rateLimit = new Map<string, { count: number; resetAt: number }>();
 
 function setCors(req: IncomingMessage, res: ServerResponse) {
@@ -38,11 +38,12 @@ function setCors(req: IncomingMessage, res: ServerResponse) {
 
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'false');
   }
 
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Webhook-Signature,X-Admin-Key,X-Admin-Actor,X-Request-ID');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Webhook-Signature,X-Admin-Key,X-Admin-Actor,X-Request-ID');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
@@ -64,7 +65,18 @@ function logRequest(req: IncomingMessage, statusCode: number, message: string) {
     method: req.method,
     path: req.url?.split('?')[0],
     statusCode,
+    requestId: Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'],
     message,
+  }));
+}
+
+function logServerError(req: IncomingMessage, error: unknown) {
+  console.error(JSON.stringify({
+    at: new Date().toISOString(),
+    method: req.method,
+    path: req.url?.split('?')[0],
+    requestId: Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'],
+    error: error instanceof Error ? error.message : 'Unknown error',
   }));
 }
 
@@ -82,6 +94,11 @@ function isAdminAuthorized(req: IncomingMessage) {
 }
 
 function requireAdmin(req: IncomingMessage, res: ServerResponse) {
+  if (isProduction && adminApiKey === 'change-me') {
+    json(res, 503, { message: 'Painel administrativo indisponivel. Configure ADMIN_API_KEY.' });
+    return false;
+  }
+
   if (isAdminAuthorized(req)) {
     return true;
   }
@@ -488,50 +505,58 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   if (
     response.statusCode === 201
     && paymentProvider === 'infinitepay'
-    && infinitePayHandle
     && response.amountCents
     && response.description
   ) {
-    try {
-      const checkout = await createInfinitePayCheckout({
-        handle: infinitePayHandle,
-        orderNsu: response.registrationId,
-        amountCents: response.amountCents,
-        description: response.description,
-        redirectUrl: getRegistrationSuccessUrl(response.registrationId),
-        webhookUrl: getWebhookUrl(),
-        customer: payload,
-      });
-
-      await transaction((database) => {
-        const payment = database.payments.find((item) => item.registrationId === response.registrationId);
-
-        if (payment) {
-          payment.provider = 'infinitepay';
-          payment.providerPaymentId = checkout.providerPaymentId;
-          payment.checkoutUrl = checkout.checkoutUrl;
-          payment.updatedAt = new Date().toISOString();
-        }
-
-        database.paymentEvents.push({
-          id: randomUUID(),
-          paymentId: payment?.id || '',
-          providerEventId: checkout.providerPaymentId || response.registrationId,
-          eventType: 'infinitepay.checkout_created',
-          payload: checkout.raw,
-          receivedAt: new Date().toISOString(),
-        });
-      });
-
-      response.checkoutStatus = 'created';
-      response.checkoutUrl = checkout.checkoutUrl;
-    } catch {
+    if (!infinitePayHandle) {
       await markPaymentCreationFailed(response.registrationId);
-      response.statusCode = 502;
+      response.statusCode = 503;
       response.registrationStatus = 'payment_failed';
       response.checkoutStatus = 'not_configured';
       response.checkoutUrl = null;
-      response.message = 'Nao foi possivel criar o checkout InfinitePay. Tente novamente em instantes.';
+      response.message = 'Gateway de pagamento indisponivel. Tente novamente em instantes.';
+    } else {
+      try {
+        const checkout = await createInfinitePayCheckout({
+          handle: infinitePayHandle,
+          orderNsu: response.registrationId,
+          amountCents: response.amountCents,
+          description: response.description,
+          redirectUrl: getRegistrationSuccessUrl(response.registrationId),
+          webhookUrl: getWebhookUrl(),
+          customer: payload,
+        });
+
+        await transaction((database) => {
+          const payment = database.payments.find((item) => item.registrationId === response.registrationId);
+
+          if (payment) {
+            payment.provider = 'infinitepay';
+            payment.providerPaymentId = checkout.providerPaymentId;
+            payment.checkoutUrl = checkout.checkoutUrl;
+            payment.updatedAt = new Date().toISOString();
+          }
+
+          database.paymentEvents.push({
+            id: randomUUID(),
+            paymentId: payment?.id || '',
+            providerEventId: checkout.providerPaymentId || response.registrationId,
+            eventType: 'infinitepay.checkout_created',
+            payload: checkout.raw,
+            receivedAt: new Date().toISOString(),
+          });
+        });
+
+        response.checkoutStatus = 'created';
+        response.checkoutUrl = checkout.checkoutUrl;
+      } catch {
+        await markPaymentCreationFailed(response.registrationId);
+        response.statusCode = 502;
+        response.registrationStatus = 'payment_failed';
+        response.checkoutStatus = 'not_configured';
+        response.checkoutUrl = null;
+        response.message = 'Nao foi possivel criar o checkout InfinitePay. Tente novamente em instantes.';
+      }
     }
   }
 
@@ -711,6 +736,44 @@ async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse)
     });
 
   json(res, 200, { event, lots, distances });
+}
+
+async function handleHealth(req: IncomingMessage, res: ServerResponse) {
+  const startedAt = Date.now();
+  const checks = {
+    appUrl: Boolean(appUrl),
+    apiPublicUrl: Boolean(apiPublicUrl),
+    allowedOrigins,
+    databaseProvider: process.env.DATABASE_PROVIDER || 'auto',
+    databaseUrlConfigured: Boolean(process.env.DATABASE_URL),
+    paymentProvider: paymentProvider || 'not_configured',
+    infinitePayHandleConfigured: Boolean(infinitePayHandle),
+    webhookSecretConfigured: Boolean(webhookSecret),
+    adminApiKeyConfigured: Boolean(adminApiKey && adminApiKey !== 'change-me'),
+  };
+
+  try {
+    const database = await pingDatabase();
+
+    json(res, 200, {
+      ok: true,
+      service: 'funpace-run-api',
+      elapsedMs: Date.now() - startedAt,
+      database,
+      checks,
+    });
+    logRequest(req, 200, 'health_ok');
+  } catch (error) {
+    logServerError(req, error);
+    json(res, 503, {
+      ok: false,
+      service: 'funpace-run-api',
+      elapsedMs: Date.now() - startedAt,
+      database: { ok: false },
+      checks,
+      message: 'Banco de dados indisponivel.',
+    });
+  }
 }
 
 async function getAdminRows(url: URL) {
@@ -1049,6 +1112,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
+    if (req.method === 'GET' && url.pathname === '/api/health') {
+      await handleHealth(req, res);
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/registrations') {
       await handleCreateRegistration(req, res);
       return;
@@ -1104,7 +1172,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     }
 
     json(res, 404, { message: 'Rota nao encontrada.' });
-  } catch {
+  } catch (error) {
+    logServerError(req, error);
     json(res, 500, { message: 'Erro interno da API.' });
   }
 }
