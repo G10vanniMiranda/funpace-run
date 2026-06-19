@@ -36,7 +36,6 @@ export function RegistrationSection() {
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const activeLot = availability?.lots.find((lot) => lot.status === 'active') || availability?.lots[0];
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
-  const selectedDistanceAvailability = availability?.distances.find((distance) => distance.name === formData.distance);
   const isSubmitting = status === 'submitting';
 
   useEffect(() => {
@@ -153,7 +152,7 @@ export function RegistrationSection() {
 
         <Reveal className="min-w-0 bg-white p-4 pt-7 shadow-2xl sm:p-6 sm:pt-8 md:p-8 md:pt-10 xl:p-12" delay={0.08}>
           <h3 className="mb-7 font-display text-[clamp(1.7rem,7vw,2.65rem)] font-black uppercase leading-[0.95] tracking-tighter md:mb-8">
-            Inscricao - {eventInfo.currentLot}
+            Inscrição - {eventInfo.currentLot}
           </h3>
 
           <form onSubmit={handleSubmit} className="space-y-5 sm:space-y-6">
@@ -190,11 +189,6 @@ export function RegistrationSection() {
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
-                {selectedDistanceAvailability && (
-                  <p className="text-[11px] font-bold uppercase leading-relaxed tracking-wider opacity-60 sm:text-xs">
-                    {selectedDistanceAvailability.remaining} vagas restantes nesta distancia.
-                  </p>
-                )}
               </Field>
             </div>
 
@@ -220,7 +214,7 @@ export function RegistrationSection() {
               {errors.regulationAccepted && <p className={errorClass}>{errors.regulationAccepted}</p>}
 
               <Checkbox checked={formData.privacyAccepted} onChange={(checked) => updateField('privacyAccepted', checked)}>
-                Autorizo o uso dos meus dados para processar a inscricao, conforme a <a href="/privacidade" className="underline">politica de privacidade</a>.
+                Autorizo o uso dos meus dados para processar a inscrição, conforme a <a href="/privacidade" className="underline">politica de privacidade</a>.
               </Checkbox>
               {errors.privacyAccepted && <p className={errorClass}>{errors.privacyAccepted}</p>}
             </div>
@@ -235,7 +229,7 @@ export function RegistrationSection() {
                 {status === 'submitting' && (
                   <>
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
-                    <span>PREPARANDO SUA INSCRICAO...</span>
+                    <span>PREPARANDO SUA INSCRIÇÃO...</span>
                   </>
                 )}
                 {status === 'checkout_pending' && 'CHECKOUT EM IMPLANTACAO'}
@@ -250,12 +244,12 @@ export function RegistrationSection() {
 
             {status === 'submitting' && (
               <AlertMessage tone="info" title="Informacao">
-                Preparando sua inscricao e conectando ao checkout. Nao feche esta tela.
+                Preparando sua inscrição e conectando ao checkout. Nao feche esta tela.
               </AlertMessage>
             )}
 
             {status === 'checkout_pending' && (
-              <AlertMessage tone="success" title="Inscricao criada">
+              <AlertMessage tone="success" title="Inscrição criada">
                 {apiMessage} ID: {registrationId}. {eventInfo.offerNote}
               </AlertMessage>
             )}
@@ -270,7 +264,7 @@ export function RegistrationSection() {
               </AlertMessage>
             )}
             <p className="text-center text-xs font-medium leading-relaxed opacity-60">
-              * O envio ainda nao cria inscricao paga. A confirmacao dependera do gateway e do webhook.
+              * O envio ainda nao cria inscrição paga. A confirmação dependera do gateway e do webhook.
             </p>
           </form>
         </Reveal>
@@ -447,7 +441,7 @@ export function SponsorSection() {
           Seja um Patrocinador
         </h2>
         <p className="mx-auto mb-8 max-w-lg font-mono text-sm leading-relaxed text-zinc-400 md:mb-10">
-          Posicione sua marca em um evento premium focado em performance, saude e inovacao. Preencha os dados e nossa equipe de branding entrara em contato.
+          Posicione sua marca em um evento premium focado em performance, saúde e inovação. Preencha os dados e nossa equipe de branding entrara em contato.
         </p>
 
         <form onSubmit={handleSubmit} className="mx-auto max-w-2xl space-y-5 text-left sm:space-y-6">

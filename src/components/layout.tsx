@@ -7,7 +7,7 @@ export function Navbar() {
   const [isScrolled, setIsScrolled] = useState(false);
   const links = [
     { href: '#map', label: 'Percurso' },
-    { href: '#register', label: 'Inscricoes' },
+    { href: '#register', label: 'Inscrições' },
     { href: '#faq', label: 'FAQ' },
   ];
 

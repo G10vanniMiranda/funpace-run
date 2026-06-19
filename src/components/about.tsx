@@ -20,7 +20,7 @@ const highlights = [
   },
   {
     icon: ShieldCheck,
-    label: 'Inscricao',
+    label: 'Inscrição',
     value: eventInfo.offerNote,
   },
 ];
@@ -40,11 +40,11 @@ export function AboutSection() {
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
           {highlights.map(({ icon: Icon, label, value }, index) => (
             <Reveal key={label} delay={index * 0.06}>
-            <div className="premium-card min-w-0 p-5 sm:p-6">
-              <Icon className="mb-5 h-6 w-6 text-brand sm:mb-6" />
-              <h3 className="font-bold uppercase tracking-widest text-xs text-zinc-500 mb-2">{label}</h3>
-              <p className="text-white font-mono text-sm leading-relaxed">{value}</p>
-            </div>
+              <div className="premium-card min-w-0 p-5 sm:p-6">
+                <Icon className="mb-5 h-6 w-6 text-brand sm:mb-6" />
+                <h3 className="font-bold uppercase tracking-widest text-xs text-zinc-500 mb-2">{label}</h3>
+                <p className="text-white font-mono text-sm leading-relaxed">{value}</p>
+              </div>
             </Reveal>
           ))}
         </div>

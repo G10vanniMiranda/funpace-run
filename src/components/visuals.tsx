@@ -15,14 +15,14 @@ export function CourseMap() {
 
           <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:mt-6 lg:grid-cols-1 lg:gap-4">
             <div className="premium-card p-4">
-              <h4 className="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Postos de Hidratacao</h4>
+              <h4 className="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Postos de Hidratação</h4>
               <p className="font-mono text-xl font-bold text-white">A cada 2.5km</p>
             </div>
           </div>
         </Reveal>
 
-        <Reveal className="premium-card group relative aspect-[4/3] w-full overflow-hidden rounded-sm sm:aspect-video lg:w-2/3" delay={0.08}>
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_2px,transparent_2px),linear-gradient(to_bottom,#80808012_2px,transparent_2px)] bg-[size:40px_40px]" />
+        <Reveal className="premium-card group relative aspect-4/3 w-full overflow-hidden rounded-sm sm:aspect-video lg:w-2/3" delay={0.08}>
+          <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_2px,transparent_2px),linear-gradient(to_bottom,#80808012_2px,transparent_2px)] bg-size-[40px_40px]" />
           <div className="absolute left-1/4 top-1/2 z-20 h-4 w-4 rounded-full bg-brand shadow-[0_0_15px_#dfff00]" />
 
           <svg className="absolute inset-0 z-10 h-full w-full pl-[18%] sm:pl-[25%]" viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -78,7 +78,7 @@ export function Gallery() {
         </div>
       </Reveal>
 
-      <div className="flex h-105 w-full items-center justify-center gap-3 overflow-hidden px-4 sm:h-[520px] md:h-[70vh] md:gap-8 md:px-8 lg:h-[80vh]">
+      <div className="flex h-105 w-full items-center justify-center gap-3 overflow-hidden px-4 sm:h-130 md:h-[70vh] md:gap-8 md:px-8 lg:h-[80vh]">
         <motion.div className="flex h-[135%] w-1/2 flex-col gap-3 md:h-[150%] md:w-1/3 md:gap-4" style={{ y: y1 }}>
           <img src={images[0]} alt="Runner" className="h-1/2 w-full object-cover object-center grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
           <img src={images[1]} alt="Shoes" className="h-1/2 w-full object-cover grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />

@@ -5,8 +5,8 @@ import { Reveal } from './premium';
 
 const faqs = [
   {
-    question: 'Posso alterar minha distancia apos a inscricao?',
-    answer: 'Sim. A alteracao de distancia pode ser feita gratuitamente atraves do seu painel de corredor ate 15 dias antes da prova. Alteracoes de lote poderao sofrer cobranca da diferenca de valor.',
+    question: 'Posso alterar minha distancia apos a inscrição?',
+    answer: 'Sim. A alteração de distancia pode ser feita gratuitamente através do seu painel de corredor ate 15 dias antes da prova. Alteracoes de lote poderao sofrer cobranca da diferenca de valor.',
   },
   {
     question: 'Onde e quando sera a retirada dos kits?',
@@ -33,7 +33,7 @@ export function FAQSection() {
     <section id="faq" className="mx-auto max-w-4xl scroll-mt-24 border-t border-zinc-900 px-4 py-16 sm:px-6 md:py-24">
       <Reveal className="mb-10 md:mb-16">
         <p className="mt-4 border-b border-zinc-800 pb-6 font-mono text-xs uppercase leading-relaxed tracking-widest text-zinc-500 sm:text-sm md:pb-8">
-          Tire suas duvidas antes de ir para a pista.
+          Tire suas dúvidas antes de ir para a pista.
         </p>
       </Reveal>
 

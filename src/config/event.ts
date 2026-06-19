@@ -9,7 +9,7 @@ export const eventInfo = {
   startTimeLabel: '06:00',
   startsAt: '2026-09-12T06:00:00-04:00',
   locationName: 'Complexo Madeira Mamore',
-  locationLabel: 'Complexo Madeira Mamore - RO',
+  locationLabel: 'Complexo Madeira Mamoré - RO',
   distances: ['10 Km', '5 Km'],
   distanceOptions: [
     { value: '10K', label: '10 Km' },
