@@ -4,7 +4,7 @@ const maintenanceContactHref = 'mailto:contato@funpace.club';
 // Para WhatsApp, troque por: https://wa.me/5599999999999
 
 export function MaintenancePage() {
-  const pillars = ['Performance', 'Inovacao', 'Comunidade'];
+  const pillars = ['Performance', 'Inovação', 'Comunidade'];
 
   return (
     <main className="maintenance-page min-h-screen bg-[#050505] text-white">
@@ -13,7 +13,7 @@ export function MaintenancePage() {
           <a
             href="/"
             aria-label="FunPace"
-            className="group relative inline-flex h-12 w-60 items-center justify-center overflow-hidden text-white sm:h-16 sm:w-80 lg:h-20 lg:w-96"
+            className="group relative inline-flex h-10 w-52 items-center justify-center overflow-hidden text-white sm:h-14 sm:w-72 lg:h-18 lg:w-88"
           >
             <img
               src="/funpace1.png"
@@ -58,7 +58,7 @@ export function MaintenancePage() {
           className="maintenance-reveal flex flex-col items-center justify-between gap-4 border-t border-white/10 pt-5 text-center text-xs uppercase tracking-[0.18em] text-zinc-400 sm:flex-row sm:text-left"
           style={{ '--maintenance-delay': '540ms' } as React.CSSProperties}
         >
-          <p className="font-mono normal-case tracking-normal text-zinc-400">© 2026 FunPace</p>
+          <p className="font-mono normal-case tracking-normal text-zinc-400">© 2026 FUNPACE</p>
           <ul className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 font-bold text-zinc-400">
             {pillars.map((pillar) => (
               <li key={pillar}>{pillar}</li>
