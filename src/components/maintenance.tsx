@@ -8,26 +8,26 @@ export function MaintenancePage() {
 
   return (
     <main className="maintenance-page min-h-screen bg-[#050505] text-white">
-      <section className="relative mx-auto flex min-h-screen w-full max-w-472 flex-col justify-between px-5 py-6 sm:px-8 sm:py-8 lg:px-12">
-        <header className="maintenance-reveal flex items-center justify-center pt-2" style={{ '--maintenance-delay': '80ms' } as React.CSSProperties}>
+      <section className="relative mx-auto flex min-h-screen w-full max-w-472 flex-col justify-between px-3 py-6 sm:px-8 sm:py-8 lg:px-12">
+        <header className="maintenance-reveal flex items-center justify-center pt-2 sm:pt-3" style={{ '--maintenance-delay': '80ms' } as React.CSSProperties}>
           <a
             href="/"
             aria-label="FunPace"
-            className="group inline-flex items-center text-white"
+            className="group relative inline-flex h-12 w-60 items-center justify-center overflow-hidden text-white sm:h-16 sm:w-80 lg:h-20 lg:w-96"
           >
             <img
               src="/funpace1.png"
               alt="FunPace"
               width="320"
               height="86"
-              className="h-28 w-auto max-w-[90vw] object-contain mix-blend-screen transition-transform duration-200 group-hover:-translate-y-0.5 sm:h-36 lg:h-44"
+              className="absolute left-1/2 top-1/2 w-full max-w-none -translate-x-1/2 -translate-y-1/2 object-contain mix-blend-screen transition-transform duration-200 group-hover:-translate-x-1/2 group-hover:translate-y-[-52%]"
             />
           </a>
         </header>
 
-        <div className="relative z-10 mx-auto flex w-full max-w-5xl flex-1 flex-col items-center justify-center py-12 text-center sm:py-16">
+        <div className="relative z-10 mx-auto flex w-full max-w-5xl flex-1 flex-col items-center justify-start pt-[18vh] text-center sm:justify-center sm:py-16">
           <h1
-            className="maintenance-reveal max-w-5xl wrap-break-word font-display text-[clamp(2.65rem,11vw,9.5rem)] font-black uppercase leading-[0.88] tracking-normal text-white"
+            className="maintenance-reveal w-full max-w-none wrap-break-word font-display text-[clamp(3.15rem,15vw,9.5rem)] font-black uppercase leading-[0.88] tracking-normal text-white sm:max-w-5xl sm:text-[clamp(3.5rem,11vw,9.5rem)]"
             style={{ '--maintenance-delay': '160ms' } as React.CSSProperties}
           >
             Estamos preparando uma nova experiência
