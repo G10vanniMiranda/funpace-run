@@ -13,7 +13,7 @@ export function MaintenancePage() {
           <a
             href="/"
             aria-label="FunPace"
-            className="group relative inline-flex h-10 w-52 items-center justify-center overflow-hidden text-white sm:h-14 sm:w-72 lg:h-18 lg:w-88"
+            className="group relative inline-flex h-8 w-44 items-center justify-center overflow-hidden text-white sm:h-14 sm:w-72 lg:h-18 lg:w-88"
           >
             <img
               src="/funpace1.png"
