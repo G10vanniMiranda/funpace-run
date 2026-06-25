@@ -20,7 +20,7 @@ export function MaintenancePage() {
               alt="FunPace"
               width="320"
               height="86"
-              className="h-16 w-auto max-w-[76vw] object-contain shadow-[0_0_22px_rgba(216,255,0,0.14)] transition-transform duration-200 group-hover:-translate-y-0.5 sm:h-20 lg:h-24"
+              className="h-28 w-auto max-w-[90vw] object-contain mix-blend-screen transition-transform duration-200 group-hover:-translate-y-0.5 sm:h-36 lg:h-44"
             />
           </a>
         </header>
@@ -37,7 +37,7 @@ export function MaintenancePage() {
             className="maintenance-reveal mt-7 max-w-2xl space-y-3 text-base leading-7 text-zinc-300 sm:mt-9 sm:text-lg md:text-xl md:leading-8"
             style={{ '--maintenance-delay': '260ms' } as React.CSSProperties}
           >
-            <p>Agradecemos sua compreensão. Voltaremos muito em breve.</p>
+            <p>Voltaremos em breve.</p>
           </div>
 
           <div
