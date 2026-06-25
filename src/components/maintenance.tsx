@@ -7,8 +7,20 @@ export function MaintenancePage() {
   const pillars = ['Performance', 'Inovação', 'Comunidade'];
 
   return (
-    <main className="maintenance-page min-h-screen bg-[#050505] text-white">
-      <section className="relative mx-auto flex min-h-screen w-full max-w-472 flex-col justify-between px-3 py-6 sm:px-8 sm:py-8 lg:px-12">
+    <main className="maintenance-page relative min-h-screen overflow-hidden bg-[#050505] text-white">
+      <video
+        className="absolute inset-0 z-0 h-full w-full object-cover"
+        src="/hero-background.mp4"
+        autoPlay
+        muted
+        loop
+        playsInline
+        preload="metadata"
+        aria-hidden="true"
+      />
+      <div className="absolute inset-0 z-0 bg-black/60" aria-hidden="true" />
+
+      <section className="relative z-10 mx-auto flex min-h-screen w-full max-w-472 flex-col justify-between px-3 py-6 sm:px-8 sm:py-8 lg:px-12">
         <header className="maintenance-reveal flex items-center justify-center pt-2 sm:pt-3" style={{ '--maintenance-delay': '80ms' } as React.CSSProperties}>
           <a
             href="/"
