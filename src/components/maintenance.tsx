@@ -1,7 +1,6 @@
 import { Mail } from 'lucide-react';
 
-const maintenanceContactHref = 'mailto:contato@funpace.club';
-// Para WhatsApp, troque por: https://wa.me/5599999999999
+const maintenanceUpdatesHref = 'https://chat.whatsapp.com/Euv9eJpqBTvL5MKlkN1DfX?s=cl&p=i&mlu=2';
 
 export function MaintenancePage() {
   const pillars = ['Performance', 'Inovação', 'Comunidade'];
@@ -57,7 +56,9 @@ export function MaintenancePage() {
             style={{ '--maintenance-delay': '360ms' } as React.CSSProperties}
           >
             <a
-              href={maintenanceContactHref}
+              href={maintenanceUpdatesHref}
+              target="_blank"
+              rel="noreferrer"
               className="premium-button inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-black uppercase tracking-normal text-black transition-colors hover:bg-brand focus:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-black sm:min-h-14 sm:px-8"
             >
               <Mail className="h-4 w-4" aria-hidden="true" />
