@@ -24,7 +24,7 @@ export function MaintenancePage() {
           <a
             href="/"
             aria-label="FunPace"
-            className="group relative inline-flex h-8 w-44 items-center justify-center overflow-hidden text-white sm:h-14 sm:w-72 lg:h-18 lg:w-88"
+            className="group relative inline-flex h-4 w-36 items-center justify-center overflow-hidden text-white sm:h-14 sm:w-72 lg:h-18 lg:w-88"
           >
             <img
               src="/funpace1.png"
@@ -45,21 +45,14 @@ export function MaintenancePage() {
           </h1>
 
           <div
-            className="maintenance-reveal mt-7 max-w-2xl space-y-3 text-base leading-7 text-zinc-300 sm:mt-9 sm:text-lg md:text-xl md:leading-8"
-            style={{ '--maintenance-delay': '260ms' } as React.CSSProperties}
-          >
-            <p>Voltaremos em breve.</p>
-          </div>
-
-          <div
-            className="maintenance-reveal mt-9 flex w-full justify-center sm:mt-11"
+            className="maintenance-reveal mt-24 flex w-full justify-center sm:mt-11"
             style={{ '--maintenance-delay': '360ms' } as React.CSSProperties}
           >
             <a
               href={maintenanceUpdatesHref}
               target="_blank"
               rel="noreferrer"
-              className="premium-button inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-black uppercase tracking-normal text-black transition-colors hover:bg-brand focus:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-black sm:min-h-14 sm:px-8"
+              className="premium-button maintenance-button inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-black uppercase tracking-normal text-black transition-colors hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black sm:min-h-14 sm:px-8"
             >
               <Mail className="h-4 w-4" aria-hidden="true" />
               <span>Receber novidades</span>

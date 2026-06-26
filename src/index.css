@@ -229,6 +229,14 @@
   transform: translate3d(0, -2px, 0);
 }
 
+.maintenance-button {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55), 0 18px 42px rgba(255, 255, 255, 0.14);
+}
+
+.maintenance-button:hover {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9), 0 22px 58px rgba(255, 255, 255, 0.24);
+}
+
 .premium-button:active {
   transform: translate3d(0, 0, 0) scale(0.985);
 }
