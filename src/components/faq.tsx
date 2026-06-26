@@ -5,24 +5,24 @@ import { Reveal } from './premium';
 
 const faqs = [
   {
-    question: 'Posso alterar minha distancia apos a inscrição?',
-    answer: 'Sim. A alteração de distancia pode ser feita gratuitamente através do seu painel de corredor ate 15 dias antes da prova. Alteracoes de lote poderao sofrer cobranca da diferenca de valor.',
+    question: 'Posso alterar minha distância após a inscrição?',
+    answer: 'Não. Após a confirmação da inscrição, não é possível alterar a distância escolhida. A definição da distância faz parte do planejamento técnico do evento, incluindo controle de vagas, kits, estrutura operacional e segurança dos atletas. Por isso, alterações de percurso após a conclusão da inscrição não são permitidas. Recomendamos que o participante confira cuidadosamente a distância desejada antes de finalizar a inscrição.',
   },
   {
-    question: 'Onde e quando sera a retirada dos kits?',
-    answer: 'A retirada dos kits do Lote 1 acontecera nos dias 10 e 11 de Setembro, na Running Store Oficial em Porto Velho. O local exato e horarios serao enviados por email com antecedencia.',
+    question: 'Onde e quando será a retirada dos kits?',
+    answer: 'O local, a data e o horário para a retirada dos kits serão divulgados aproximadamente 1 semana antes do evento. Todas as informações oficiais serão publicadas em nossos canais de comunicação e enviadas aos atletas inscritos. Fique atento ao seu e-mail e às redes sociais da FunPace para acompanhar as atualizações.',
   },
   {
     question: 'Teremos guarda-volumes no local da prova?',
-    answer: 'Sim. Havera um complexo de guarda-volumes organizado e seguro na arena do evento, abrindo as 05:00 AM e fechando 1h apos a chegada do ultimo atleta.',
+    answer: 'Não. O evento não contará com serviço de guarda-volumes. Recomendamos que os participantes levem apenas itens essenciais para a prova e evitem portar objetos de valor. A organização não se responsabiliza por pertences deixados no local do evento.',
   },
   {
-    question: 'Existem blocos de largada baseados no pace?',
-    answer: 'Absolutamente. Ao se inscrever, voce seleciona seu pace estimado, e entregaremos as pulseiras de pelotao no kit para garantir uma largada fluida e focada em performance.',
+    question: 'Posso transferir minha inscrição para outra pessoa?',
+    answer: 'Não. As inscrições são pessoais e intransferíveis. Por questões de segurança, organização do evento, controle de resultados, seguro do atleta e responsabilidade da organização, não é permitida a troca de titularidade da inscrição. Caso o atleta inscrito não possa participar da prova, a inscrição não poderá ser utilizada por outra pessoa, mesmo que haja venda, doação ou qualquer outro tipo de transferência. Participantes que correrem utilizando a inscrição de terceiros poderão ser desclassificados, não terão direito à premiação e poderão ser impedidos de participar de futuras edições do evento. Recomendamos que, antes de concluir a inscrição, o participante tenha certeza de que poderá comparecer na data da prova.',
   },
   {
     question: 'A corrida acontece se chover?',
-    answer: "Sim. A Funpace Run e uma prova 'No Excuses'. O evento ocorre sob chuva, desde que nao haja risco de seguranca estrutural aos participantes avaliado pelos orgaos oficiais.",
+    answer: "Sim. A Funpace Run é uma prova 'No Excuses'. O evento ocorre sob chuva, desde que não haja risco de seguranca estrutural aos participantes avaliado pelos orgãos oficiais.",
   },
 ];
 

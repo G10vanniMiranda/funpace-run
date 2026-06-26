@@ -87,7 +87,7 @@ export function Hero() {
           animate={reducedMotion ? undefined : { opacity: 1, y: 0, clipPath: 'inset(0 0 0% 0)' }}
           transition={{ duration: 1, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
         >
-          FUNPACE<br />
+          FUNPACE <br />
           <span className="text-black [-webkit-text-stroke:1px_white] drop-shadow-[0_0_28px_rgba(255,255,255,0.08)] sm:[-webkit-text-stroke:2px_white]">
             RUN 2026
           </span>
