@@ -32,6 +32,9 @@ export function FAQSection() {
   return (
     <section id="faq" className="mx-auto max-w-4xl scroll-mt-24 border-t border-zinc-900 px-4 py-16 sm:px-6 md:py-24">
       <Reveal className="mb-10 md:mb-16">
+        <h2 className="font-display text-[clamp(3.25rem,16vw,7rem)] font-black uppercase leading-none tracking-tighter text-white">
+          FAQ
+        </h2>
         <p className="mt-4 border-b border-zinc-800 pb-6 font-mono text-xs uppercase leading-relaxed tracking-widest text-zinc-500 sm:text-sm md:pb-8">
           Tire suas dúvidas antes de ir para a pista.
         </p>

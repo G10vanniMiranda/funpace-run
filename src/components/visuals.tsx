@@ -61,10 +61,10 @@ export function Gallery() {
   const y2 = useTransform(scrollYProgress, [0, 1], [0, 80]);
 
   const images = [
-    'https://images.unsplash.com/photo-1552674605-15cce7039600?auto=format&fit=crop&q=80',
-    'https://images.unsplash.com/photo-1530143311094-34d807799e8f?auto=format&fit=crop&q=80',
-    'https://images.unsplash.com/photo-1541534741688-6078c6bfb5c5?auto=format&fit=crop&q=80',
-    'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&q=80',
+    '/gallery/runner-1.webp',
+    '/gallery/runner-2.webp',
+    '/gallery/runner-3.webp',
+    '/gallery/runner-4.webp',
   ];
 
   return (

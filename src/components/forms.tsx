@@ -1,8 +1,9 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
-import { AlertTriangle, ArrowRight, Building, CheckCircle2, Info, Loader2, XCircle, Zap } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, XCircle, Zap } from 'lucide-react';
+import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
-import { ApiError, createPartnershipLead, createRegistration, getAvailability } from '../lib/api';
-import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
+import { ApiError, createRegistration, getAvailability } from '../lib/api';
+import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import { Reveal } from './premium';
 
@@ -202,7 +203,8 @@ export function RegistrationSection() {
               </Field>
             </div>
 
-            <div className="space-y-3 border border-black/10 bg-black/5 p-3.5 sm:p-4">
+            {requireRegistrationAcceptances && (
+              <div className="space-y-3 border border-black/10 bg-black/5 p-3.5 sm:p-4">
               <Checkbox checked={formData.termsAccepted} onChange={(checked) => updateField('termsAccepted', checked)}>
                 Li e aceito o termo de responsabilidade da prova.
               </Checkbox>
@@ -217,7 +219,8 @@ export function RegistrationSection() {
                 Autorizo o uso dos meus dados para processar a inscrição, conforme a <a href="/privacidade" className="underline">politica de privacidade</a>.
               </Checkbox>
               {errors.privacyAccepted && <p className={errorClass}>{errors.privacyAccepted}</p>}
-            </div>
+              </div>
+            )}
 
             <button
               type="submit"
@@ -338,158 +341,32 @@ function AlertMessage({
 }
 
 export function SponsorSection() {
-  const [formData, setFormData] = useState({
-    companyName: '',
-    contactNameRole: '',
-    corporateEmail: '',
-    involvementMessage: '',
-    website: '',
-  });
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [status, setStatus] = useState<null | 'submitting' | 'success' | 'error'>(null);
-  const isSubmitting = status === 'submitting';
-
-  const validateSponsor = () => {
-    const nextErrors: Record<string, string> = {};
-    const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.corporateEmail.trim());
-
-    if (!formData.companyName.trim()) {
-      nextErrors.companyName = 'Informe o nome da empresa.';
-    }
-
-    if (!formData.contactNameRole.trim()) {
-      nextErrors.contactNameRole = 'Informe seu nome e cargo.';
-    }
-
-    if (!emailIsValid) {
-      nextErrors.corporateEmail = 'Informe um e-mail corporativo valido.';
-    }
-
-    if (formData.involvementMessage.trim().length < 10) {
-      nextErrors.involvementMessage = 'Descreva como gostaria de participar.';
-    }
-
-    return nextErrors;
-  };
-
-  const updateSponsorField = (field: keyof typeof formData, value: string) => {
-    const nextData = { ...formData, [field]: value };
-
-    setFormData(nextData);
-
-    if (Object.keys(errors).length > 0) {
-      setErrors({});
-    }
-
-    if (status === 'error' || status === 'success') {
-      setStatus(null);
-    }
-  };
-
-  const handleSubmit = async (event: FormEvent) => {
-    event.preventDefault();
-
-    if (isSubmitting) {
-      return;
-    }
-
-    const nextErrors = validateSponsor();
-    setErrors(nextErrors);
-
-    if (Object.keys(nextErrors).length > 0) {
-      setStatus('error');
-      return;
-    }
-
-    const [contactName, ...roleParts] = formData.contactNameRole.split('/').map((item) => item.trim()).filter(Boolean);
-
-    setStatus('submitting');
-
-    try {
-      await createPartnershipLead({
-        companyName: formData.companyName,
-        contactName: contactName || formData.contactNameRole,
-        contactRole: roleParts.join(' / ') || 'Nao informado',
-        corporateEmail: formData.corporateEmail,
-        involvementMessage: formData.involvementMessage,
-        website: formData.website,
-      });
-
-      setStatus('success');
-      setErrors({});
-      setFormData({
-        companyName: '',
-        contactNameRole: '',
-        corporateEmail: '',
-        involvementMessage: '',
-        website: '',
-      });
-    } catch (error) {
-      setStatus('error');
-
-      if (error instanceof ApiError && error.errors) {
-        setErrors(error.errors);
-      }
-    }
-  };
+  const whatsappUrl = 'https://wa.me/5569992565155?text=Ol%C3%A1%2C%20tenho%20interesse%20em%20patrocinar%20a%20Funpace%20Run%20Experience.';
 
   return (
     <section className="relative border-y border-zinc-900 bg-zinc-950 px-4 py-16 sm:px-6 md:py-24">
       <Reveal className="premium-card relative z-10 mx-auto max-w-4xl p-5 text-center sm:p-8 md:p-16">
-        <Building className="mx-auto mb-6 h-12 w-12 text-brand" />
+        <FaWhatsapp className="mx-auto mb-6 h-12 w-12 text-brand" />
         <h2 className="mb-4 font-display text-[clamp(2.4rem,10vw,3rem)] font-black uppercase leading-none tracking-tighter text-white">
           Seja um Patrocinador
         </h2>
-        <p className="mx-auto mb-8 max-w-lg font-mono text-sm leading-relaxed text-zinc-400 md:mb-10">
+        <p className="hidden">
           Posicione sua marca em um evento premium focado em performance, saúde e inovação. Preencha os dados e nossa equipe de branding entrara em contato.
         </p>
 
-        <form onSubmit={handleSubmit} className="mx-auto max-w-2xl space-y-5 text-left sm:space-y-6">
-          <input
-            type="text"
-            value={formData.website}
-            onChange={(event) => updateSponsorField('website', event.target.value)}
-            className="hidden"
-            tabIndex={-1}
-            autoComplete="off"
-            aria-hidden="true"
-          />
-          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
-            <SponsorField error={errors.companyName}>
-              <input required type="text" value={formData.companyName} onChange={(event) => updateSponsorField('companyName', event.target.value)} placeholder="Nome da Empresa" className="w-full border border-zinc-800 bg-zinc-900 p-4 text-white transition-colors focus:border-brand focus:outline-none" />
-            </SponsorField>
-            <SponsorField error={errors.contactNameRole}>
-              <input required type="text" value={formData.contactNameRole} onChange={(event) => updateSponsorField('contactNameRole', event.target.value)} placeholder="Seu Nome / Cargo" className="w-full border border-zinc-800 bg-zinc-900 p-4 text-white transition-colors focus:border-brand focus:outline-none" />
-            </SponsorField>
-            <SponsorField error={errors.corporateEmail} className="md:col-span-2">
-              <input required type="email" value={formData.corporateEmail} onChange={(event) => updateSponsorField('corporateEmail', event.target.value)} placeholder="E-mail Corporativo" className="w-full border border-zinc-800 bg-zinc-900 p-4 text-white transition-colors focus:border-brand focus:outline-none" />
-            </SponsorField>
-            <SponsorField error={errors.involvementMessage} className="md:col-span-2">
-              <textarea
-                required
-                value={formData.involvementMessage}
-                onChange={(event) => updateSponsorField('involvementMessage', event.target.value)}
-                placeholder="Como gostaria de se envolver no evento? (Ex: Patrocinio Master, Ativacao Tenda, etc)"
-                rows={4}
-                className="w-full resize-none border border-zinc-800 bg-zinc-900 p-4 text-white transition-colors focus:border-brand focus:outline-none"
-              />
-            </SponsorField>
-          </div>
-          <button type="submit" disabled={isSubmitting} className="premium-button flex min-h-14 w-full items-center justify-center gap-2 bg-white p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-brand disabled:cursor-wait disabled:opacity-70">
-            {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-            {isSubmitting ? 'ENVIANDO PROPOSTA' : 'ENVIAR PROPOSTA'}
-          </button>
-          {status === 'success' && (
-            <AlertMessage tone="success" title="Proposta enviada">
-              Proposta enviada com sucesso. Nossa equipe entrara em contato em breve.
-            </AlertMessage>
-          )}
-          {status === 'error' && (
-            <AlertMessage tone="error" title="Erro">
-              Nao foi possivel enviar sua proposta agora. Tente novamente em alguns instantes.
-            </AlertMessage>
-          )}
-        </form>
+        <p className="mx-auto mb-8 max-w-lg font-mono text-sm leading-relaxed text-zinc-400 md:mb-10">
+          Posicione sua marca em um evento premium focado em performance, saude e inovacao. Fale direto com nossa equipe pelo WhatsApp.
+        </p>
+
+        <a
+          href={whatsappUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="premium-button mx-auto flex min-h-14 w-full max-w-md items-center justify-center gap-3 bg-white p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-brand sm:p-5"
+        >
+          <FaWhatsapp className="h-5 w-5 shrink-0" />
+          Falar no WhatsApp
+        </a>
       </Reveal>
 
       <div className="pointer-events-none absolute left-1/2 top-1/2 z-0 w-full -translate-x-1/2 -translate-y-1/2 select-none overflow-hidden text-center opacity-5">
@@ -498,14 +375,5 @@ export function SponsorSection() {
         </h2>
       </div>
     </section>
-  );
-}
-
-function SponsorField({ error, className = '', children }: { error?: string; className?: string; children: ReactNode }) {
-  return (
-    <div className={`min-w-0 ${className}`}>
-      {children}
-      {error && <p className="mt-2 text-xs font-bold uppercase tracking-wider text-brand">{error}</p>}
-    </div>
   );
 }

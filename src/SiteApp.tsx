@@ -9,6 +9,8 @@ import { PaymentErrorPage } from "./pages/PaymentError";
 import { PrivacyPage, TermsPage } from "./pages/Privacy";
 import { SuccessPage } from "./pages/Success";
 
+const showCourseMap = false;
+
 export default function SiteApp() {
   const pathname = window.location.pathname;
 
@@ -38,7 +40,7 @@ export default function SiteApp() {
       <Hero />
       <Marquee />
       <RegistrationSection />
-      <CourseMap />
+      {showCourseMap && <CourseMap />}
       <Gallery />
       <FAQSection />
       <SponsorSection />
