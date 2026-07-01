@@ -3,7 +3,7 @@ import { MaintenancePage } from "./components/maintenance";
 
 const SiteApp = lazy(() => import("./SiteApp"));
 
-const maintenanceMode = false;
+const maintenanceMode = true;
 
 export default function App() {
   if (maintenanceMode) {
