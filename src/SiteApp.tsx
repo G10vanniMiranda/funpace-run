@@ -1,4 +1,4 @@
-import { Navbar, Marquee, Footer } from "./components/layout";
+import { Marquee, Footer } from "./components/layout";
 import { Hero } from "./components/hero";
 import { RegistrationSection, SponsorSection } from "./components/forms";
 import { CourseMap, Gallery } from "./components/visuals";
@@ -35,7 +35,6 @@ export default function SiteApp() {
   return (
     <main className="premium-shell min-h-screen w-full bg-black text-white">
       <PremiumCursor />
-      <Navbar />
       <Hero />
       <Marquee />
       <RegistrationSection />

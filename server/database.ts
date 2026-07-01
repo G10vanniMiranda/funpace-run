@@ -187,7 +187,7 @@ const initialDatabase: Database = {
       id: 'lot-1',
       eventId: 'funpace-run-2026',
       name: 'Lote 1',
-      priceCents: 6999,
+      priceCents: 7999,
       capacity: 100,
       soldCount: 0,
       status: 'active',
