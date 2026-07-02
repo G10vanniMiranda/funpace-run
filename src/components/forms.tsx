@@ -83,7 +83,7 @@ export function RegistrationSection() {
 
     if (Object.keys(validationErrors).length > 0) {
       setStatus(null);
-      setApiMessage('Existem campos invalidos. Confira os dados destacados.');
+      setApiMessage('Existem campos inválidos. Confira os dados destacados.');
       return;
     }
 
@@ -114,7 +114,7 @@ export function RegistrationSection() {
         return;
       }
 
-      setApiMessage('Nao foi possivel iniciar o checkout.');
+      setApiMessage('Não foi possível iniciar o checkout.');
     }
   };
 
@@ -206,20 +206,20 @@ export function RegistrationSection() {
 
             {requireRegistrationAcceptances && (
               <div className="space-y-3 border border-black/10 bg-black/5 p-3.5 sm:p-4">
-              <Checkbox checked={formData.termsAccepted} onChange={(checked) => updateField('termsAccepted', checked)}>
-                Li e aceito o termo de responsabilidade da prova.
-              </Checkbox>
-              {errors.termsAccepted && <p className={errorClass}>{errors.termsAccepted}</p>}
+                <Checkbox checked={formData.termsAccepted} onChange={(checked) => updateField('termsAccepted', checked)}>
+                  Li e aceito o termo de responsabilidade da prova.
+                </Checkbox>
+                {errors.termsAccepted && <p className={errorClass}>{errors.termsAccepted}</p>}
 
-              <Checkbox checked={formData.regulationAccepted} onChange={(checked) => updateField('regulationAccepted', checked)}>
-                Li e aceito o <a href="/regulamento" className="underline">regulamento oficial</a> do FunPace Run.
-              </Checkbox>
-              {errors.regulationAccepted && <p className={errorClass}>{errors.regulationAccepted}</p>}
+                <Checkbox checked={formData.regulationAccepted} onChange={(checked) => updateField('regulationAccepted', checked)}>
+                  Li e aceito o <a href="/regulamento" className="underline">regulamento oficial</a> do FunPace Run.
+                </Checkbox>
+                {errors.regulationAccepted && <p className={errorClass}>{errors.regulationAccepted}</p>}
 
-              <Checkbox checked={formData.privacyAccepted} onChange={(checked) => updateField('privacyAccepted', checked)}>
-                Autorizo o uso dos meus dados para processar a inscrição, conforme a <a href="/privacidade" className="underline">politica de privacidade</a>.
-              </Checkbox>
-              {errors.privacyAccepted && <p className={errorClass}>{errors.privacyAccepted}</p>}
+                <Checkbox checked={formData.privacyAccepted} onChange={(checked) => updateField('privacyAccepted', checked)}>
+                  Autorizo o uso dos meus dados para processar a inscrição, conforme a <a href="/privacidade" className="underline">politica de privacidade</a>.
+                </Checkbox>
+                {errors.privacyAccepted && <p className={errorClass}>{errors.privacyAccepted}</p>}
               </div>
             )}
 
@@ -247,8 +247,8 @@ export function RegistrationSection() {
             </button>
 
             {status === 'submitting' && (
-              <AlertMessage tone="info" title="Informacao">
-                Preparando sua inscrição e conectando ao checkout. Nao feche esta tela.
+              <AlertMessage tone="info" title="Informação">
+                Preparando sua inscrição e conectando ao checkout. Não feche esta tela.
               </AlertMessage>
             )}
 
@@ -263,13 +263,10 @@ export function RegistrationSection() {
               </AlertMessage>
             )}
             {submitAttempted && Object.keys(errors).length > 0 && status !== 'api_error' && (
-              <AlertMessage tone="warning" title="Atencao">
-                Existem campos invalidos. Corrija os dados destacados para continuar.
+              <AlertMessage tone="warning" title="Atenção">
+                Existem campos inválidos. Corrija os dados destacados para continuar.
               </AlertMessage>
             )}
-            <p className="text-center text-xs font-medium leading-relaxed opacity-60">
-              * O envio ainda nao cria inscrição paga. A confirmação dependera do gateway e do webhook.
-            </p>
           </form>
         </Reveal>
       </div>

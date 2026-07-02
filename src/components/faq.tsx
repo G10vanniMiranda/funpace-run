@@ -9,8 +9,12 @@ const faqs = [
     answer: 'Não. Após a confirmação da inscrição, não é possível alterar a distância escolhida. A definição da distância faz parte do planejamento técnico do evento, incluindo controle de vagas, kits, estrutura operacional e segurança dos atletas. Por isso, alterações de percurso após a conclusão da inscrição não são permitidas. Recomendamos que o participante confira cuidadosamente a distância desejada antes de finalizar a inscrição.',
   },
   {
+    question: 'Posso solicitar o reembolso da minha inscrição?',
+    answer: 'Sim. O reembolso poderá ser solicitado em até 7 (sete) dias corridos após a confirmação da compra, conforme previsto no Código de Defesa do Consumidor, desde que a solicitação seja realizada dentro desse prazo. Após o período de 7 dias, não será possível realizar o cancelamento ou o reembolso da inscrição, uma vez que a organização já inicia os processos de planejamento do evento, produção dos kits, logística e demais custos operacionais. Para solicitar o reembolso dentro do prazo, entre em contato pelos canais oficiais de atendimento da Funpace.',
+  },
+  {
     question: 'Onde e quando será a retirada dos kits?',
-    answer: 'O local, a data e o horário para a retirada dos kits serão divulgados aproximadamente 1 semana antes do evento. Todas as informações oficiais serão publicadas em nossos canais de comunicação e enviadas aos atletas inscritos. Fique atento ao seu e-mail e às redes sociais da FunPace para acompanhar as atualizações.',
+    answer: 'O local, a data e o horário para a retirada dos kits serão divulgados aproximadamente 1 semana antes do evento. Todas as informações oficiais serão publicadas em nossos canais de comunicação e enviadas aos atletas inscritos. Fique atento ao seu e-mail e às redes sociais da Funpace para acompanhar as atualizações.',
   },
   {
     question: 'Teremos guarda-volumes no local da prova?',
