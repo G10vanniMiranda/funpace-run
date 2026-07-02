@@ -67,7 +67,7 @@ export function Hero() {
   const reducedMotion = useReducedMotion();
   const heroItems = [
     { icon: Calendar, label: 'Data', value: eventInfo.dateLabel },
-    { icon: Clock, label: 'Horário', value: `${eventInfo.startTimeLabel} - ${eventInfo.distances.join(' / ')}` },
+    { icon: Clock, label: 'Horário', value: eventInfo.startTimeLabel },
     { icon: MapPin, label: 'Local', value: eventInfo.locationLabel },
   ].filter((item) => item.value);
 
@@ -81,65 +81,65 @@ export function Hero() {
       <div className="pointer-events-none absolute -right-48 top-24 h-[min(72vw,740px)] w-[min(72vw,740px)] rounded-full border border-brand/15 shadow-[0_0_120px_rgba(215,255,0,0.08)]" />
 
       <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col items-start overflow-visible">
-        <motion.h1
-          className="max-w-[calc(100vw-2rem)] overflow-visible px-1 py-2 font-display text-[clamp(2.75rem,11.6vw,7.5rem)] font-black uppercase leading-[0.9] tracking-tighter text-white sm:max-w-[calc(100vw-3rem)] sm:text-[clamp(4.25rem,8vw,8.75rem)] md:leading-[0.86]"
-          initial={reducedMotion ? false : { opacity: 0, y: 50 }}
-          animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
-          transition={{ duration: 1, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
-        >
-          FUNPACE <br />
-          <span className="text-black [-webkit-text-stroke:1px_white] drop-shadow-[0_0_28px_rgba(255,255,255,0.08)] sm:[-webkit-text-stroke:2px_white]">
-            <span className="block">RUN</span>
-            <span className="block text-[0.78em] sm:text-[0.72em] xl:text-[0.84em]">EXPERIENCE</span>
-          </span>
-        </motion.h1>
-
-        <motion.div
-          className="mt-5 flex w-full max-w-3xl flex-col gap-4 sm:mt-8 sm:flex-row sm:items-center"
-          initial={reducedMotion ? false : { opacity: 0, y: 24 }}
-          animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.35, ease: 'easeOut' }}
-        >
-          <a
-            href="#register"
-            className="premium-button flex min-h-14 w-full items-center justify-center gap-3 bg-brand px-5 py-4 text-center text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white sm:w-auto sm:justify-start sm:px-6 sm:text-sm"
+          <motion.h1
+            className="max-w-[calc(100vw-2rem)] overflow-visible px-1 py-2 font-display text-[clamp(2.75rem,11.6vw,7.5rem)] font-black uppercase leading-[0.9] tracking-tighter text-white sm:max-w-[calc(100vw-3rem)] sm:text-[clamp(4.25rem,8vw,8.75rem)] md:leading-[0.86]"
+            initial={reducedMotion ? false : { opacity: 0, y: 50 }}
+            animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
+            transition={{ duration: 1, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
           >
-            <span>Garantir inscrição - {eventInfo.currentLot}</span>
-            <ArrowRight className="h-5 w-5 shrink-0" />
-          </a>
-        </motion.div>
+            FUNPACE <br />
+            <span className="text-black [-webkit-text-stroke:1px_white] drop-shadow-[0_0_28px_rgba(255,255,255,0.08)] sm:[-webkit-text-stroke:2px_white]">
+              <span className="block">RUN</span>
+              <span className="block text-[0.78em] sm:text-[0.72em] xl:text-[0.84em]">EXPERIENCE</span>
+            </span>
+          </motion.h1>
 
-        <motion.div
-          className="mt-6 grid w-full max-w-4xl grid-cols-1 gap-3 border-t border-white/10 pt-6 sm:grid-cols-2 md:mt-12 md:grid-cols-3 md:gap-4 md:pt-8"
-          initial={reducedMotion ? false : { opacity: 0 }}
-          animate={reducedMotion ? undefined : { opacity: 1 }}
-          transition={{ duration: 1, delay: 0.5 }}
-        >
-          {heroItems.map(({ icon: Icon, label, value }, index) => (
-            <motion.div
-              key={label}
-              className="premium-card flex min-w-0 gap-4 p-4 sm:col-span-1"
-              initial={reducedMotion ? false : { opacity: 0, y: 16 }}
-              animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.48 + index * 0.08, ease: 'easeOut' }}
+          <motion.div
+            className="mt-5 flex w-full max-w-3xl flex-col gap-4 sm:mt-8 sm:flex-row sm:items-center"
+            initial={reducedMotion ? false : { opacity: 0, y: 24 }}
+            animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
+            transition={{ duration: 0.8, delay: 0.35, ease: 'easeOut' }}
+          >
+            <a
+              href="#register"
+              className="premium-button flex min-h-14 w-full items-center justify-center gap-3 bg-brand px-5 py-4 text-center text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white sm:w-auto sm:justify-start sm:px-6 sm:text-sm"
             >
-              <Icon className="h-6 w-6 shrink-0 text-brand" />
-              <div className="min-w-0">
-                <div className="text-sm font-bold uppercase tracking-widest text-white">{label}</div>
-                <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">{value}</div>
-              </div>
-            </motion.div>
-          ))}
-        </motion.div>
+              <span>Garantir inscrição - {eventInfo.currentLot}</span>
+              <ArrowRight className="h-5 w-5 shrink-0" />
+            </a>
+          </motion.div>
 
-        <motion.div
-          className="w-full"
-          initial={reducedMotion ? false : { opacity: 0, y: 20 }}
-          animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.7 }}
-        >
-          <Countdown />
-        </motion.div>
+          <motion.div
+            className="mt-6 grid w-full max-w-4xl grid-cols-1 gap-3 border-t border-white/10 pt-6 sm:grid-cols-2 md:mt-12 md:grid-cols-3 md:gap-4 md:pt-8"
+            initial={reducedMotion ? false : { opacity: 0 }}
+            animate={reducedMotion ? undefined : { opacity: 1 }}
+            transition={{ duration: 1, delay: 0.5 }}
+          >
+            {heroItems.map(({ icon: Icon, label, value }, index) => (
+              <motion.div
+                key={label}
+                className="premium-card flex min-w-0 gap-4 p-4 sm:col-span-1"
+                initial={reducedMotion ? false : { opacity: 0, y: 16 }}
+                animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.48 + index * 0.08, ease: 'easeOut' }}
+              >
+                <Icon className="h-6 w-6 shrink-0 text-brand" />
+                <div className="min-w-0">
+                  <div className="text-sm font-bold uppercase tracking-widest text-white">{label}</div>
+                  <div className="mt-1 font-mono text-sm text-zinc-400 sm:text-base">{value}</div>
+                </div>
+              </motion.div>
+            ))}
+          </motion.div>
+
+          <motion.div
+            className="w-full"
+            initial={reducedMotion ? false : { opacity: 0, y: 20 }}
+            animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
+            transition={{ duration: 0.8, delay: 0.7 }}
+          >
+            <Countdown />
+          </motion.div>
       </div>
     </section>
   );

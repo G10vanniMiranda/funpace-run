@@ -3,6 +3,7 @@ import { Hero } from "./components/hero";
 import { RegistrationSection, SponsorSection } from "./components/forms";
 import { CourseMap, Gallery } from "./components/visuals";
 import { FAQSection } from "./components/faq";
+import { KitSection } from "./components/kit";
 import { PremiumCursor } from "./components/premium";
 import { AdminPage } from "./pages/Admin";
 import { PaymentErrorPage } from "./pages/PaymentError";
@@ -39,6 +40,7 @@ export default function SiteApp() {
       <PremiumCursor />
       <Hero />
       <Marquee />
+      <KitSection />
       <RegistrationSection />
       {showCourseMap && <CourseMap />}
       <Gallery />
