@@ -23,7 +23,7 @@ const highlights = [
     label: 'Inscrição',
     value: eventInfo.offerNote,
   },
-];
+].filter((item) => item.value);
 
 export function AboutSection() {
   return (

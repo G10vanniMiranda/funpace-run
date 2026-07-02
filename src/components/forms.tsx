@@ -125,11 +125,11 @@ export function RegistrationSection() {
           <h2 className="mb-5 font-display text-[clamp(2.8rem,13vw,4.5rem)] font-black uppercase leading-none tracking-tighter md:mb-6">
             Não fique <br />para trás.
           </h2>
-          <p className="mb-8 max-w-md text-base font-medium leading-relaxed opacity-80 sm:text-lg md:mb-10 md:text-xl">
+          <p className="mb-8 max-w-xl text-base font-medium leading-relaxed opacity-80 sm:text-lg md:mb-10 md:text-xl">
             Garanta agora sua vaga no valor promocional do primeiro lote.
           </p>
 
-          <div className="mb-6 grid max-w-md grid-cols-1 gap-3 sm:mb-8">
+          <div className="mb-6 grid w-full max-w-xl grid-cols-1 gap-3 sm:mb-8">
             <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
               <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Valor atual</p>
               <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
@@ -138,7 +138,7 @@ export function RegistrationSection() {
             </div>
           </div>
 
-          <div className="premium-card mb-8 rounded border-black/10 bg-black/5 p-4 text-black shadow-none sm:p-6">
+          <div className="premium-card mb-8 w-full max-w-xl rounded border-black/10 bg-black/5 p-4 text-black shadow-none sm:p-6">
             <h3 className="mb-4 font-black uppercase tracking-widest">O que inclui o KIT?</h3>
             <ul className="space-y-3 text-sm font-medium leading-relaxed">
               {eventInfo.kitItems.map((item) => (
@@ -149,6 +149,7 @@ export function RegistrationSection() {
               ))}
             </ul>
           </div>
+
         </Reveal>
 
         <Reveal className="min-w-0 bg-white p-4 pt-7 shadow-2xl sm:p-6 sm:pt-8 md:p-8 md:pt-10 xl:p-12" delay={0.08}>

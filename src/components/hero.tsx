@@ -69,7 +69,7 @@ export function Hero() {
     { icon: Calendar, label: 'Data', value: eventInfo.dateLabel },
     { icon: Clock, label: 'Largada', value: `${eventInfo.startTimeLabel} - ${eventInfo.distances.join(' / ')}` },
     { icon: MapPin, label: 'Local', value: eventInfo.locationLabel },
-  ];
+  ].filter((item) => item.value);
 
   return (
     <section className="relative flex min-h-svh flex-col justify-center overflow-hidden px-4 pb-12 pt-16 sm:px-6 sm:pb-16 sm:pt-20 md:min-h-[92svh] md:justify-end md:pb-24">
