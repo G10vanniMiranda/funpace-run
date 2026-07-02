@@ -21,10 +21,6 @@ export function Footer() {
     <footer className="border-t border-zinc-800 bg-black px-4 py-14 text-white sm:px-6 md:py-20">
       <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-10 md:flex-row md:items-end md:gap-12">
         <div className="flex flex-col gap-6">
-          <h2 className="font-display text-[clamp(3rem,14vw,6rem)] font-black uppercase leading-none tracking-tighter">
-            Funpace<br />
-            <span className="text-zinc-500 stroke-text">Run</span>
-          </h2>
           <a
             href={`mailto:${eventInfo.contactEmail}`}
             className="font-mono text-sm text-zinc-400 transition-colors hover:text-brand"
@@ -47,7 +43,7 @@ export function Footer() {
             </a>
           </div>
           <div className="mt-8 font-mono text-xs text-zinc-600">
-            &copy; {new Date().getFullYear()} Funpace Run. Todos os direitos reservados.
+            &copy; {new Date().getFullYear()} Funpace. Todos os direitos reservados.
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-3 text-xs font-bold uppercase tracking-widest text-zinc-500">
             <a href="/regulamento" className="hover:text-brand">Regulamento</a>

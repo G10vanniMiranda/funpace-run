@@ -45,9 +45,9 @@ export function TermsPage() {
 function LegalPage({ title, children }: { title: string; children: ReactNode }) {
   return (
     <main className="min-h-screen bg-black px-4 py-12 text-white sm:px-6 md:py-20">
-      <article className="mx-auto max-w-4xl border border-zinc-800 bg-zinc-950 p-5 sm:p-8 md:p-12">
+      <article className="mx-auto max-w-4xl min-w-0 overflow-hidden border border-zinc-800 bg-zinc-950 p-5 sm:p-8 md:p-12">
         <p className="text-brand font-bold uppercase tracking-widest text-xs mb-4">Funpace Run</p>
-        <h1 className="mb-8 font-display text-[clamp(2.6rem,12vw,4.5rem)] font-black uppercase leading-none tracking-tighter md:mb-10">
+        <h1 className="mb-8 max-w-full break-words font-display text-[clamp(2.25rem,10vw,4.5rem)] font-black uppercase leading-none tracking-normal [overflow-wrap:anywhere] md:mb-10 md:tracking-tighter">
           {title}
         </h1>
         <div className="space-y-6 text-zinc-300 font-mono text-sm leading-relaxed">
