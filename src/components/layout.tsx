@@ -20,15 +20,6 @@ export function Footer() {
   return (
     <footer className="border-t border-zinc-800 bg-black px-4 py-14 text-white sm:px-6 md:py-20">
       <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-10 md:flex-row md:items-end md:gap-12">
-        <div className="flex flex-col gap-6">
-          <a
-            href={`mailto:${eventInfo.contactEmail}`}
-            className="font-mono text-sm text-zinc-400 transition-colors hover:text-brand"
-          >
-            {eventInfo.contactEmail}
-          </a>
-        </div>
-
         <div className="flex w-full flex-col gap-4 md:w-auto">
           <h3 className="mb-2 text-sm font-bold uppercase tracking-widest text-zinc-500">Conecte-se</h3>
           <div className="flex gap-4">

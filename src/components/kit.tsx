@@ -8,9 +8,6 @@ export function KitSection() {
       <div className="relative z-10 mx-auto grid max-w-7xl grid-cols-1 items-center gap-10 lg:grid-cols-[0.82fr_1.18fr] lg:gap-16 xl:gap-24">
         <Reveal className="min-w-0">
           <p className="mb-4 text-xs font-bold uppercase tracking-widest text-brand">Kit oficial</p>
-          <h2 className="font-display text-[clamp(2.8rem,13vw,5.75rem)] font-black uppercase leading-none tracking-tighter text-white">
-            Feito para correr.
-          </h2>
 
           <div className="mt-7 grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
             {eventInfo.kitItems.map((item) => (
