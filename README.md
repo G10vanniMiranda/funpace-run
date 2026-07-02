@@ -75,6 +75,20 @@ The webhook payload is matched by `order_nsu`; the API validates the amount and 
 
 Pending registrations expire after `PENDING_PAYMENT_TTL_MINUTES`. When a pending registration expires, its lot capacity is released and the registration/payment status becomes `expired`.
 
+## Transactional Email
+
+Automatic registration emails run only in the backend. No provider key is exposed to the front-end.
+
+```bash
+EMAIL_PROVIDER="resend"
+RESEND_API_KEY="re_..."
+EMAIL_FROM="FunPace Run <inscricoes@funpace.club>"
+EMAIL_REPLY_TO="funpacerunclub@gmail.com"
+NEXT_PUBLIC_SITE_URL="https://funpace.club"
+```
+
+Use `EMAIL_PROVIDER="console"` locally to log email attempts without sending. The API sends a pending-payment email after a registration is created and a confirmation email when the payment webhook marks the registration as `paid`.
+
 ## Local Backup
 
 ```bash

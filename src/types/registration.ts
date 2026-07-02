@@ -50,6 +50,8 @@ export type RegistrationStatusResponse = {
   createdAt: string;
   updatedAt: string;
   expiresAt: string | null;
+  pendingEmailSentAt?: string | null;
+  confirmationEmailSentAt?: string | null;
 };
 
 export type AvailabilityResponse = {
@@ -137,6 +139,8 @@ export type AdminRegistration = {
   amountCents: number;
   createdAt: string;
   expiresAt: string | null;
+  pendingEmailSentAt?: string | null;
+  confirmationEmailSentAt?: string | null;
 };
 
 export type AdminRegistrationsResponse = {

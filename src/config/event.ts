@@ -22,7 +22,7 @@ export const eventInfo = {
     { value: 'prefer_not_to_answer', label: 'Prefiro não informar' },
   ],
   currentLot: 'Lote 1',
-  currentLotPriceCents: 7990,
+  currentLotPriceCents: 100,
   currentLotCapacity: 100,
   offerNote: 'Inscrição confirmada somente após pagamento aprovado.',
   kitItems: [

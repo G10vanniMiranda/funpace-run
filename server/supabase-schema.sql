@@ -42,7 +42,11 @@ create table if not exists "run-registrations" (
   payload jsonb not null,
   created_at text not null,
   updated_at text not null,
-  expires_at text
+  expires_at text,
+  pending_email_sent_at text,
+  confirmation_email_sent_at text,
+  pending_email_last_attempt_at text,
+  confirmation_email_last_attempt_at text
 );
 
 create table if not exists "run-payments" (
@@ -118,6 +122,10 @@ create index if not exists "run-partnership-leads_status_idx" on "run-partnershi
 create index if not exists "run-partnership-leads_created_at_idx" on "run-partnership-leads"(created_at);
 
 alter table "run-registrations" add column if not exists expires_at text;
+alter table "run-registrations" add column if not exists pending_email_sent_at text;
+alter table "run-registrations" add column if not exists confirmation_email_sent_at text;
+alter table "run-registrations" add column if not exists pending_email_last_attempt_at text;
+alter table "run-registrations" add column if not exists confirmation_email_last_attempt_at text;
 alter table "run-payments" add column if not exists expires_at text;
 
 insert into "run-events" (id, name, slug, status, date, start_time, location_name, city, state)
@@ -145,7 +153,7 @@ values (
   'lot-1',
   'funpace-run-2026',
   'Lote 1',
-  7990,
+  100,
   100,
   0,
   'active',
@@ -156,6 +164,6 @@ on conflict (id) do nothing;
 
 update "run-lots"
 set
-  price_cents = 7990,
+  price_cents = 100,
   capacity = 100
 where id = 'lot-1';

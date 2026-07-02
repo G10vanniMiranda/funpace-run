@@ -50,6 +50,10 @@ export type RegistrationRecord = {
   createdAt: string;
   updatedAt: string;
   expiresAt?: string | null;
+  pendingEmailSentAt?: string | null;
+  confirmationEmailSentAt?: string | null;
+  pendingEmailLastAttemptAt?: string | null;
+  confirmationEmailLastAttemptAt?: string | null;
 };
 
 export type PaymentRecord = {
@@ -187,7 +191,7 @@ const initialDatabase: Database = {
       id: 'lot-1',
       eventId: 'funpace-run-2026',
       name: 'Lote 1',
-      priceCents: 7990,
+      priceCents: 100,
       capacity: 100,
       soldCount: 0,
       status: 'active',
@@ -302,7 +306,11 @@ async function ensurePostgresDatabase(client: Queryable) {
       payload jsonb not null,
       created_at text not null,
       updated_at text not null,
-      expires_at text
+      expires_at text,
+      pending_email_sent_at text,
+      confirmation_email_sent_at text,
+      pending_email_last_attempt_at text,
+      confirmation_email_last_attempt_at text
     );
 
     create table if not exists ${table.payments} (
@@ -379,6 +387,10 @@ async function ensurePostgresDatabase(client: Queryable) {
   `);
 
   await client.query(`alter table ${table.registrations} add column if not exists expires_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists pending_email_sent_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_sent_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists pending_email_last_attempt_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_last_attempt_at text`);
   await client.query(`alter table ${table.payments} add column if not exists expires_at text`);
 
   const existingEvents = await client.query(`select count(*)::int as count from ${table.events}`);
@@ -403,7 +415,7 @@ async function readPostgresDatabase(client: Queryable): Promise<Database> {
     client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`),
     client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`),
     client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`),
-    client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at from ${table.registrations}`),
+    client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at from ${table.registrations}`),
     client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at from ${table.payments}`),
     client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`),
     client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`),
@@ -455,6 +467,10 @@ async function readPostgresDatabase(client: Queryable): Promise<Database> {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       expiresAt: row.expires_at,
+      pendingEmailSentAt: row.pending_email_sent_at,
+      confirmationEmailSentAt: row.confirmation_email_sent_at,
+      pendingEmailLastAttemptAt: row.pending_email_last_attempt_at,
+      confirmationEmailLastAttemptAt: row.confirmation_email_last_attempt_at,
     })),
     payments: payments.rows.map((row) => ({
       id: row.id,
@@ -567,8 +583,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -578,8 +594,28 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          amount_cents = excluded.amount_cents,
          payload = excluded.payload,
          updated_at = excluded.updated_at,
-         expires_at = excluded.expires_at`,
-      [item.id, item.eventId, item.distanceId, item.lotId, item.cpfHash, item.status, item.amountCents, item.payload, item.createdAt, item.updatedAt, item.expiresAt || null],
+         expires_at = excluded.expires_at,
+         pending_email_sent_at = excluded.pending_email_sent_at,
+         confirmation_email_sent_at = excluded.confirmation_email_sent_at,
+         pending_email_last_attempt_at = excluded.pending_email_last_attempt_at,
+         confirmation_email_last_attempt_at = excluded.confirmation_email_last_attempt_at`,
+      [
+        item.id,
+        item.eventId,
+        item.distanceId,
+        item.lotId,
+        item.cpfHash,
+        item.status,
+        item.amountCents,
+        item.payload,
+        item.createdAt,
+        item.updatedAt,
+        item.expiresAt || null,
+        item.pendingEmailSentAt || null,
+        item.confirmationEmailSentAt || null,
+        item.pendingEmailLastAttemptAt || null,
+        item.confirmationEmailLastAttemptAt || null,
+      ],
     );
   }
 

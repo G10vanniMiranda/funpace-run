@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation.js';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
 import { pingDatabase, transaction, type Database, type PartnershipLeadRecord, type PartnershipLeadStatus, type PaymentRecord, type RegistrationRecord } from './database.js';
+import { getEmailProvider, isEmailConfigured, sendRegistrationEmail, type RegistrationEmailContext, type RegistrationEmailKind } from './email.js';
 import { createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 
 const port = Number(process.env.API_PORT || 3001);
@@ -482,6 +483,158 @@ async function markPaymentCreationFailed(registrationId: string) {
   });
 }
 
+async function processRegistrationEmail(kind: RegistrationEmailKind, registrationId: string) {
+  const provider = getEmailProvider();
+  const attemptField = kind === 'pending' ? 'pendingEmailLastAttemptAt' : 'confirmationEmailLastAttemptAt';
+  const sentField = kind === 'pending' ? 'pendingEmailSentAt' : 'confirmationEmailSentAt';
+  const now = new Date().toISOString();
+
+  if (!isEmailConfigured()) {
+    await transaction((database) => {
+      const registration = database.registrations.find((item) => item.id === registrationId);
+
+      if (!registration) {
+        return;
+      }
+
+      database.auditLogs.push({
+        id: randomUUID(),
+        actor: 'system',
+        action: `email.${kind}.skipped`,
+        entityType: 'registration',
+        entityId: registration.id,
+        payload: {
+          provider,
+          email: registration.payload.email,
+          reason: 'email provider not configured',
+        },
+        createdAt: now,
+      });
+    });
+
+    console.log(JSON.stringify({
+      at: now,
+      message: 'registration_email_skipped',
+      kind,
+      provider,
+      registrationId,
+      reason: 'email provider not configured',
+    }));
+    return;
+  }
+
+  const context = await transaction<RegistrationEmailContext | null>((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+
+    if (!registration) {
+      return null;
+    }
+
+    if (registration[sentField] || registration[attemptField]) {
+      return null;
+    }
+
+    const event = database.events.find((item) => item.id === registration.eventId);
+    const distance = database.distances.find((item) => item.id === registration.distanceId);
+    const lot = database.lots.find((item) => item.id === registration.lotId) || null;
+
+    if (!event || !distance) {
+      database.auditLogs.push({
+        id: randomUUID(),
+        actor: 'system',
+        action: `email.${kind}.failed`,
+        entityType: 'registration',
+        entityId: registration.id,
+        payload: {
+          provider,
+          email: registration.payload.email,
+          reason: 'registration email context missing',
+        },
+        createdAt: now,
+      });
+      return null;
+    }
+
+    registration[attemptField] = now;
+
+    database.auditLogs.push({
+      id: randomUUID(),
+      actor: 'system',
+      action: `email.${kind}.attempted`,
+      entityType: 'registration',
+      entityId: registration.id,
+      payload: {
+        provider,
+        email: registration.payload.email,
+      },
+      createdAt: now,
+    });
+
+    return {
+      registration: { ...registration, payload: { ...registration.payload } },
+      event: { ...event },
+      distanceName: distance.name,
+      lot: lot ? { ...lot } : null,
+    };
+  });
+
+  if (!context) {
+    return;
+  }
+
+  let result;
+
+  try {
+    result = await sendRegistrationEmail(kind, context);
+  } catch (error) {
+    result = {
+      ok: false,
+      provider,
+      error: error instanceof Error ? error.message : 'Unknown email error',
+    };
+  }
+
+  const completedAt = new Date().toISOString();
+
+  await transaction((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+
+    if (!registration) {
+      return;
+    }
+
+    if (result.ok) {
+      registration[sentField] = completedAt;
+    }
+
+    database.auditLogs.push({
+      id: randomUUID(),
+      actor: 'system',
+      action: result.ok ? `email.${kind}.sent` : `email.${kind}.failed`,
+      entityType: 'registration',
+      entityId: registration.id,
+      payload: {
+        provider: result.provider,
+        email: registration.payload.email,
+        providerMessageId: result.providerMessageId || null,
+        error: result.ok ? null : result.error || 'Email send failed',
+      },
+      createdAt: completedAt,
+    });
+  });
+
+  console.log(JSON.stringify({
+    at: completedAt,
+    message: result.ok ? 'registration_email_sent' : 'registration_email_failed',
+    kind,
+    provider: result.provider,
+    registrationId,
+    email: context.registration.payload.email,
+    providerMessageId: result.providerMessageId,
+    error: result.ok ? undefined : result.error,
+  }));
+}
+
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
   if (!requireJson(req, res)) {
     return;
@@ -594,6 +747,10 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       createdAt: now,
       updatedAt: now,
       expiresAt,
+      pendingEmailSentAt: null,
+      confirmationEmailSentAt: null,
+      pendingEmailLastAttemptAt: null,
+      confirmationEmailLastAttemptAt: null,
     };
     const payment: PaymentRecord = {
       id: randomUUID(),
@@ -689,6 +846,11 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   }
 
   const { statusCode, amountCents: _amountCents, description: _description, ...payloadResponse } = response;
+
+  if (statusCode === 201 && response.registrationStatus === 'pending_payment' && response.registrationId) {
+    await processRegistrationEmail('pending', response.registrationId);
+  }
+
   logRequest(req, statusCode, response.registrationId ? 'registration_processed' : 'registration_rejected');
   json(res, statusCode, payloadResponse);
 }
@@ -856,6 +1018,10 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return { statusCode: 200, payload: { ok: true } };
   });
 
+  if (result.statusCode === 200 && nextStatus === 'paid') {
+    await processRegistrationEmail('confirmation', registrationId);
+  }
+
   json(res, result.statusCode, result.payload);
 }
 
@@ -882,6 +1048,8 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     createdAt: registration.createdAt,
     updatedAt: registration.updatedAt,
     expiresAt: registration.expiresAt || null,
+    pendingEmailSentAt: registration.pendingEmailSentAt || null,
+    confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
   });
 }
 
@@ -1038,6 +1206,8 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     amountCents: registration.amountCents,
     createdAt: registration.createdAt,
     expiresAt: registration.expiresAt || null,
+    pendingEmailSentAt: registration.pendingEmailSentAt || null,
+    confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
   };
 }
 
