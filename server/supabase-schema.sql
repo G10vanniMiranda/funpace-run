@@ -145,7 +145,7 @@ values (
   'lot-1',
   'funpace-run-2026',
   'Lote 1',
-  7999,
+  7990,
   100,
   0,
   'active',
@@ -156,6 +156,6 @@ on conflict (id) do nothing;
 
 update "run-lots"
 set
-  price_cents = 7999,
+  price_cents = 7990,
   capacity = 100
 where id = 'lot-1';

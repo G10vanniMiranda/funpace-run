@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
-import { ArrowRight, Calendar, MapPin } from 'lucide-react';
+import { ArrowRight, Calendar, Clock, MapPin } from 'lucide-react';
 import { eventInfo } from '../config/event';
 
 function Countdown() {
@@ -42,7 +42,7 @@ function Countdown() {
   ];
 
   return (
-    <div className="isolate mt-8 grid w-full max-w-88 grid-cols-4 gap-2 sm:max-w-none sm:flex md:mt-12">
+    <div className="isolate mt-6 grid w-full max-w-88 grid-cols-4 gap-2 sm:max-w-none sm:flex md:mt-12">
       {timeBlocks.map((block, index) => (
         <motion.div
           key={block.label}
@@ -67,11 +67,12 @@ export function Hero() {
   const reducedMotion = useReducedMotion();
   const heroItems = [
     { icon: Calendar, label: 'Data', value: eventInfo.dateLabel },
+    { icon: Clock, label: 'Horário', value: `${eventInfo.startTimeLabel} - ${eventInfo.distances.join(' / ')}` },
     { icon: MapPin, label: 'Local', value: eventInfo.locationLabel },
   ].filter((item) => item.value);
 
   return (
-    <section className="relative flex min-h-svh flex-col justify-center overflow-hidden px-4 pb-12 pt-16 sm:px-6 sm:pb-16 sm:pt-20 md:min-h-[92svh] md:justify-end md:pb-24">
+    <section className="relative flex flex-col justify-start overflow-hidden px-4 pb-10 pt-10 sm:px-6 sm:pb-16 sm:pt-20 md:min-h-[92svh] md:justify-end md:pb-24">
       <div className="premium-aurora" />
       <div className="premium-grid" />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_18%,rgba(215,255,0,0.14),transparent_24rem),linear-gradient(to_bottom,transparent,rgba(0,0,0,0.78))]" />
@@ -94,7 +95,7 @@ export function Hero() {
         </motion.h1>
 
         <motion.div
-          className="mt-7 flex w-full max-w-3xl flex-col gap-4 sm:mt-8 sm:flex-row sm:items-center"
+          className="mt-5 flex w-full max-w-3xl flex-col gap-4 sm:mt-8 sm:flex-row sm:items-center"
           initial={reducedMotion ? false : { opacity: 0, y: 24 }}
           animate={reducedMotion ? undefined : { opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.35, ease: 'easeOut' }}
@@ -109,7 +110,7 @@ export function Hero() {
         </motion.div>
 
         <motion.div
-          className="mt-9 grid w-full max-w-4xl grid-cols-1 gap-3 border-t border-white/10 pt-7 sm:grid-cols-2 md:mt-12 md:grid-cols-3 md:gap-4 md:pt-8"
+          className="mt-6 grid w-full max-w-4xl grid-cols-1 gap-3 border-t border-white/10 pt-6 sm:grid-cols-2 md:mt-12 md:grid-cols-3 md:gap-4 md:pt-8"
           initial={reducedMotion ? false : { opacity: 0 }}
           animate={reducedMotion ? undefined : { opacity: 1 }}
           transition={{ duration: 1, delay: 0.5 }}
