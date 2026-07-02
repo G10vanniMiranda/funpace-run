@@ -52,13 +52,13 @@ export function SuccessPage() {
           {message}
         </p>
         {registrationId && (
-          <p className="wrap-break-word text-sm font-bold uppercase tracking-widest text-brand">Inscricao: {registrationId}</p>
+          <p className="wrap-break-word text-sm font-bold uppercase tracking-widest text-brand">Inscrição: {registrationId}</p>
         )}
         {captureMethod && (
-          <p className="mt-3 text-xs font-bold uppercase tracking-widest text-zinc-500">Metodo: {captureMethod}</p>
+          <p className="mt-3 text-xs font-bold uppercase tracking-widest text-zinc-500">Método: {captureMethod}</p>
         )}
         {transactionNsu && (
-          <p className="mt-3 text-xs font-bold uppercase tracking-widest text-zinc-500">Transacao: {transactionNsu}</p>
+          <p className="mt-3 text-xs font-bold uppercase tracking-widest text-zinc-500">Transação: {transactionNsu}</p>
         )}
         {receiptUrl && (
           <a href={receiptUrl} className="mr-3 mt-8 inline-flex min-h-12 items-center border border-zinc-700 px-5 py-3 text-sm font-black uppercase tracking-widest sm:px-6 sm:py-4">

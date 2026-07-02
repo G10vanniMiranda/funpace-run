@@ -442,16 +442,29 @@ function expirePendingPayments(database: Database, now = new Date()) {
   return expiredCount;
 }
 
-function toPaymentProviderStatus(status: unknown): RegistrationStatus {
-  if (status === 'paid' || status === true) {
+function toPaymentProviderStatus(event: {
+  status?: RegistrationStatus;
+  paid?: boolean;
+  amount?: number;
+  paid_amount?: number;
+} | null): RegistrationStatus {
+  if (!event) {
+    return 'pending_payment';
+  }
+
+  if (event.status === 'paid' || event.paid === true) {
     return 'paid';
   }
 
-  if (status === 'cancelled' || status === 'refunded' || status === 'expired') {
-    return status;
+  if (typeof event.amount === 'number' && typeof event.paid_amount === 'number' && event.paid_amount >= event.amount) {
+    return 'paid';
   }
 
-  if (status === 'payment_failed') {
+  if (event.status === 'cancelled' || event.status === 'refunded' || event.status === 'expired') {
+    return event.status;
+  }
+
+  if (event.status === 'payment_failed') {
     return 'payment_failed';
   }
 
@@ -950,7 +963,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   }>(rawBody);
 
   const registrationId = event?.registrationId || event?.order_nsu || '';
-  const nextStatus = toPaymentProviderStatus(event?.status || event?.paid);
+  const nextStatus = toPaymentProviderStatus(event);
 
   if (!registrationId || !event) {
     json(res, 422, { message: 'Webhook invalido.' });
@@ -974,7 +987,9 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       return { statusCode: 400, payload: { message: 'Valor do pagamento divergente.' } };
     }
 
-    if (providerEventId && database.paymentEvents.some((item) => item.providerEventId === providerEventId)) {
+    const isDuplicatedEvent = Boolean(providerEventId && database.paymentEvents.some((item) => item.providerEventId === providerEventId));
+
+    if (isDuplicatedEvent && !(nextStatus === 'paid' && registration.status !== 'paid')) {
       return { statusCode: 200, payload: { ok: true, duplicated: true } };
     }
 
@@ -1006,16 +1021,18 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       payment.expiresAt = nextStatus === 'paid' ? null : payment.expiresAt;
     }
 
-    database.paymentEvents.push({
-      id: randomUUID(),
-      paymentId: payment?.id || '',
-      providerEventId: providerEventId || randomUUID(),
-      eventType: event.eventType || 'infinitepay.payment_status_changed',
-      payload: event,
-      receivedAt: now,
-    });
+    if (!isDuplicatedEvent) {
+      database.paymentEvents.push({
+        id: randomUUID(),
+        paymentId: payment?.id || '',
+        providerEventId: providerEventId || randomUUID(),
+        eventType: event.eventType || 'infinitepay.payment_status_changed',
+        payload: event,
+        receivedAt: now,
+      });
+    }
 
-    return { statusCode: 200, payload: { ok: true } };
+    return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined } };
   });
 
   if (result.statusCode === 200 && nextStatus === 'paid') {
