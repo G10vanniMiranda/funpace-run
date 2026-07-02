@@ -1,5 +1,5 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
-import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, XCircle, Zap } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, XCircle } from 'lucide-react';
 import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { ApiError, createRegistration, getAvailability } from '../lib/api';
@@ -136,18 +136,6 @@ export function RegistrationSection() {
                 {(lotPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
               </p>
             </div>
-          </div>
-
-          <div className="premium-card mb-8 w-full max-w-xl rounded border-black/10 bg-black/5 p-4 text-black shadow-none sm:p-6">
-            <h3 className="mb-4 font-black uppercase tracking-widest">O que inclui o KIT?</h3>
-            <ul className="space-y-3 text-sm font-medium leading-relaxed">
-              {eventInfo.kitItems.map((item) => (
-                <li key={item} className="flex items-start gap-3">
-                  <Zap className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
           </div>
 
         </Reveal>
