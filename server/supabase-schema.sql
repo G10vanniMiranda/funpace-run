@@ -153,7 +153,7 @@ values (
   'lot-1',
   'funpace-run-2026',
   'Lote 1',
-  100,
+  7990,
   100,
   0,
   'active',
@@ -164,6 +164,30 @@ on conflict (id) do nothing;
 
 update "run-lots"
 set
-  price_cents = 100,
+  price_cents = 7990,
   capacity = 100
 where id = 'lot-1';
+
+update "run-registrations"
+set
+  status = 'expired',
+  amount_cents = 7990,
+  updated_at = now()::text,
+  expires_at = coalesce(expires_at, now()::text)
+where lot_id = 'lot-1'
+  and status = 'pending_payment'
+  and amount_cents <> 7990;
+
+update "run-payments" payment
+set
+  status = 'expired',
+  amount_cents = 7990,
+  checkout_url = null,
+  provider_payment_id = null,
+  updated_at = now()::text,
+  expires_at = coalesce(payment.expires_at, now()::text)
+from "run-registrations" registration
+where payment.registration_id = registration.id
+  and registration.lot_id = 'lot-1'
+  and payment.status = 'pending_payment'
+  and payment.amount_cents <> 7990;

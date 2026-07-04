@@ -25,7 +25,7 @@ function loadEnvFile(path) {
       value = value.slice(1, -1);
     }
 
-    process.env[key] = value;
+    process.env[key] ||= value;
   }
 }
 
@@ -33,6 +33,8 @@ loadEnvFile('.env');
 loadEnvFile('.env.local');
 
 const { transaction } = await import('../server/database.ts');
+
+const targetPriceCents = 7990;
 
 const result = await transaction((database) => {
   let lotsUpdated = 0;
@@ -42,14 +44,15 @@ const result = await transaction((database) => {
 
   for (const lot of database.lots) {
     if (lot.id === 'lot-1') {
-      lot.priceCents = 100;
+      lot.priceCents = targetPriceCents;
       lotsUpdated += 1;
     }
   }
 
   for (const registration of database.registrations) {
-    if (registration.lotId === 'lot-1' && registration.status === 'pending_payment') {
+    if (registration.lotId === 'lot-1' && registration.status === 'pending_payment' && registration.amountCents !== targetPriceCents) {
       registration.status = 'expired';
+      registration.amountCents = targetPriceCents;
       registration.updatedAt = now;
       registration.expiresAt = now;
       pendingRegistrationsExpired += 1;
@@ -59,8 +62,9 @@ const result = await transaction((database) => {
   for (const payment of database.payments) {
     const registration = database.registrations.find((item) => item.id === payment.registrationId);
 
-    if (registration?.lotId === 'lot-1' && payment.status === 'pending_payment') {
+    if (registration?.lotId === 'lot-1' && payment.status === 'pending_payment' && payment.amountCents !== targetPriceCents) {
       payment.status = 'expired';
+      payment.amountCents = targetPriceCents;
       payment.checkoutUrl = null;
       payment.providerPaymentId = null;
       payment.updatedAt = now;
@@ -83,6 +87,7 @@ const result = await transaction((database) => {
 
   return {
     provider: process.env.DATABASE_PROVIDER || (process.env.DATABASE_URL ? 'postgres' : 'json'),
+    targetPriceCents,
     lotsUpdated,
     pendingRegistrationsExpired,
     pendingPaymentsExpired,
