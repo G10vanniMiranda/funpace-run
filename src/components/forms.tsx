@@ -2,6 +2,7 @@ import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, XCircle } from 'lucide-react';
 import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
+import { getWhatsAppUrl } from '../config/whatsapp';
 import { ApiError, createRegistration, getAvailability } from '../lib/api';
 import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
@@ -327,7 +328,7 @@ function AlertMessage({
 }
 
 export function SponsorSection() {
-  const whatsappUrl = 'https://wa.me/5569992565155?text=Ol%C3%A1%2C%20tenho%20interesse%20em%20patrocinar%20a%20Funpace%20Run%20Experience.';
+  const whatsappUrl = getWhatsAppUrl('Olá, tenho interesse em patrocinar a FunPace Run Experience.');
 
   return (
     <section className="relative border-y border-zinc-900 bg-zinc-950 px-4 py-16 sm:px-6 md:py-24">

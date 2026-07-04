@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Marquee, Footer } from "./components/layout";
 import { Hero } from "./components/hero";
 import { RegistrationSection, SponsorSection } from "./components/forms";
@@ -5,6 +6,7 @@ import { CourseMap, Gallery } from "./components/visuals";
 import { FAQSection } from "./components/faq";
 import { KitSection } from "./components/kit";
 import { PremiumCursor } from "./components/premium";
+import { WhatsAppSupportButton } from "./components/WhatsAppSupportButton";
 import { AdminPage } from "./pages/Admin";
 import { PaymentErrorPage } from "./pages/PaymentError";
 import { PrivacyPage, TermsPage } from "./pages/Privacy";
@@ -16,37 +18,64 @@ export default function SiteApp() {
   const pathname = window.location.pathname;
 
   if (pathname === '/sucesso') {
-    return <SuccessPage />;
+    return (
+      <PublicPage>
+        <SuccessPage />
+      </PublicPage>
+    );
   }
 
-  if (pathname === '/admin') {
+  if (pathname === '/admin' || pathname.startsWith('/admin/')) {
     return <AdminPage />;
   }
 
   if (pathname === '/privacidade') {
-    return <PrivacyPage />;
+    return (
+      <PublicPage>
+        <PrivacyPage />
+      </PublicPage>
+    );
   }
 
   if (pathname === '/regulamento') {
-    return <TermsPage />;
+    return (
+      <PublicPage>
+        <TermsPage />
+      </PublicPage>
+    );
   }
 
   if (pathname === '/erro' || pathname === '/pagamento-cancelado') {
-    return <PaymentErrorPage />;
+    return (
+      <PublicPage>
+        <PaymentErrorPage />
+      </PublicPage>
+    );
   }
 
   return (
-    <main className="premium-shell min-h-screen w-full bg-black text-white">
-      <PremiumCursor />
-      <Hero />
-      <Marquee />
-      <KitSection />
-      <RegistrationSection />
-      {showCourseMap && <CourseMap />}
-      <Gallery />
-      <FAQSection />
-      <SponsorSection />
-      <Footer />
-    </main>
+    <PublicPage>
+      <main className="premium-shell min-h-screen w-full bg-black text-white">
+        <PremiumCursor />
+        <Hero />
+        <Marquee />
+        <KitSection />
+        <RegistrationSection />
+        {showCourseMap && <CourseMap />}
+        <Gallery />
+        <FAQSection />
+        <SponsorSection />
+        <Footer />
+      </main>
+    </PublicPage>
+  );
+}
+
+function PublicPage({ children }: { children: ReactNode }) {
+  return (
+    <>
+      {children}
+      <WhatsAppSupportButton />
+    </>
   );
 }
