@@ -328,7 +328,7 @@ function AlertMessage({
   return (
     <div className={`flex gap-3 border p-3 text-xs font-bold leading-relaxed shadow-sm transition-opacity duration-300 ${styles.className}`} role={tone === 'error' ? 'alert' : 'status'}>
       <Icon className="mt-0.5 h-4 w-4 shrink-0" />
-      <div className="min-w-0 break-words">
+      <div className="min-w-0 wrap-break-word">
         <p className="mb-1 font-black uppercase tracking-wider">{title}</p>
         <p className="normal-case tracking-normal">{children}</p>
       </div>
