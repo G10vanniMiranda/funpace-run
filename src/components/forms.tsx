@@ -39,6 +39,7 @@ export function RegistrationSection() {
   const activeLot = availability?.lots.find((lot) => lot.status === 'active') || availability?.lots[0];
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
   const isSubmitting = status === 'submitting';
+  const checkoutSupportUrl = getWhatsAppUrl('Ola, tentei fazer minha inscricao na FunPace Run, mas nao consegui abrir o checkout.');
 
   useEffect(() => {
     let isMounted = true;
@@ -106,7 +107,11 @@ export function RegistrationSection() {
       setStatus('api_error');
 
       if (error instanceof ApiError) {
-        setApiMessage(error.message);
+        setApiMessage(
+          error.status && error.status >= 500
+            ? 'Nao conseguimos abrir o checkout agora. Tente novamente em alguns instantes ou fale com o suporte pelo WhatsApp.'
+            : error.message,
+        );
 
         if (error.errors) {
           setErrors(error.errors as RegistrationErrors);
@@ -248,7 +253,10 @@ export function RegistrationSection() {
             )}
             {status === 'api_error' && (
               <AlertMessage tone="error" title="Erro">
-                {apiMessage}
+                <span>{apiMessage}</span>
+                <a href={checkoutSupportUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex font-black uppercase tracking-widest underline underline-offset-4">
+                  Falar com suporte
+                </a>
               </AlertMessage>
             )}
             {submitAttempted && Object.keys(errors).length > 0 && status !== 'api_error' && (
@@ -317,11 +325,11 @@ function AlertMessage({
   const Icon = styles.icon;
 
   return (
-    <div className={`flex gap-3 border p-3 text-xs font-bold uppercase leading-relaxed tracking-wider shadow-sm transition-opacity duration-300 ${styles.className}`} role={tone === 'error' ? 'alert' : 'status'}>
+    <div className={`flex gap-3 border p-3 text-xs font-bold leading-relaxed shadow-sm transition-opacity duration-300 ${styles.className}`} role={tone === 'error' ? 'alert' : 'status'}>
       <Icon className="mt-0.5 h-4 w-4 shrink-0" />
-      <div className="min-w-0">
-        <p className="mb-1 font-black">{title}</p>
-        <p>{children}</p>
+      <div className="min-w-0 break-words">
+        <p className="mb-1 font-black uppercase tracking-wider">{title}</p>
+        <p className="normal-case tracking-normal">{children}</p>
       </div>
     </div>
   );

@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation.js';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
-import { pingDatabase, transaction, type Database, type PartnershipLeadRecord, type PartnershipLeadStatus, type PaymentRecord, type RegistrationRecord } from './database.js';
+import { getDatabaseConfigurationIssue, getDatabaseRuntimeConfig, pingDatabase, transaction, type Database, type PartnershipLeadRecord, type PartnershipLeadStatus, type PaymentRecord, type RegistrationRecord } from './database.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationEmail, type RegistrationEmailContext, type RegistrationEmailKind } from './email.js';
 import { createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 
@@ -653,6 +653,16 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  const databaseConfigurationIssue = getDatabaseConfigurationIssue();
+
+  if (databaseConfigurationIssue) {
+    logRequest(req, 503, 'registration_database_not_configured');
+    json(res, 503, {
+      message: 'Inscricoes temporariamente indisponiveis. Nossa equipe ja foi acionada para concluir a configuracao do banco de dados.',
+    });
+    return;
+  }
+
   if (isRateLimited(req)) {
     json(res, 429, { message: 'Muitas tentativas. Aguarde um minuto e tente novamente.' });
     return;
@@ -870,6 +880,16 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
 async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse) {
   if (!requireJson(req, res)) {
+    return;
+  }
+
+  const databaseConfigurationIssue = getDatabaseConfigurationIssue();
+
+  if (databaseConfigurationIssue) {
+    logRequest(req, 503, 'partnership_database_not_configured');
+    json(res, 503, {
+      message: 'Envio temporariamente indisponivel. Nossa equipe ja foi acionada para concluir a configuracao do banco de dados.',
+    });
     return;
   }
 
@@ -1132,14 +1152,17 @@ async function handleHealth(req: IncomingMessage, res: ServerResponse) {
   try {
     const database = await pingDatabase();
 
-    json(res, 200, {
-      ok: true,
+    const statusCode = database.ok ? 200 : 503;
+
+    json(res, statusCode, {
+      ok: database.ok,
       service: 'funpace-run-api',
       elapsedMs: Date.now() - startedAt,
       database,
       checks,
+      databaseRuntime: getDatabaseRuntimeConfig(),
     });
-    logRequest(req, 200, 'health_ok');
+    logRequest(req, statusCode, database.ok ? 'health_ok' : 'health_database_not_configured');
   } catch (error) {
     const errorId = logServerError(req, error);
     json(res, 503, {
@@ -1148,6 +1171,7 @@ async function handleHealth(req: IncomingMessage, res: ServerResponse) {
       elapsedMs: Date.now() - startedAt,
       database: { ok: false },
       checks,
+      databaseRuntime: getDatabaseRuntimeConfig(),
       message: 'Banco de dados indisponivel.',
       errorId,
     });

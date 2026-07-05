@@ -724,7 +724,33 @@ function shouldUsePostgres() {
   return databaseProvider === 'postgres' || databaseProvider === 'supabase';
 }
 
+export function getDatabaseConfigurationIssue() {
+  if (shouldUsePostgres() && !databaseUrl) {
+    return 'DATABASE_URL deve estar configurado quando DATABASE_PROVIDER usa Postgres/Supabase.';
+  }
+
+  if (process.env.VERCEL && !shouldUsePostgres()) {
+    return 'Banco JSON local nao deve ser usado em ambiente serverless. Configure DATABASE_PROVIDER=supabase e DATABASE_URL.';
+  }
+
+  return null;
+}
+
+export function getDatabaseRuntimeConfig() {
+  return {
+    provider: databaseProvider,
+    urlConfigured: Boolean(databaseUrl),
+    configurationIssue: getDatabaseConfigurationIssue(),
+  };
+}
+
 export async function transaction<Result>(operation: (database: Database) => Result | Promise<Result>) {
+  const configurationIssue = getDatabaseConfigurationIssue();
+
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
   if (!shouldUsePostgres()) {
     const database = readJsonDatabase();
     const result = await operation(database);
@@ -755,6 +781,12 @@ export async function transaction<Result>(operation: (database: Database) => Res
 }
 
 export async function snapshot() {
+  const configurationIssue = getDatabaseConfigurationIssue();
+
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
   if (!shouldUsePostgres()) {
     return readJsonDatabase();
   }
@@ -763,6 +795,16 @@ export async function snapshot() {
 }
 
 export async function pingDatabase() {
+  const configurationIssue = getDatabaseConfigurationIssue();
+
+  if (configurationIssue) {
+    return {
+      provider: databaseProvider,
+      ok: false,
+      issue: configurationIssue,
+    };
+  }
+
   if (!shouldUsePostgres()) {
     ensureJsonDatabase();
     return { provider: 'json', ok: true };

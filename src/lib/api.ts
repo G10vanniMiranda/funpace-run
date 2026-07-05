@@ -259,7 +259,7 @@ export function createRegistration(data: RegistrationFormData) {
   return apiFetch<CreateRegistrationResponse>('/api/registrations', {
     method: 'POST',
     body: JSON.stringify(data),
-    retry: true,
+    retry: false,
   });
 }
 
