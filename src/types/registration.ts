@@ -2,7 +2,7 @@ export type RaceDistance = '10K' | '5K';
 
 export type ShirtSize = 'P' | 'M' | 'G' | 'GG';
 
-export type Gender = 'female' | 'male' | 'non_binary' | 'prefer_not_to_answer';
+export type Gender = 'female' | 'male';
 
 export type AdminGender = Gender | '';
 

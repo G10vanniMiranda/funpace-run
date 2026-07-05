@@ -2,6 +2,7 @@ import type { RegistrationErrors, RegistrationFormData } from '../types/registra
 
 const allowedDistances = new Set(['10K', '5K']);
 const allowedShirtSizes = new Set(['P', 'M', 'G', 'GG']);
+const allowedGenders = new Set(['female', 'male']);
 export const requireRegistrationAcceptances = false;
 
 export function onlyDigits(value: string) {
@@ -73,8 +74,8 @@ export function validateRegistration(data: RegistrationFormData) {
     errors.phone = 'Informe um WhatsApp valido com DDD.';
   }
 
-  if (!data.gender) {
-    errors.gender = 'Selecione uma opcao.';
+  if (!data.gender || !allowedGenders.has(data.gender)) {
+    errors.gender = 'Selecione feminino ou masculino.';
   }
 
   if (!allowedDistances.has(data.distance)) {

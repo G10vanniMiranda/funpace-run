@@ -18,8 +18,6 @@ export const eventInfo = {
   genderOptions: [
     { value: 'female', label: 'Feminino' },
     { value: 'male', label: 'Masculino' },
-    { value: 'non_binary', label: 'Não binario' },
-    { value: 'prefer_not_to_answer', label: 'Prefiro não informar' },
   ],
   currentLot: 'Lote 1',
   currentLotPriceCents: 7990,

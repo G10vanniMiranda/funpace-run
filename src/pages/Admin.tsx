@@ -1369,8 +1369,6 @@ function genderLabel(gender: AdminRegistration['gender']) {
   const labels: Record<string, string> = {
     female: 'Feminino',
     male: 'Masculino',
-    non_binary: 'Nao binario',
-    prefer_not_to_answer: 'Prefiro nao informar',
   };
 
   return gender ? labels[gender] || gender : 'Nao informado';
