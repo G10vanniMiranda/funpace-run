@@ -3,7 +3,21 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation.js';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
-import { getDatabaseConfigurationIssue, getDatabaseRuntimeConfig, pingDatabase, transaction, type Database, type PartnershipLeadRecord, type PartnershipLeadStatus, type PaymentRecord, type RegistrationRecord } from './database.js';
+import {
+  attachCheckoutToPaymentInPostgres,
+  createPendingRegistrationInPostgres,
+  getDatabaseConfigurationIssue,
+  getDatabaseRuntimeConfig,
+  markPaymentCreationFailedInPostgres,
+  pingDatabase,
+  transaction,
+  usesPostgresDatabase,
+  type Database,
+  type PartnershipLeadRecord,
+  type PartnershipLeadStatus,
+  type PaymentRecord,
+  type RegistrationRecord,
+} from './database.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationEmail, type RegistrationEmailContext, type RegistrationEmailKind } from './email.js';
 import { createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 
@@ -478,6 +492,11 @@ type PendingCheckout = CreateRegistrationResponse & {
 };
 
 async function markPaymentCreationFailed(registrationId: string) {
+  if (usesPostgresDatabase()) {
+    await markPaymentCreationFailedInPostgres(registrationId);
+    return;
+  }
+
   await transaction((database) => {
     const registration = database.registrations.find((item) => item.id === registrationId);
     const payment = database.payments.find((item) => item.registrationId === registrationId);
@@ -493,7 +512,7 @@ async function markPaymentCreationFailed(registrationId: string) {
       payment.status = 'payment_failed';
       payment.updatedAt = now;
     }
-  });
+  }, { scope: 'checkout' });
 }
 
 async function processRegistrationEmail(kind: RegistrationEmailKind, registrationId: string) {
@@ -523,7 +542,7 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
         },
         createdAt: now,
       });
-    });
+    }, { scope: 'checkout' });
 
     console.log(JSON.stringify({
       at: now,
@@ -589,7 +608,7 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
       distanceName: distance.name,
       lot: lot ? { ...lot } : null,
     };
-  });
+  }, { scope: 'checkout' });
 
   if (!context) {
     return;
@@ -634,7 +653,7 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
       },
       createdAt: completedAt,
     });
-  });
+  }, { scope: 'checkout' });
 
   console.log(JSON.stringify({
     at: completedAt,
@@ -686,7 +705,15 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
   const hash = cpfHash(payload.cpf);
 
-  const response = await transaction<PendingCheckout>((database) => {
+  const response = usesPostgresDatabase()
+    ? await createPendingRegistrationInPostgres({
+      payload,
+      cpfHash: hash,
+      paymentProvider: paymentProvider || 'not_configured',
+      expiresAt: getPendingPaymentExpiresAt(new Date().toISOString()),
+      description: getRegistrationDescription,
+    })
+    : await transaction<PendingCheckout>((database) => {
     expirePendingPayments(database);
 
     const event = database.events.find((item) => item.slug === 'funpace-run-2026' && item.status === 'published');
@@ -694,7 +721,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     if (!event) {
       return {
         statusCode: 409,
+        success: false,
         registrationId: '',
+        paymentId: null,
         registrationStatus: 'cancelled',
         checkoutStatus: 'not_configured',
         checkoutUrl: null,
@@ -708,7 +737,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     if (!distance || !activeLot) {
       return {
         statusCode: 409,
+        success: false,
         registrationId: '',
+        paymentId: null,
         registrationStatus: 'cancelled',
         checkoutStatus: 'not_configured',
         checkoutUrl: null,
@@ -725,7 +756,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
       return {
         statusCode: 409,
+        success: false,
         registrationId: '',
+        paymentId: null,
         registrationStatus: 'cancelled',
         checkoutStatus: 'not_configured',
         checkoutUrl: null,
@@ -740,7 +773,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     if (existing) {
       const payment = database.payments.find((item) => item.registrationId === existing.id);
       const response: CreateRegistrationResponse = {
+        success: existing.status !== 'paid',
         registrationId: existing.id,
+        paymentId: payment?.id || null,
         registrationStatus: existing.status,
         checkoutStatus: payment?.checkoutUrl ? 'created' : 'not_configured',
         checkoutUrl: payment?.checkoutUrl || null,
@@ -794,7 +829,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
     return {
       statusCode: 201,
+      success: true,
       registrationId: registration.id,
+      paymentId: payment.id,
       registrationStatus: registration.status,
       checkoutStatus: 'not_configured',
       checkoutUrl: null,
@@ -805,7 +842,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       amountCents: registration.amountCents,
       description: getRegistrationDescription(distance.name, activeLot.name),
     };
-  });
+  }, { scope: 'checkout' });
 
   if (
     response.statusCode === 201
@@ -816,6 +853,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     if (!infinitePayHandle) {
       await markPaymentCreationFailed(response.registrationId);
       response.statusCode = 503;
+      response.success = false;
       response.registrationStatus = 'payment_failed';
       response.checkoutStatus = 'not_configured';
       response.checkoutUrl = null;
@@ -832,25 +870,34 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
           customer: payload,
         });
 
-        await transaction((database) => {
-          const payment = database.payments.find((item) => item.registrationId === response.registrationId);
-
-          if (payment) {
-            payment.provider = 'infinitepay';
-            payment.providerPaymentId = checkout.providerPaymentId;
-            payment.checkoutUrl = checkout.checkoutUrl;
-            payment.updatedAt = new Date().toISOString();
-          }
-
-          database.paymentEvents.push({
-            id: randomUUID(),
-            paymentId: payment?.id || '',
-            providerEventId: checkout.providerPaymentId || response.registrationId,
-            eventType: 'infinitepay.checkout_created',
-            payload: checkout.raw,
-            receivedAt: new Date().toISOString(),
+        if (usesPostgresDatabase()) {
+          await attachCheckoutToPaymentInPostgres({
+            registrationId: response.registrationId,
+            providerPaymentId: checkout.providerPaymentId,
+            checkoutUrl: checkout.checkoutUrl,
+            raw: checkout.raw,
           });
-        });
+        } else {
+          await transaction((database) => {
+            const payment = database.payments.find((item) => item.registrationId === response.registrationId);
+
+            if (payment) {
+              payment.provider = 'infinitepay';
+              payment.providerPaymentId = checkout.providerPaymentId;
+              payment.checkoutUrl = checkout.checkoutUrl;
+              payment.updatedAt = new Date().toISOString();
+            }
+
+            database.paymentEvents.push({
+              id: randomUUID(),
+              paymentId: payment?.id || '',
+              providerEventId: checkout.providerPaymentId || response.registrationId,
+              eventType: 'infinitepay.checkout_created',
+              payload: checkout.raw,
+              receivedAt: new Date().toISOString(),
+            });
+          }, { scope: 'checkout' });
+        }
 
         response.checkoutStatus = 'created';
         response.checkoutUrl = checkout.checkoutUrl;
@@ -858,6 +905,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         const errorId = logServerError(req, error);
         await markPaymentCreationFailed(response.registrationId);
         response.statusCode = 502;
+        response.success = false;
         response.registrationStatus = 'payment_failed';
         response.checkoutStatus = 'not_configured';
         response.checkoutUrl = null;
@@ -871,7 +919,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   const { statusCode, amountCents: _amountCents, description: _description, ...payloadResponse } = response;
 
   if (statusCode === 201 && response.registrationStatus === 'pending_payment' && response.registrationId) {
-    await processRegistrationEmail('pending', response.registrationId);
+    processRegistrationEmail('pending', response.registrationId).catch((error) => {
+      logServerError(req, error);
+    });
   }
 
   logRequest(req, statusCode, response.registrationId ? 'registration_processed' : 'registration_rejected');
@@ -1053,7 +1103,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     }
 
     return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined } };
-  });
+  }, { scope: 'checkout' });
 
   if (result.statusCode === 200 && nextStatus === 'paid') {
     await processRegistrationEmail('confirmation', registrationId);
@@ -1065,10 +1115,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
 async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
   const id = url.pathname.split('/').at(-1) || '';
-  const database = await transaction((currentDatabase) => {
-    expirePendingPayments(currentDatabase);
-    return currentDatabase;
-  });
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'registration-status' });
   const registration = database.registrations.find((item) => item.id === id);
 
   if (!registration) {
@@ -1091,10 +1138,7 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
 }
 
 async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse) {
-  const database = await transaction((currentDatabase) => {
-    expirePendingPayments(currentDatabase);
-    return currentDatabase;
-  });
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'availability' });
   const event = database.events.find((item) => item.slug === 'funpace-run-2026');
 
   if (!event) {
@@ -1179,10 +1223,7 @@ async function handleHealth(req: IncomingMessage, res: ServerResponse) {
 }
 
 async function getAdminRows(url: URL) {
-  const database = await transaction((currentDatabase) => {
-    expirePendingPayments(currentDatabase);
-    return currentDatabase;
-  });
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
   const lotId = url.searchParams.get('lotId') || '';
   const distanceId = url.searchParams.get('distanceId') || '';
   const status = url.searchParams.get('status') || '';
@@ -1257,10 +1298,7 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const database = await transaction((currentDatabase) => {
-    expirePendingPayments(currentDatabase);
-    return currentDatabase;
-  });
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
   const paid = database.registrations.filter((item) => item.status === 'paid');
   const pending = database.registrations.filter((item) => item.status === 'pending_payment');
   const revenueCents = paid.reduce((total, item) => total + item.amountCents, 0);
@@ -1435,10 +1473,7 @@ async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const database = await transaction((currentDatabase) => {
-    expirePendingPayments(currentDatabase);
-    return currentDatabase;
-  });
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'audit' });
   const logs = database.auditLogs
     .slice()
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -1452,7 +1487,7 @@ async function handleAdminPartnerships(req: IncomingMessage, res: ServerResponse
     return;
   }
 
-  const database = await transaction((currentDatabase) => currentDatabase);
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'partnerships' });
   const partnerships = database.partnershipLeads
     .slice()
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -1569,7 +1604,7 @@ async function handleAdminPartnershipsCsv(req: IncomingMessage, res: ServerRespo
     return;
   }
 
-  const database = await transaction((currentDatabase) => currentDatabase);
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'partnerships' });
   const rows = database.partnershipLeads
     .slice()
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));

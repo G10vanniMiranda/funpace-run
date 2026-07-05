@@ -1,6 +1,7 @@
 import type { RegistrationFormData } from '../src/types/registration';
 
 const linksEndpoint = 'https://api.checkout.infinitepay.io/links';
+const requestTimeoutMs = Number(process.env.INFINITEPAY_TIMEOUT_MS || 10_000);
 
 export type InfinitePayCheckoutInput = {
   handle: string;
@@ -60,6 +61,16 @@ function getCheckoutUrl(payload: InfinitePayLinksResponse) {
   );
 }
 
+function createTimeoutSignal(timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timeout),
+  };
+}
+
 export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput) {
   const body = {
     handle: input.handle,
@@ -80,14 +91,32 @@ export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput)
     },
   };
 
-  const response = await fetch(linksEndpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
+  const timeout = createTimeoutSignal(requestTimeoutMs);
+  let response: Response;
+
+  try {
+    response = await fetch(linksEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: timeout.signal,
+    });
+  } catch (error) {
+    const timedOut = error instanceof DOMException && error.name === 'AbortError';
+
+    throw new InfinitePayError(
+      timedOut
+        ? 'InfinitePay demorou mais do que o esperado para criar o checkout.'
+        : 'Nao foi possivel conectar ao InfinitePay.',
+      timedOut ? 504 : undefined,
+    );
+  } finally {
+    timeout.clear();
+  }
+
   const payload = await response.json().catch(() => null) as InfinitePayLinksResponse | null;
 
   if (!response.ok || !payload) {

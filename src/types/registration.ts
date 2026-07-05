@@ -35,7 +35,9 @@ export type RegistrationStatus =
 export type CheckoutStatus = 'not_configured' | 'created';
 
 export type CreateRegistrationResponse = {
+  success: boolean;
   registrationId: string;
+  paymentId: string | null;
   registrationStatus: RegistrationStatus;
   checkoutStatus: CheckoutStatus;
   checkoutUrl: string | null;

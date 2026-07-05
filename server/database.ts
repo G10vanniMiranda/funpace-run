@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import pg from 'pg';
-import type { RegistrationFormData, RegistrationStatus } from '../src/types/registration';
+import { randomUUID } from 'node:crypto';
+import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
 
 const { Pool } = pg;
 
@@ -134,12 +135,36 @@ export type Database = {
   partnershipLeads: PartnershipLeadRecord[];
 };
 
+export type PendingRegistrationInput = {
+  payload: RegistrationFormData;
+  cpfHash: string;
+  paymentProvider: string;
+  expiresAt: string;
+  description: (distanceName: string, lotName: string) => string;
+};
+
+export type PendingRegistrationResult = CreateRegistrationResponse & {
+  statusCode: number;
+  amountCents?: number;
+  description?: string;
+};
+
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
+type DatabaseReadScope =
+  | 'all'
+  | 'availability'
+  | 'registration-status'
+  | 'checkout'
+  | 'admin-registrations'
+  | 'audit'
+  | 'partnerships';
 
 const databasePath = resolve(process.env.DATABASE_FILE || 'data/funpace-db.json');
 const databaseUrl = process.env.DATABASE_URL || '';
 const databaseProvider = process.env.DATABASE_PROVIDER || (databaseUrl ? 'postgres' : 'json');
 const databaseSsl = (process.env.DATABASE_SSL || 'true') !== 'false';
+const databaseAutoMigrate = process.env.DATABASE_AUTO_MIGRATE === 'true'
+  || (!process.env.VERCEL && process.env.DATABASE_AUTO_MIGRATE !== 'false');
 
 const table = {
   events: '"run-events"',
@@ -401,6 +426,10 @@ async function ensurePostgresDatabase(client: Queryable) {
 }
 
 async function ensurePostgresReady() {
+  if (!databaseAutoMigrate) {
+    return;
+  }
+
   if (!postgresReady) {
     postgresReady = ensurePostgresDatabase(requirePool());
   }
@@ -408,20 +437,33 @@ async function ensurePostgresReady() {
   await postgresReady;
 }
 
-async function readPostgresDatabase(client: Queryable): Promise<Database> {
+async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope = 'all'): Promise<Database> {
   await ensurePostgresReady();
 
+  const include = {
+    events: ['all', 'availability', 'checkout'].includes(scope),
+    distances: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
+    lots: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
+    registrations: ['all', 'availability', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
+    payments: ['all', 'checkout', 'admin-registrations'].includes(scope),
+    paymentEvents: ['all', 'checkout'].includes(scope),
+    checkIns: ['all', 'admin-registrations'].includes(scope),
+    kitDeliveries: ['all', 'admin-registrations'].includes(scope),
+    auditLogs: ['all', 'audit', 'checkout'].includes(scope),
+    partnershipLeads: ['all', 'partnerships'].includes(scope),
+  };
+  const emptyRows = Promise.resolve({ rows: [] });
   const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs, partnershipLeads] = await Promise.all([
-    client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`),
-    client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`),
-    client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`),
-    client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at from ${table.registrations}`),
-    client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at from ${table.payments}`),
-    client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`),
-    client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`),
-    client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`),
-    client.query(`select id, actor, action, entity_type, entity_id, payload, created_at from ${table.auditLogs}`),
-    client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`),
+    include.events ? client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows,
+    include.distances ? client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows,
+    include.lots ? client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows,
+    include.registrations ? client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at from ${table.registrations}`) : emptyRows,
+    include.payments ? client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at from ${table.payments}`) : emptyRows,
+    include.paymentEvents ? client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows,
+    include.checkIns ? client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows,
+    include.kitDeliveries ? client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows,
+    include.auditLogs ? client.query(`select id, actor, action, entity_type, entity_id, payload, created_at from ${table.auditLogs}`) : emptyRows,
+    include.partnershipLeads ? client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`) : emptyRows,
   ]);
 
   return {
@@ -724,6 +766,248 @@ function shouldUsePostgres() {
   return databaseProvider === 'postgres' || databaseProvider === 'supabase';
 }
 
+export function usesPostgresDatabase() {
+  return shouldUsePostgres();
+}
+
+export async function createPendingRegistrationInPostgres(input: PendingRegistrationInput): Promise<PendingRegistrationResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+
+    const eventResult = await client.query(
+      `select id from ${table.events} where slug = $1 and status = $2 limit 1`,
+      ['funpace-run-2026', 'published'],
+    );
+    const event = eventResult.rows[0];
+
+    if (!event) {
+      await client.query('rollback');
+      return {
+        statusCode: 409,
+        success: false,
+        registrationId: '',
+        paymentId: null,
+        registrationStatus: 'cancelled',
+        checkoutStatus: 'not_configured',
+        checkoutUrl: null,
+        message: 'Evento indisponivel para inscricoes.',
+      };
+    }
+
+    const [distanceResult, lotResult] = await Promise.all([
+      client.query(
+        `select id, name, capacity from ${table.distances} where event_id = $1 and name = $2 and status = $3 limit 1`,
+        [event.id, input.payload.distance, 'active'],
+      ),
+      client.query(
+        `select id, name, price_cents, capacity, sold_count from ${table.lots} where event_id = $1 and status = $2 order by starts_at asc limit 1 for update`,
+        [event.id, 'active'],
+      ),
+    ]);
+    const distance = distanceResult.rows[0];
+    const lot = lotResult.rows[0];
+
+    if (!distance || !lot) {
+      await client.query('rollback');
+      return {
+        statusCode: 409,
+        success: false,
+        registrationId: '',
+        paymentId: null,
+        registrationStatus: 'cancelled',
+        checkoutStatus: 'not_configured',
+        checkoutUrl: null,
+        message: 'Distancia ou lote indisponivel.',
+      };
+    }
+
+    const existingResult = await client.query(
+      `select registration.id, registration.status, registration.expires_at, payment.id as payment_id, payment.checkout_url
+       from ${table.registrations} registration
+       left join ${table.payments} payment on payment.registration_id = registration.id
+       where registration.event_id = $1
+         and registration.cpf_hash = $2
+         and registration.status = any($3)
+       limit 1`,
+      [event.id, input.cpfHash, ['pending_payment', 'paid']],
+    );
+    const existing = existingResult.rows[0];
+
+    if (existing) {
+      await client.query('commit');
+      return {
+        statusCode: existing.status === 'paid' ? 409 : 200,
+        success: existing.status !== 'paid',
+        registrationId: existing.id,
+        paymentId: existing.payment_id || null,
+        registrationStatus: existing.status,
+        checkoutStatus: existing.checkout_url ? 'created' : 'not_configured',
+        checkoutUrl: existing.checkout_url || null,
+        expiresAt: existing.expires_at || null,
+        message: existing.status === 'paid'
+          ? 'Ja existe uma inscricao paga para este CPF.'
+          : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
+      };
+    }
+
+    const distanceSoldResult = await client.query(
+      `select count(*)::int as count from ${table.registrations} where distance_id = $1 and status = any($2)`,
+      [distance.id, ['pending_payment', 'paid']],
+    );
+    const distanceSold = Number(distanceSoldResult.rows[0]?.count || 0);
+
+    if (distanceSold >= Number(distance.capacity) || Number(lot.sold_count) >= Number(lot.capacity)) {
+      await client.query(`update ${table.lots} set status = $1 where id = $2`, ['sold_out', lot.id]);
+      await client.query('commit');
+
+      return {
+        statusCode: 409,
+        success: false,
+        registrationId: '',
+        paymentId: null,
+        registrationStatus: 'cancelled',
+        checkoutStatus: 'not_configured',
+        checkoutUrl: null,
+        message: 'Vagas esgotadas para este lote ou distancia.',
+      };
+    }
+
+    const now = new Date().toISOString();
+    const registrationId = randomUUID();
+    const paymentId = randomUUID();
+    const amountCents = Number(lot.price_cents);
+
+    await client.query(
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null)`,
+      [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now, input.expiresAt],
+    );
+    await client.query(
+      `insert into ${table.payments} (id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at)
+       values ($1, $2, $3, $4, $5, null, null, $6, $6, $7)`,
+      [paymentId, registrationId, input.paymentProvider || 'not_configured', 'pending_payment', amountCents, now, input.expiresAt],
+    );
+    await client.query(
+      `update ${table.lots}
+       set sold_count = sold_count + 1,
+           status = case when sold_count + 1 >= capacity then 'sold_out' else status end
+       where id = $1`,
+      [lot.id],
+    );
+    await client.query('commit');
+
+    return {
+      statusCode: 201,
+      success: true,
+      registrationId,
+      paymentId,
+      registrationStatus: 'pending_payment',
+      checkoutStatus: 'not_configured',
+      checkoutUrl: null,
+      expiresAt: input.expiresAt,
+      message: input.paymentProvider === 'infinitepay'
+        ? 'Inscricao criada. Redirecionando para o checkout InfinitePay.'
+        : 'Inscricao pre-criada. Configure um adaptador de pagamento real para gerar checkout.',
+      amountCents,
+      description: input.description(distance.name, lot.name),
+    };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function attachCheckoutToPaymentInPostgres(input: {
+  registrationId: string;
+  providerPaymentId: string | null;
+  checkoutUrl: string;
+  raw: unknown;
+}) {
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    const now = new Date().toISOString();
+    const paymentResult = await client.query(
+      `update ${table.payments}
+       set provider = $1, provider_payment_id = $2, checkout_url = $3, updated_at = $4
+       where registration_id = $5
+       returning id`,
+      ['infinitepay', input.providerPaymentId, input.checkoutUrl, now, input.registrationId],
+    );
+    const paymentId = paymentResult.rows[0]?.id || '';
+
+    await client.query(
+      `insert into ${table.paymentEvents} (id, payment_id, provider_event_id, event_type, payload, received_at)
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (provider_event_id) do nothing`,
+      [
+        randomUUID(),
+        paymentId,
+        input.providerPaymentId || input.registrationId,
+        'infinitepay.checkout_created',
+        input.raw,
+        now,
+      ],
+    );
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function markPaymentCreationFailedInPostgres(registrationId: string) {
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    const now = new Date().toISOString();
+    const registrationResult = await client.query(
+      `update ${table.registrations}
+       set status = $1, updated_at = $2
+       where id = $3 and status = $4
+       returning lot_id`,
+      ['payment_failed', now, registrationId, 'pending_payment'],
+    );
+    const lotId = registrationResult.rows[0]?.lot_id;
+
+    await client.query(
+      `update ${table.payments} set status = $1, updated_at = $2 where registration_id = $3`,
+      ['payment_failed', now, registrationId],
+    );
+
+    if (lotId) {
+      await client.query(
+        `update ${table.lots}
+         set sold_count = greatest(sold_count - 1, 0),
+             status = case when status = 'sold_out' then 'active' else status end
+         where id = $1`,
+        [lotId],
+      );
+    }
+
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export function getDatabaseConfigurationIssue() {
   if (shouldUsePostgres() && !databaseUrl) {
     return 'DATABASE_URL deve estar configurado quando DATABASE_PROVIDER usa Postgres/Supabase.';
@@ -740,12 +1024,17 @@ export function getDatabaseRuntimeConfig() {
   return {
     provider: databaseProvider,
     urlConfigured: Boolean(databaseUrl),
+    autoMigrate: databaseAutoMigrate,
     configurationIssue: getDatabaseConfigurationIssue(),
   };
 }
 
-export async function transaction<Result>(operation: (database: Database) => Result | Promise<Result>) {
+export async function transaction<Result>(
+  operation: (database: Database) => Result | Promise<Result>,
+  options: { persist?: boolean; scope?: DatabaseReadScope } = {},
+) {
   const configurationIssue = getDatabaseConfigurationIssue();
+  const shouldPersist = options.persist !== false;
 
   if (configurationIssue) {
     throw new Error(configurationIssue);
@@ -755,7 +1044,9 @@ export async function transaction<Result>(operation: (database: Database) => Res
     const database = readJsonDatabase();
     const result = await operation(database);
 
-    writeJsonDatabase(database);
+    if (shouldPersist) {
+      writeJsonDatabase(database);
+    }
 
     return result;
   }
@@ -765,10 +1056,13 @@ export async function transaction<Result>(operation: (database: Database) => Res
   try {
     await client.query('begin');
 
-    const database = await readPostgresDatabase(client);
+    const database = await readPostgresDatabase(client, options.scope);
     const result = await operation(database);
 
-    await savePostgresDatabase(client, database);
+    if (shouldPersist) {
+      await savePostgresDatabase(client, database);
+    }
+
     await client.query('commit');
 
     return result;

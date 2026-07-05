@@ -98,11 +98,12 @@ export function RegistrationSection() {
       setApiMessage(response.message);
 
       if (response.checkoutUrl) {
-        window.location.assign(response.checkoutUrl);
+        window.location.href = response.checkoutUrl;
         return;
       }
 
-      setStatus('checkout_pending');
+      setStatus('api_error');
+      setApiMessage(response.message || 'Inscricao criada, mas o checkout nao retornou uma URL de pagamento.');
     } catch (error) {
       setStatus('api_error');
 
@@ -227,7 +228,7 @@ export function RegistrationSection() {
                 {status === 'submitting' && (
                   <>
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
-                    <span>PREPARANDO SUA INSCRIÇÃO...</span>
+                    <span>PREPARANDO CHECKOUT...</span>
                   </>
                 )}
                 {status === 'checkout_pending' && 'CHECKOUT EM IMPLANTACAO'}
@@ -242,7 +243,7 @@ export function RegistrationSection() {
 
             {status === 'submitting' && (
               <AlertMessage tone="info" title="Informação">
-                Preparando sua inscrição e conectando ao checkout. Não feche esta tela.
+                Preparando checkout. Não feche esta tela.
               </AlertMessage>
             )}
 
