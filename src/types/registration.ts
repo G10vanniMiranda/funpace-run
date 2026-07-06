@@ -98,6 +98,14 @@ export type AdminSummaryResponse = {
     revenueCents: number;
     checkIns: number;
     kitDeliveries: number;
+    paidWithoutEmail: number;
+    manualReconciledPayments: number;
+    confirmationEmailsSent: number;
+    confirmationEmailsFailed: number;
+    confirmationEmailsAttention: number;
+    todayRegistrations: number;
+    weekRegistrations: number;
+    todayRevenueCents: number;
   };
   byStatus: Record<string, number>;
   byDistance: Array<{
@@ -106,6 +114,7 @@ export type AdminSummaryResponse = {
     capacity: number;
     total: number;
     paid: number;
+    pending: number;
   }>;
   lots: Array<{
     id: string;
@@ -116,6 +125,8 @@ export type AdminSummaryResponse = {
     priceCents: number;
     status: string;
   }>;
+  shirtSizes: Array<{ size: string; total: number }>;
+  daily: Array<{ label: string; count: number; amountCents: number }>;
 };
 
 export type AdminRegistration = {
@@ -169,6 +180,12 @@ export type AdminRegistrationsResponse = {
   registrations: AdminRegistration[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
+export type AdminOperationResponse = { registrations: AdminRegistration[]; pagination: { page: number; pageSize: number; total: number; totalPages: number }; totals: { paid: number; kitPending: number; checkInPending: number; completed: number } };
+export type AdminEventConfig = {
+  event: { id: string; name: string; slug: string; status: string; date: string; startTime: string; locationName: string; city: string; state: string };
+  distances: Array<{ id: string; eventId: string; name: string; distanceKm: number; capacity: number; status: string }>;
+  lots: Array<{ id: string; eventId: string; name: string; priceCents: number; capacity: number; soldCount: number; status: string; startsAt: string; endsAt: string }>;
+};
 
 export type AdminRegistrationActionResponse = {
   registration: AdminRegistration;
@@ -179,19 +196,25 @@ export type AdminRegistrationDetailsResponse = { registration: AdminRegistration
 
 export type AdminPaymentEvent = { id: string; paymentId: string; providerEventId: string; eventType: string; payload: unknown; receivedAt: string };
 export type AdminPaymentDetailsResponse = { payment: AdminRegistration; gatewayPayload: unknown; events: AdminPaymentEvent[] };
+export type AdminPaymentsResponse = { payments: AdminRegistration[]; pagination: { page: number; pageSize: number; total: number; totalPages: number }; orphanEvents: AdminPaymentEvent[] };
 
 export type AdminAuditLog = {
   id: string;
   actor: string;
+  actorRole?: string | null;
   action: string;
   entityType: string;
   entityId: string;
   payload: unknown;
+  sessionId?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
   createdAt: string;
 };
 
 export type AdminAuditLogsResponse = {
   logs: AdminAuditLog[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
 
 export type PartnershipLeadStatus =

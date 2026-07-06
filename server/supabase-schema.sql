@@ -102,11 +102,26 @@ create table if not exists "run-kit-deliveries" (
 create table if not exists "run-audit-logs" (
   id text primary key,
   actor text not null,
+  actor_role text,
   action text not null,
   entity_type text not null,
   entity_id text not null,
   payload jsonb not null,
+  session_id text,
+  ip_address text,
+  user_agent text,
   created_at text not null
+);
+
+create table if not exists "run-admin-sessions" (
+  id text primary key,
+  actor text not null,
+  role text not null check (role in ('administrator', 'finance', 'operation')),
+  created_at text not null,
+  expires_at text not null,
+  revoked_at text,
+  ip_address text,
+  user_agent text
 );
 
 create table if not exists "run-partnership-leads" (
@@ -128,6 +143,8 @@ create index if not exists "run-payments_registration_id_idx" on "run-payments"(
 create unique index if not exists "run-check-ins_registration_id_idx" on "run-check-ins"(registration_id);
 create unique index if not exists "run-kit-deliveries_registration_id_idx" on "run-kit-deliveries"(registration_id);
 create index if not exists "run-audit-logs_entity_idx" on "run-audit-logs"(entity_type, entity_id);
+create index if not exists "run-admin-sessions_actor_idx" on "run-admin-sessions"(actor);
+create index if not exists "run-admin-sessions_expires_at_idx" on "run-admin-sessions"(expires_at);
 create index if not exists "run-partnership-leads_status_idx" on "run-partnership-leads"(status);
 create index if not exists "run-partnership-leads_created_at_idx" on "run-partnership-leads"(created_at);
 
@@ -148,6 +165,10 @@ alter table "run-payments" add column if not exists paid_at text;
 alter table "run-payments" add column if not exists gateway_status text;
 alter table "run-payments" add column if not exists gateway_transaction_id text;
 alter table "run-payments" add column if not exists gateway_payload jsonb;
+alter table "run-audit-logs" add column if not exists actor_role text;
+alter table "run-audit-logs" add column if not exists session_id text;
+alter table "run-audit-logs" add column if not exists ip_address text;
+alter table "run-audit-logs" add column if not exists user_agent text;
 
 insert into "run-events" (id, name, slug, status, date, start_time, location_name, city, state)
 values (

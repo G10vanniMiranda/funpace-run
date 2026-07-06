@@ -29,7 +29,7 @@ export type DistanceRecord = {
   name: RegistrationFormData['distance'];
   distanceKm: number;
   capacity: number;
-  status: 'active' | 'inactive';
+  status: 'active' | 'inactive' | 'sold_out';
 };
 
 export type LotRecord = {
@@ -39,7 +39,7 @@ export type LotRecord = {
   priceCents: number;
   capacity: number;
   soldCount: number;
-  status: 'active' | 'inactive' | 'sold_out';
+  status: 'active' | 'inactive' | 'sold_out' | 'scheduled' | 'closed';
   startsAt: string;
   endsAt: string;
 };
@@ -115,11 +115,26 @@ export type KitDeliveryRecord = {
 export type AuditLogRecord = {
   id: string;
   actor: string;
+  actorRole?: string | null;
   action: string;
   entityType: string;
   entityId: string;
   payload: unknown;
+  sessionId?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
   createdAt: string;
+};
+
+export type AdminSessionRecord = {
+  id: string;
+  actor: string;
+  role: 'administrator' | 'finance' | 'operation';
+  createdAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
 };
 
 export type PartnershipLeadStatus = 'new' | 'contacted' | 'negotiating' | 'approved' | 'rejected';
@@ -147,6 +162,7 @@ export type Database = {
   checkIns: CheckInRecord[];
   kitDeliveries: KitDeliveryRecord[];
   auditLogs: AuditLogRecord[];
+  adminSessions: AdminSessionRecord[];
   partnershipLeads: PartnershipLeadRecord[];
 };
 
@@ -171,6 +187,7 @@ type DatabaseReadScope =
   | 'registration-status'
   | 'checkout'
   | 'admin-registrations'
+  | 'admin-auth'
   | 'audit'
   | 'partnerships';
 
@@ -191,6 +208,7 @@ const table = {
   checkIns: '"run-check-ins"',
   kitDeliveries: '"run-kit-deliveries"',
   auditLogs: '"run-audit-logs"',
+  adminSessions: '"run-admin-sessions"',
   partnershipLeads: '"run-partnership-leads"',
 } as const;
 
@@ -245,6 +263,7 @@ const initialDatabase: Database = {
   checkIns: [],
   kitDeliveries: [],
   auditLogs: [],
+  adminSessions: [],
   partnershipLeads: [],
 };
 
@@ -283,6 +302,7 @@ function normalizeDatabase(database: Partial<Database>): Database {
     checkIns: database.checkIns || [],
     kitDeliveries: database.kitDeliveries || [],
     auditLogs: database.auditLogs || [],
+    adminSessions: database.adminSessions || [],
     partnershipLeads: database.partnershipLeads || [],
   };
 }
@@ -406,11 +426,26 @@ async function ensurePostgresDatabase(client: Queryable) {
     create table if not exists ${table.auditLogs} (
       id text primary key,
       actor text not null,
+      actor_role text,
       action text not null,
       entity_type text not null,
       entity_id text not null,
       payload jsonb not null,
+      session_id text,
+      ip_address text,
+      user_agent text,
       created_at text not null
+    );
+
+    create table if not exists ${table.adminSessions} (
+      id text primary key,
+      actor text not null,
+      role text not null check (role in ('administrator', 'finance', 'operation')),
+      created_at text not null,
+      expires_at text not null,
+      revoked_at text,
+      ip_address text,
+      user_agent text
     );
 
     create table if not exists ${table.partnershipLeads} (
@@ -432,6 +467,8 @@ async function ensurePostgresDatabase(client: Queryable) {
     create unique index if not exists "run-check-ins_registration_id_idx" on ${table.checkIns}(registration_id);
     create unique index if not exists "run-kit-deliveries_registration_id_idx" on ${table.kitDeliveries}(registration_id);
     create index if not exists "run-audit-logs_entity_idx" on ${table.auditLogs}(entity_type, entity_id);
+    create index if not exists "run-admin-sessions_actor_idx" on ${table.adminSessions}(actor);
+    create index if not exists "run-admin-sessions_expires_at_idx" on ${table.adminSessions}(expires_at);
     create index if not exists "run-partnership-leads_status_idx" on ${table.partnershipLeads}(status);
     create index if not exists "run-partnership-leads_created_at_idx" on ${table.partnershipLeads}(created_at);
   `);
@@ -453,6 +490,10 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.payments} add column if not exists gateway_status text`);
   await client.query(`alter table ${table.payments} add column if not exists gateway_transaction_id text`);
   await client.query(`alter table ${table.payments} add column if not exists gateway_payload jsonb`);
+  await client.query(`alter table ${table.auditLogs} add column if not exists actor_role text`);
+  await client.query(`alter table ${table.auditLogs} add column if not exists session_id text`);
+  await client.query(`alter table ${table.auditLogs} add column if not exists ip_address text`);
+  await client.query(`alter table ${table.auditLogs} add column if not exists user_agent text`);
 
   const existingEvents = await client.query(`select count(*)::int as count from ${table.events}`);
 
@@ -484,10 +525,11 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     checkIns: ['all', 'admin-registrations'].includes(scope),
     kitDeliveries: ['all', 'admin-registrations'].includes(scope),
     auditLogs: ['all', 'audit', 'checkout', 'admin-registrations'].includes(scope),
+    adminSessions: ['all', 'admin-auth'].includes(scope),
     partnershipLeads: ['all', 'partnerships'].includes(scope),
   };
   const emptyRows = Promise.resolve({ rows: [] });
-  const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs, partnershipLeads] = await Promise.all([
+  const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs, adminSessions, partnershipLeads] = await Promise.all([
     include.events ? client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows,
     include.distances ? client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows,
     include.lots ? client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows,
@@ -496,7 +538,8 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     include.paymentEvents ? client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows,
     include.checkIns ? client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows,
     include.kitDeliveries ? client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows,
-    include.auditLogs ? client.query(`select id, actor, action, entity_type, entity_id, payload, created_at from ${table.auditLogs}`) : emptyRows,
+    include.auditLogs ? client.query(`select id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at from ${table.auditLogs}`) : emptyRows,
+    include.adminSessions ? client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`) : emptyRows,
     include.partnershipLeads ? client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`) : emptyRows,
   ]);
 
@@ -597,11 +640,25 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     auditLogs: auditLogs.rows.map((row) => ({
       id: row.id,
       actor: row.actor,
+      actorRole: row.actor_role,
       action: row.action,
       entityType: row.entity_type,
       entityId: row.entity_id,
       payload: row.payload,
+      sessionId: row.session_id,
+      ipAddress: row.ip_address,
+      userAgent: row.user_agent,
       createdAt: row.created_at,
+    })),
+    adminSessions: adminSessions.rows.map((row) => ({
+      id: row.id,
+      actor: row.actor,
+      role: row.role,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+      ipAddress: row.ip_address,
+      userAgent: row.user_agent,
     })),
     partnershipLeads: partnershipLeads.rows.map((row) => ({
       id: row.id,
@@ -795,16 +852,36 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.auditLogs) {
     await client.query(
-      `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7)
+      `insert into ${table.auditLogs} (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        on conflict (id) do update set
          actor = excluded.actor,
+         actor_role = excluded.actor_role,
          action = excluded.action,
          entity_type = excluded.entity_type,
          entity_id = excluded.entity_id,
          payload = excluded.payload,
+         session_id = excluded.session_id,
+         ip_address = excluded.ip_address,
+         user_agent = excluded.user_agent,
          created_at = excluded.created_at`,
-      [item.id, item.actor, item.action, item.entityType, item.entityId, item.payload, item.createdAt],
+      [item.id, item.actor, item.actorRole || null, item.action, item.entityType, item.entityId, item.payload, item.sessionId || null, item.ipAddress || null, item.userAgent || null, item.createdAt],
+    );
+  }
+
+  for (const item of database.adminSessions) {
+    await client.query(
+      `insert into ${table.adminSessions} (id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (id) do update set
+         actor = excluded.actor,
+         role = excluded.role,
+         created_at = excluded.created_at,
+         expires_at = excluded.expires_at,
+         revoked_at = excluded.revoked_at,
+         ip_address = excluded.ip_address,
+         user_agent = excluded.user_agent`,
+      [item.id, item.actor, item.role, item.createdAt, item.expiresAt, item.revokedAt, item.ipAddress, item.userAgent],
     );
   }
 
@@ -1140,6 +1217,9 @@ export async function transaction<Result>(
     }
 
     await client.query('begin');
+    if (shouldPersist) {
+      await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-write'))");
+    }
 
     const database = await readPostgresDatabase(client, options.scope);
     const result = await operation(database);

@@ -3,10 +3,13 @@ import type {
   AdminPartnershipActionResponse,
   AdminPartnershipsResponse,
   AdminRegistrationsResponse,
+  AdminOperationResponse,
+  AdminEventConfig,
   AdminRegistrationActionResponse,
   AdminRegistrationEditable,
   AdminRegistrationDetailsResponse,
   AdminPaymentDetailsResponse,
+  AdminPaymentsResponse,
   AdminSummaryResponse,
   AvailabilityResponse,
   CreateRegistrationResponse,
@@ -190,6 +193,7 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
     try {
       const response = await fetch(url, {
         ...options,
+        credentials: 'include',
         headers,
         signal: controller.signal,
       });
@@ -305,14 +309,26 @@ function toQueryString(filters: Record<string, string>) {
 async function adminFetch<ResponsePayload>(path: string, adminKey: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
 
-  headers.set('X-Admin-Key', adminKey);
-
   return apiFetch<ResponsePayload>(path, {
     ...init,
     headers,
     retry: true,
     sensitive: true,
   });
+}
+
+export type AdminSession = { actor: string; role: 'administrator' | 'finance' | 'operation'; expiresAt: string };
+
+export function loginAdmin(key: string, actor: string) {
+  return apiFetch<AdminSession>('/api/admin/session', { method: 'POST', body: JSON.stringify({ key, actor }), sensitive: true, retry: false });
+}
+
+export function getAdminSession() {
+  return apiFetch<AdminSession>('/api/admin/session', { retry: false });
+}
+
+export function logoutAdmin() {
+  return apiFetch<{ ok: boolean }>('/api/admin/session', { method: 'DELETE', retry: false });
 }
 
 export function getAdminSummary(adminKey: string) {
@@ -323,9 +339,11 @@ export function getAdminRegistrations(adminKey: string, filters: Record<string, 
   return adminFetch<AdminRegistrationsResponse>(`/api/admin/registrations${toQueryString(filters)}`, adminKey);
 }
 
-export function getAdminAuditLogs(adminKey: string) {
-  return adminFetch<AdminAuditLogsResponse>('/api/admin/audit-logs', adminKey);
+export function getAdminAuditLogs(adminKey: string, filters: Record<string, string> = {}) {
+  return adminFetch<AdminAuditLogsResponse>(`/api/admin/audit-logs${toQueryString(filters)}`, adminKey);
 }
+
+export function getAdminAuditLogsCsvUrl(filters: Record<string, string>) { return getApiUrl(`/api/admin/audit-logs.csv${toQueryString(filters)}`); }
 
 export function getAdminCsvUrl(filters: Record<string, string>) {
   return getApiUrl(`/api/admin/registrations.csv${toQueryString(filters)}`);
@@ -353,7 +371,7 @@ export function updateAdminPartnershipStatus(adminKey: string, partnershipId: st
   );
 }
 
-function postAdminRegistrationAction(adminKey: string, registrationId: string, action: 'check-in' | 'kit') {
+function postAdminRegistrationAction(adminKey: string, registrationId: string, action: 'check-in' | 'kit', notes = '') {
   return adminFetch<AdminRegistrationActionResponse>(
     `/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`,
     adminKey,
@@ -362,18 +380,27 @@ function postAdminRegistrationAction(adminKey: string, registrationId: string, a
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ notes }),
     },
   );
 }
 
-export function checkInAdminRegistration(adminKey: string, registrationId: string) {
-  return postAdminRegistrationAction(adminKey, registrationId, 'check-in');
+export function checkInAdminRegistration(adminKey: string, registrationId: string, notes = '') {
+  return postAdminRegistrationAction(adminKey, registrationId, 'check-in', notes);
 }
 
-export function deliverAdminKit(adminKey: string, registrationId: string) {
-  return postAdminRegistrationAction(adminKey, registrationId, 'kit');
+export function deliverAdminKit(adminKey: string, registrationId: string, notes = '') {
+  return postAdminRegistrationAction(adminKey, registrationId, 'kit', notes);
 }
+
+export function getAdminOperation(adminKey: string, filters: Record<string, string>) {
+  return adminFetch<AdminOperationResponse>(`/api/admin/operation${toQueryString(filters)}`, adminKey);
+}
+
+export function getAdminEventConfig(adminKey: string) { return adminFetch<AdminEventConfig>('/api/admin/event-config', adminKey); }
+export function updateAdminEventConfig(adminKey: string, changes: Record<string, unknown>, reason: string) { return adminFetch<{ event: AdminEventConfig['event'] }>('/api/admin/event-config', adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes, reason }) }); }
+export function updateAdminDistance(adminKey: string, distanceId: string, changes: { capacity: number; status: string; reason: string }) { return adminFetch<{ distance: AdminEventConfig['distances'][number] }>(`/api/admin/distances/${encodeURIComponent(distanceId)}`, adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) }); }
+export function updateAdminLot(adminKey: string, lotId: string, changes: { name: string; capacity: number; priceCents: number; status: string; startsAt: string; endsAt: string; reason: string }) { return adminFetch<{ lot: AdminEventConfig['lots'][number] }>(`/api/admin/lots/${encodeURIComponent(lotId)}`, adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) }); }
 
 export function maintainAdminRegistration(adminKey: string, registrationId: string, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit', reason = '') {
   return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`, adminKey, {
@@ -399,6 +426,18 @@ export function assignAdminBibNumber(adminKey: string, registrationId: string, b
 
 export function getAdminPaymentDetails(adminKey: string, registrationId: string) {
   return adminFetch<AdminPaymentDetailsResponse>(`/api/admin/payments/${encodeURIComponent(registrationId)}`, adminKey);
+}
+
+export function getAdminPayments(adminKey: string, filters: Record<string, string>) {
+  return adminFetch<AdminPaymentsResponse>(`/api/admin/payments${toQueryString(filters)}`, adminKey);
+}
+
+export function getAdminPaymentsCsvUrl(filters: Record<string, string>) {
+  return getApiUrl(`/api/admin/payments.csv${toQueryString(filters)}`);
+}
+
+export function linkAdminOrphanPayment(adminKey: string, eventId: string, registrationId: string, reason: string) {
+  return adminFetch<{ ok: boolean }>(`/api/admin/payment-events/${encodeURIComponent(eventId)}/link`, adminKey, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ registrationId, reason }) });
 }
 
 export function reconcileAdminPayment(adminKey: string, registrationId: string, reason: string) {

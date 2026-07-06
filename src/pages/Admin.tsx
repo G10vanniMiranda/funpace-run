@@ -1,13 +1,12 @@
 import { type FormEvent, type ReactNode } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import QrScanner from 'qr-scanner';
 import {
   Activity,
   ArrowDownRight,
   ArrowUpRight,
   BadgeCheck,
   BarChart3,
-  CalendarClock,
-  CheckCircle2,
   ChevronRight,
   ClipboardCheck,
   CreditCard,
@@ -19,11 +18,12 @@ import {
   Loader2,
   Lock,
   Mail,
-  MapPin,
   Medal,
   Menu,
   RefreshCcw,
   Search,
+  ScanLine,
+  Settings,
   ShieldCheck,
   Shirt,
   Ticket,
@@ -37,21 +37,34 @@ import {
 import { eventInfo } from '../config/event';
 import QRCode from 'qrcode';
 import {
+  type AdminSession,
   ApiError,
   checkInAdminRegistration,
   deliverAdminKit,
   getAdminAuditLogs,
+  getAdminAuditLogsCsvUrl,
   getAdminCsvUrl,
   getAdminRegistrations,
   getAdminPaymentDetails,
+  getAdminPayments,
+  getAdminPaymentsCsvUrl,
+  linkAdminOrphanPayment,
+  getAdminEventConfig,
+  updateAdminEventConfig,
+  updateAdminDistance,
+  updateAdminLot,
   getAdminSummary,
+  getAdminSession,
+  getAdminOperation,
+  loginAdmin,
+  logoutAdmin,
   maintainAdminRegistration,
   reconcileAdminPayment,
   updateAdminRegistration,
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAuditLog, AdminPaymentDetailsResponse, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
+import type { AdminAuditLog, AdminEventConfig, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
 
 type AdminFilters = {
   status: string;
@@ -60,9 +73,16 @@ type AdminFilters = {
   q: string;
   page: string;
   pageSize: string;
+  city: string;
+  team: string;
+  shirtSize: string;
+  bibNumber: string;
+  sortBy: string;
+  sortOrder: string;
 };
 
-type AdminNavKey = 'registrations' | 'payments' | 'operation' | 'reports' | 'audit';
+type AdminNavKey = 'registrations' | 'payments' | 'operation' | 'reports' | 'audit' | 'event';
+type AdminRole = AdminSession['role'];
 
 const currencyFormatter = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -95,7 +115,17 @@ const navItems: Array<{ key: AdminNavKey; label: string; icon: LucideIcon; statu
   { key: 'operation', label: 'Operação', icon: ClipboardCheck },
   { key: 'reports', label: 'Relatórios', icon: FileBarChart },
   { key: 'audit', label: 'Auditoria', icon: Activity },
+  { key: 'event', label: 'Evento', icon: Settings },
 ];
+
+const navPermissions: Record<AdminNavKey, AdminRole[]> = {
+  registrations: ['administrator', 'finance', 'operation'],
+  payments: ['administrator', 'finance'],
+  operation: ['administrator', 'operation'],
+  reports: ['administrator', 'finance'],
+  audit: ['administrator'],
+  event: ['administrator'],
+};
 
 const statusLabels: Record<RegistrationStatus, string> = {
   pending_payment: 'Pendente',
@@ -116,12 +146,16 @@ const statusStyles: Record<RegistrationStatus, string> = {
 };
 
 export function AdminPage() {
-  const [adminKey, setAdminKey] = useState(() => window.localStorage.getItem('funpace-admin-key') || '');
-  const [draftKey, setDraftKey] = useState(adminKey);
+  const [adminKey, setAdminKey] = useState('');
+  const [draftKey, setDraftKey] = useState('');
+  const [draftActor, setDraftActor] = useState('');
+  const [adminActor, setAdminActor] = useState('');
+  const [adminRole, setAdminRole] = useState<AdminRole | null>(null);
+  const [authChecking, setAuthChecking] = useState(true);
   const [summary, setSummary] = useState<AdminSummaryResponse | null>(null);
   const [registrations, setRegistrations] = useState<AdminRegistration[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
-  const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: '25' });
+  const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: '25', city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc' });
   const [registrationPagination, setRegistrationPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -130,6 +164,8 @@ export function AdminPage() {
   const [selectedRegistration, setSelectedRegistration] = useState<AdminRegistration | null>(null);
   const [registrationDetails, setRegistrationDetails] = useState<AdminRegistrationDetailsResponse | null>(null);
   const [actionLoading, setActionLoading] = useState<string>('');
+  const [maintenanceDraft, setMaintenanceDraft] = useState<{ registration: AdminRegistration; action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit'; reason: string } | null>(null);
+  const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
 
   const csvUrl = useMemo(() => getAdminCsvUrl(filters), [filters]);
   const dashboard = useMemo(() => getDashboardModel(summary, registrations), [summary, registrations]);
@@ -146,7 +182,7 @@ export function AdminPage() {
       const [summaryResponse, registrationsResponse, auditLogsResponse] = await Promise.all([
         getAdminSummary(key),
         getAdminRegistrations(key, activeNav === 'registrations' ? filters : { status: '', distanceId: '', lotId: '', q: '' }),
-        getAdminAuditLogs(key),
+        getAdminAuditLogs(key).catch(() => ({ logs: [], pagination: { page: 1, pageSize: 50, total: 0, totalPages: 1 } })),
       ]);
 
       setSummary(summaryResponse);
@@ -154,6 +190,9 @@ export function AdminPage() {
       setRegistrationPagination(registrationsResponse.pagination);
       setAuditLogs(auditLogsResponse.logs);
     } catch (requestError) {
+      if (requestError instanceof ApiError && requestError.status === 401 && key === 'session') {
+        setAdminKey(''); setAdminActor(''); setAdminRole(null);
+      }
       const message = requestError instanceof ApiError
         ? requestError.message
         : 'Não foi possivel carregar o painel.';
@@ -165,13 +204,33 @@ export function AdminPage() {
 
   useEffect(() => {
     void loadAdminData();
-  }, [filters.status, filters.distanceId, filters.lotId, filters.page, activeNav]);
+  }, [filters.status, filters.distanceId, filters.lotId, filters.page, filters.pageSize, filters.city, filters.team, filters.shirtSize, filters.bibNumber, filters.sortBy, filters.sortOrder, activeNav]);
 
-  const handleLogin = (event: FormEvent) => {
+  useEffect(() => {
+    void getAdminSession().then((session) => { setAdminActor(`${session.actor} · ${session.role}`); setAdminRole(session.role); setAdminKey('session'); void loadAdminData('session'); }).catch(() => undefined).finally(() => setAuthChecking(false));
+  }, []);
+
+  useEffect(() => {
+    if (!adminRole) {
+      return;
+    }
+
+    if (!navPermissions[activeNav].includes(adminRole)) {
+      const fallbackNav = navItems.find((item) => navPermissions[item.key].includes(adminRole))?.key || 'registrations';
+      setActiveNav(fallbackNav);
+    }
+  }, [activeNav, adminRole]);
+
+  const handleLogin = async (event: FormEvent) => {
     event.preventDefault();
-    window.localStorage.setItem('funpace-admin-key', draftKey);
-    setAdminKey(draftKey);
-    void loadAdminData(draftKey);
+    setLoading(true); setError('');
+    try { const session = await loginAdmin(draftKey, draftActor); setAdminActor(`${session.actor} · ${session.role}`); setAdminRole(session.role); setAdminKey('session'); setDraftKey(''); await loadAdminData('session'); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel entrar.'); }
+    finally { setLoading(false); }
+  };
+
+  const handleLogout = async () => {
+    try { await logoutAdmin(); } finally { setAdminKey(''); setAdminActor(''); setAdminRole(null); setSummary(null); setRegistrations([]); setAuditLogs([]); setSelectedRegistration(null); setRegistrationDetails(null); }
   };
 
   const handleSearch = (event: FormEvent) => {
@@ -184,24 +243,29 @@ export function AdminPage() {
       return;
     }
 
-    const response = await fetch(csvUrl, {
-      headers: {
-        'X-Admin-Key': adminKey,
-      },
-    });
-    const blob = await response.blob();
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-
-    link.href = url;
-    link.download = 'funpace-run-inscritos.csv';
-    link.click();
-    window.URL.revokeObjectURL(url);
+    setError('');
+    try {
+      const response = await fetch(csvUrl, { credentials: 'include' });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { message?: string } | null;
+        throw new Error(payload?.message || 'Nao foi possivel exportar o CSV.');
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'funpace-run-inscritos.csv';
+      link.click();
+      window.URL.revokeObjectURL(url);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Nao foi possivel exportar o CSV.');
+    }
   };
 
   const updateRegistration = (registration: AdminRegistration) => {
     setRegistrations((current) => current.map((item) => (item.id === registration.id ? registration : item)));
     setSelectedRegistration(registration);
+    setRegistrationDetails((current) => current ? { ...current, registration } : current);
   };
 
   const handleCheckIn = async (registration: AdminRegistration) => {
@@ -211,6 +275,7 @@ export function AdminPage() {
     try {
       const response = await checkInAdminRegistration(adminKey, registration.id);
       updateRegistration(response.registration);
+      setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
       await loadAdminData();
     } catch (requestError) {
       setError(requestError instanceof ApiError ? requestError.message : 'Não foi possivel registrar o check-in.');
@@ -226,6 +291,7 @@ export function AdminPage() {
     try {
       const response = await deliverAdminKit(adminKey, registration.id);
       updateRegistration(response.registration);
+      setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
       await loadAdminData();
     } catch (requestError) {
       setError(requestError instanceof ApiError ? requestError.message : 'Não foi possivel registrar a entrega do kit.');
@@ -235,19 +301,27 @@ export function AdminPage() {
   };
 
   const handleMaintenance = async (registration: AdminRegistration, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit') => {
-    const needsReason = action !== 'resend-email';
-    if (!window.confirm('Confirma esta acao administrativa?')) return;
-    const reason = needsReason ? window.prompt('Informe o motivo (minimo 5 caracteres):') || '' : '';
-    if (needsReason && reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
-    setActionLoading(action); setError('');
-    try { const response = await maintainAdminRegistration(adminKey, registration.id, action, reason); updateRegistration(response.registration); await loadAdminData(); }
+    setMaintenanceDraft({ registration, action, reason: '' });
+  };
+
+  const submitMaintenance = async () => {
+    if (!maintenanceDraft) return;
+    const needsReason = maintenanceDraft.action !== 'resend-email';
+    if (needsReason && maintenanceDraft.reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
+    setActionLoading(maintenanceDraft.action); setError('');
+    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setMaintenanceDraft(null); }
     catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel concluir a acao.'); }
     finally { setActionLoading(''); }
   };
 
   const handleRegistrationUpdate = async (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => {
     setActionLoading('edit'); setError('');
-    try { const response = await updateAdminRegistration(adminKey, registration.id, changes, reason); updateRegistration(response.registration); await loadAdminData(); }
+    try {
+      const response = await updateAdminRegistration(adminKey, registration.id, changes, reason);
+      updateRegistration(response.registration);
+      setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
+      await loadAdminData();
+    }
     catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel atualizar a inscricao.'); throw requestError; }
     finally { setActionLoading(''); }
   };
@@ -258,22 +332,29 @@ export function AdminPage() {
   };
 
   const handleBibNumber = async (registration: AdminRegistration) => {
-    const bibNumber = window.prompt('Numero de peito (letras, numeros ou hifen):', registration.bibNumber || '') || '';
-    if (!bibNumber) return;
-    const reason = window.prompt('Motivo da atribuicao/alteracao:') || '';
-    if (reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
+    setBibDraft({ registration, bibNumber: registration.bibNumber || '', reason: '' });
+  };
+
+  const submitBibNumber = async () => {
+    if (!bibDraft) return;
+    if (!bibDraft.bibNumber.trim()) return;
+    if (bibDraft.reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
     setActionLoading('bib');
-    try { const response = await assignAdminBibNumber(adminKey, registration.id, bibNumber, reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id)); }
+    try { const response = await assignAdminBibNumber(adminKey, bibDraft.registration.id, bibDraft.bibNumber, bibDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, bibDraft.registration.id)); setBibDraft(null); }
     catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel atribuir o numero de peito.'); }
     finally { setActionLoading(''); }
   };
+
+  if (authChecking) return <main className="flex min-h-screen items-center justify-center bg-black text-brand"><Loader2 className="h-8 w-8 animate-spin" /></main>;
 
   if (!adminKey || error === 'Acesso administrativo não autorizado.') {
     return (
       <LoginScreen
         draftKey={draftKey}
+        draftActor={draftActor}
         error={error}
         onChange={setDraftKey}
+        onActorChange={setDraftActor}
         onSubmit={handleLogin}
       />
     );
@@ -287,6 +368,7 @@ export function AdminPage() {
         <aside className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 w-70 border-r border-white/10 bg-zinc-950/95 px-3 py-4 backdrop-blur-sm transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
           <Sidebar
             activeNav={activeNav}
+            adminRole={adminRole}
             onSelect={(key) => {
               setActiveNav(key);
               setSidebarOpen(false);
@@ -310,6 +392,8 @@ export function AdminPage() {
             onOpenSidebar={() => setSidebarOpen(true)}
             onRefresh={() => void loadAdminData()}
             onExport={() => void downloadCsv()}
+            actor={adminActor}
+            onLogout={() => void handleLogout()}
           />
 
           <div className="mx-auto max-w-400 px-4 pb-10 pt-4 sm:px-6 lg:px-8">
@@ -320,6 +404,7 @@ export function AdminPage() {
             <AdminSection
               adminKey={adminKey}
               activeNav={activeNav}
+              adminRole={adminRole}
               summary={summary}
               dashboard={dashboard}
               registrations={registrations}
@@ -329,6 +414,7 @@ export function AdminPage() {
               loading={loading}
               onFiltersChange={setFilters}
               onSearch={handleSearch}
+              onRefreshAdminData={() => void loadAdminData()}
               onOpenRegistration={(registration) => void openRegistration(registration)}
               onExport={() => void downloadCsv()}
               onRegistrationUpdated={updateRegistration}
@@ -346,8 +432,45 @@ export function AdminPage() {
         onUpdate={handleRegistrationUpdate}
         details={registrationDetails}
         onAssignBib={handleBibNumber}
+        adminRole={adminRole}
         onClose={() => { setSelectedRegistration(null); setRegistrationDetails(null); }}
       />
+
+      {maintenanceDraft && (
+        <ActionModal
+          title="Confirmar acao administrativa"
+          description={`Voce esta prestes a executar ${maintenanceDraft.action} para ${maintenanceDraft.registration.fullName}.`}
+          confirmLabel="Confirmar"
+          confirmTone={maintenanceDraft.action === 'cancel' ? 'danger' : 'brand'}
+          confirmDisabled={maintenanceDraft.action !== 'resend-email' && maintenanceDraft.reason.trim().length < 5}
+          onConfirm={() => void submitMaintenance()}
+          onClose={() => setMaintenanceDraft(null)}
+        >
+          {maintenanceDraft.action !== 'resend-email' && (
+            <label className="block text-xs font-bold text-zinc-400">
+              Motivo da acao
+              <textarea value={maintenanceDraft.reason} onChange={(event) => setMaintenanceDraft({ ...maintenanceDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
+            </label>
+          )}
+        </ActionModal>
+      )}
+
+      {bibDraft && (
+        <ActionModal
+          title="Atribuir numero de peito"
+          description={`Defina o numero de peito de ${bibDraft.registration.fullName} e registre o motivo da alteracao.`}
+          confirmLabel={actionLoading === 'bib' ? 'Salvando...' : 'Salvar numero'}
+          confirmDisabled={actionLoading === 'bib' || !bibDraft.bibNumber.trim() || bibDraft.reason.trim().length < 5}
+          onConfirm={() => void submitBibNumber()}
+          onClose={() => setBibDraft(null)}
+        >
+          <EditInput label="Numero de peito" value={bibDraft.bibNumber} onChange={(value) => setBibDraft({ ...bibDraft, bibNumber: value.toUpperCase() })} />
+          <label className="block text-xs font-bold text-zinc-400">
+            Motivo da atribuicao
+            <textarea value={bibDraft.reason} onChange={(event) => setBibDraft({ ...bibDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
+          </label>
+        </ActionModal>
+      )}
     </main>
   );
 }
@@ -355,6 +478,7 @@ export function AdminPage() {
 function AdminSection({
   adminKey,
   activeNav,
+  adminRole,
   summary,
   dashboard,
   registrations,
@@ -364,12 +488,14 @@ function AdminSection({
   loading,
   onFiltersChange,
   onSearch,
+  onRefreshAdminData,
   onOpenRegistration,
   onExport,
   onRegistrationUpdated,
 }: {
   adminKey: string;
   activeNav: AdminNavKey;
+  adminRole: AdminRole | null;
   summary: AdminSummaryResponse | null;
   dashboard: DashboardModel;
   registrations: AdminRegistration[];
@@ -379,15 +505,24 @@ function AdminSection({
   loading: boolean;
   onFiltersChange: (filters: AdminFilters) => void;
   onSearch: (event: FormEvent) => void;
+  onRefreshAdminData: () => void;
   onOpenRegistration: (registration: AdminRegistration) => void;
   onExport: () => void;
   onRegistrationUpdated: (registration: AdminRegistration) => void;
 }) {
+  if (!canAccessNav(adminRole, activeNav)) {
+    return (
+      <section className="mt-4">
+        <StatusMessage tone="error" message="Seu perfil nao possui permissao para acessar esta area." />
+      </section>
+    );
+  }
+
   if (activeNav === 'payments') {
     return (
       <>
         <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
-        <PaymentControlPanel registrations={registrations} dashboard={dashboard} adminKey={adminKey} onRegistrationUpdated={onRegistrationUpdated} />
+        <PaymentControlPanel registrations={registrations} dashboard={dashboard} adminKey={adminKey} onRegistrationUpdated={onRegistrationUpdated} onRefreshAdminData={onRefreshAdminData} />
       </>
     );
   }
@@ -396,7 +531,7 @@ function AdminSection({
     return (
       <>
         <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
-        <OperationControlPanel registrations={registrations} auditLogs={auditLogs} onOpenRegistration={onOpenRegistration} />
+        <OperationControlPanel registrations={registrations} auditLogs={auditLogs} onOpenRegistration={onOpenRegistration} adminKey={adminKey} onRegistrationUpdated={onRegistrationUpdated} onRefreshAdminData={onRefreshAdminData} />
       </>
     );
   }
@@ -414,10 +549,11 @@ function AdminSection({
     return (
       <>
         <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
-        <AuditPanel auditLogs={auditLogs} />
+        <AuditPanel auditLogs={auditLogs} adminKey={adminKey} registrations={registrations} onOpenRegistration={onOpenRegistration} />
       </>
     );
   }
+  if (activeNav === 'event') return <EventManagementPanel adminKey={adminKey} />;
 
   return (
     <>
@@ -438,13 +574,17 @@ function AdminSection({
 
 function LoginScreen({
   draftKey,
+  draftActor,
   error,
   onChange,
+  onActorChange,
   onSubmit,
 }: {
   draftKey: string;
+  draftActor: string;
   error: string;
   onChange: (value: string) => void;
+  onActorChange: (value: string) => void;
   onSubmit: (event: FormEvent) => void;
 }) {
   return (
@@ -457,15 +597,18 @@ function LoginScreen({
         <p className="mb-8 font-mono text-sm leading-relaxed text-zinc-400">
           Acesse vendas, inscrições, lotes, pagamentos e operação do evento com a chave administrativa.
         </p>
-        <div className="relative">
-          <Lock className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+        <div>
           <input
-            type="password"
-            value={draftKey}
-            onChange={(event) => onChange(event.target.value)}
-            className="w-full border border-zinc-800 bg-black py-4 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand"
-            placeholder="ADMIN_API_KEY"
+            required
+            value={draftActor}
+            onChange={(event) => onActorChange(event.target.value)}
+            className="mb-3 w-full border border-zinc-800 bg-black px-4 py-4 text-white outline-none transition-colors focus:border-brand"
+            placeholder="Seu nome para auditoria"
           />
+          <div className="relative">
+            <Lock className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+            <input type="password" required value={draftKey} onChange={(event) => onChange(event.target.value)} className="w-full border border-zinc-800 bg-black py-4 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand" placeholder="Chave de acesso" />
+          </div>
         </div>
         {error && <p className="mt-4 text-sm font-bold uppercase tracking-wider text-brand">{error}</p>}
         <button className="mt-6 flex min-h-14 w-full items-center justify-center gap-2 bg-brand p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-white">
@@ -480,7 +623,9 @@ function getNavLabel(key: AdminNavKey) {
   return navItems.find((item) => item.key === key)?.label || 'Admin';
 }
 
-function Sidebar({ activeNav, onSelect }: { activeNav: AdminNavKey; onSelect: (key: AdminNavKey) => void }) {
+function Sidebar({ activeNav, adminRole, onSelect }: { activeNav: AdminNavKey; adminRole: AdminRole | null; onSelect: (key: AdminNavKey) => void }) {
+  const visibleNavItems = adminRole ? navItems.filter((item) => navPermissions[item.key].includes(adminRole)) : navItems;
+
   return (
     <div className="flex h-full flex-col">
       <div className="mb-5 border-b border-white/10 px-3 pb-5">
@@ -490,7 +635,7 @@ function Sidebar({ activeNav, onSelect }: { activeNav: AdminNavKey; onSelect: (k
 
       <nav className="min-h-0 flex-1 overflow-y-auto pr-1">
         <div className="space-y-1">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             const active = activeNav === item.key;
 
@@ -532,12 +677,16 @@ function Topbar({
   onOpenSidebar,
   onRefresh,
   onExport,
+  actor,
+  onLogout,
 }: {
   activeNav: AdminNavKey;
   loading: boolean;
   onOpenSidebar: () => void;
   onRefresh: () => void;
   onExport: () => void;
+  actor: string;
+  onLogout: () => void;
 }) {
   return (
     <header className="sticky top-0 z-20 border-b border-white/10 bg-black/85 px-4 py-3 backdrop-blur-sm sm:px-6 lg:px-8">
@@ -558,6 +707,7 @@ function Topbar({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
+          <span className="hidden text-xs font-bold text-zinc-400 md:inline">{actor}</span>
           <button
             type="button"
             onClick={onRefresh}
@@ -566,6 +716,7 @@ function Topbar({
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
             <span className="hidden sm:inline">Atualizar</span>
           </button>
+          <button type="button" onClick={onLogout} className="min-h-10 border border-white/10 px-3 text-xs font-bold uppercase text-zinc-300 hover:border-red-400 hover:text-red-300">Sair</button>
           <button
             type="button"
             onClick={onExport}
@@ -660,16 +811,13 @@ function KpiCard({
 
 function ControlSummary({
   dashboard,
-  registrations,
+  registrations: _registrations,
   loading,
 }: {
   dashboard: DashboardModel;
   registrations: AdminRegistration[];
   loading: boolean;
 }) {
-  const pendingPayments = registrations.filter((registration) => registration.status === 'pending_payment').length;
-  const paidWithoutEmail = registrations.filter((registration) => registration.status === 'paid' && !registration.confirmationEmailSentAt).length;
-
   const cards: Array<{
     label: string;
     value: string | number;
@@ -678,9 +826,9 @@ function ControlSummary({
     trend: 'up' | 'neutral';
   }> = [
       { label: 'Pagas', value: dashboard.paidRegistrations, icon: BadgeCheck, detail: 'Inscrições confirmadas', trend: 'up' },
-      { label: 'Pendentes', value: pendingPayments, icon: TimerReset, detail: 'Aguardando pagamento', trend: 'neutral' },
+      { label: 'Pendentes', value: dashboard.pendingPayments, icon: TimerReset, detail: 'Aguardando pagamento', trend: 'neutral' },
       { label: 'Receita', value: currencyFormatter.format(dashboard.revenueCents / 100), icon: WalletCards, detail: 'Pagamentos aprovados', trend: 'up' },
-      { label: 'Emails pendentes', value: paidWithoutEmail, icon: Mail, detail: 'Confirmação não enviada', trend: 'neutral' },
+      { label: 'Emails pendentes', value: dashboard.paidWithoutEmail, icon: Mail, detail: 'Confirmação não enviada', trend: 'neutral' },
       { label: 'Kits entregues', value: dashboard.kitDeliveries, icon: Shirt, detail: 'Retirada registrada', trend: 'neutral' },
       { label: 'Check-ins', value: dashboard.checkIns, icon: ClipboardCheck, detail: 'Presença registrada', trend: 'neutral' },
     ];
@@ -707,29 +855,51 @@ function PaymentControlPanel({
   dashboard,
   adminKey,
   onRegistrationUpdated,
+  onRefreshAdminData,
 }: {
   registrations: AdminRegistration[];
   dashboard: DashboardModel;
   adminKey: string;
   onRegistrationUpdated: (registration: AdminRegistration) => void;
+  onRefreshAdminData: () => void;
 }) {
   const [filter, setFilter] = useState<'all' | 'divergent' | 'pending' | 'expired' | 'manual' | 'email'>('all');
   const [details, setDetails] = useState<AdminPaymentDetailsResponse | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [reason, setReason] = useState('');
   const [actionError, setActionError] = useState('');
+  const [paymentRows, setPaymentRows] = useState<AdminRegistration[]>([]);
+  const [orphanEvents, setOrphanEvents] = useState<AdminPaymentEvent[]>([]);
+  const [paymentPagination, setPaymentPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
+  const [paymentFilters, setPaymentFilters] = useState({ q: '', method: '', dateFrom: '', dateTo: '', page: '1', pageSize: '25' });
+  const [orphanDraft, setOrphanDraft] = useState<{ event: AdminPaymentEvent; registrationId: string; reason: string } | null>(null);
   const paid = registrations.filter((registration) => registration.status === 'paid');
   const pending = registrations.filter((registration) => registration.status === 'pending_payment');
   const failed = registrations.filter((registration) => ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(registration.status));
   const paidWithoutEmail = paid.filter((registration) => !registration.confirmationEmailSentAt);
-  const filtered = registrations.filter((registration) => {
-    if (filter === 'divergent') return registration.hasPaymentDivergence;
-    if (filter === 'pending') return registration.status === 'pending_payment';
-    if (filter === 'expired') return registration.status === 'expired';
-    if (filter === 'manual') return registration.gatewayStatus === 'manual_reconciled_paid';
-    if (filter === 'email') return registration.status === 'paid' && !registration.confirmationEmailSentAt;
-    return true;
-  });
+  const filtered = paymentRows;
+  useEffect(() => {
+    const status = filter === 'pending' ? 'pending_payment' : filter === 'all' ? '' : filter;
+    void getAdminPayments(adminKey, { ...paymentFilters, status }).then((response) => { setPaymentRows(response.payments); setPaymentPagination(response.pagination); setOrphanEvents(response.orphanEvents); }).catch((error) => setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel carregar os pagamentos.'));
+  }, [adminKey, filter, paymentFilters.q, paymentFilters.method, paymentFilters.dateFrom, paymentFilters.dateTo, paymentFilters.page, paymentFilters.pageSize]);
+
+  const exportPayments = async () => {
+    const status = filter === 'pending' ? 'pending_payment' : filter === 'all' ? '' : filter;
+    try {
+      const response = await fetch(getAdminPaymentsCsvUrl({ ...paymentFilters, status }), { credentials: 'include' });
+      if (!response.ok) throw new Error('Nao foi possivel exportar pagamentos.');
+      const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-pagamentos.csv'; link.click(); URL.revokeObjectURL(url);
+    } catch (error) { setActionError(error instanceof Error ? error.message : 'Nao foi possivel exportar pagamentos.'); }
+  };
+  const linkOrphan = async (event: AdminPaymentEvent) => {
+    setOrphanDraft({ event, registrationId: '', reason: '' });
+  };
+
+  const submitOrphanLink = async () => {
+    if (!orphanDraft?.registrationId.trim() || orphanDraft.reason.trim().length < 5) { setActionError('Informe a inscricao e um motivo com pelo menos 5 caracteres.'); return; }
+    try { await linkAdminOrphanPayment(adminKey, orphanDraft.event.id, orphanDraft.registrationId, orphanDraft.reason); setOrphanEvents((current) => current.filter((item) => item.id !== orphanDraft.event.id)); setOrphanDraft(null); await onRefreshAdminData(); }
+    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel vincular o evento.'); }
+  };
 
   const openDetails = async (registration: AdminRegistration) => {
     setDetailLoading(true); setActionError('');
@@ -745,7 +915,9 @@ function PaymentControlPanel({
       const response = await reconcileAdminPayment(adminKey, details.payment.id, reason);
       onRegistrationUpdated(response.registration);
       setDetails(await getAdminPaymentDetails(adminKey, response.registration.id));
+      setPaymentRows((current) => current.map((item) => item.id === response.registration.id ? response.registration : item));
       setReason('');
+      await onRefreshAdminData();
     } catch (error) { setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel conciliar o pagamento.'); }
     finally { setDetailLoading(false); }
   };
@@ -765,10 +937,17 @@ function PaymentControlPanel({
       </Panel>
 
       <Panel title="Últimos pagamentos" eyebrow="Controle operacional">
+        <div className="mb-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <input value={paymentFilters.q} onChange={(event) => setPaymentFilters({ ...paymentFilters, q: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Atleta, inscricao ou transacao" />
+          <input value={paymentFilters.method} onChange={(event) => setPaymentFilters({ ...paymentFilters, method: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Metodo: pix, cartao..." />
+          <input type="date" value={paymentFilters.dateFrom} onChange={(event) => setPaymentFilters({ ...paymentFilters, dateFrom: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data inicial" />
+          <input type="date" value={paymentFilters.dateTo} onChange={(event) => setPaymentFilters({ ...paymentFilters, dateTo: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data final" />
+        </div>
         <div className="mb-4 flex flex-wrap gap-2">
           {([['all','Todos'],['divergent','Divergentes'],['pending','Pendentes'],['expired','Expirados'],['manual','Manuais'],['email','Sem email']] as const).map(([value, label]) => (
-            <button key={value} type="button" onClick={() => setFilter(value)} className={`border px-3 py-2 text-xs font-black uppercase ${filter === value ? 'border-brand text-brand' : 'border-white/10 text-zinc-400'}`}>{label}</button>
+            <button key={value} type="button" onClick={() => { setFilter(value); setPaymentFilters({ ...paymentFilters, page: '1' }); }} className={`border px-3 py-2 text-xs font-black uppercase ${filter === value ? 'border-brand text-brand' : 'border-white/10 text-zinc-400'}`}>{label}</button>
           ))}
+          <button type="button" onClick={() => void exportPayments()} className="ml-auto border border-brand px-3 py-2 text-xs font-black uppercase text-brand"><Download className="mr-1 inline h-3 w-3" /> Exportar</button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-190 text-left">
@@ -806,7 +985,13 @@ function PaymentControlPanel({
             </tbody>
           </table>
         </div>
+        <div className="mt-3 flex items-center justify-between border-t border-white/10 pt-3 text-xs text-zinc-400">
+          <button type="button" disabled={paymentPagination.page <= 1} onClick={() => setPaymentFilters({ ...paymentFilters, page: String(paymentPagination.page - 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Anterior</button>
+          <span>{paymentPagination.total} pagamentos · pagina {paymentPagination.page}/{paymentPagination.totalPages}</span>
+          <button type="button" disabled={paymentPagination.page >= paymentPagination.totalPages} onClick={() => setPaymentFilters({ ...paymentFilters, page: String(paymentPagination.page + 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Proxima</button>
+        </div>
       </Panel>
+      {orphanEvents.length > 0 && <Panel title="Eventos sem inscricao" eyebrow="Exigem conferencia"><div className="space-y-2">{orphanEvents.slice(0, 20).map((event) => <div key={event.id} className="border border-red-400/20 bg-red-400/5 p-3"><p className="font-bold text-red-200">{event.providerEventId}</p><p className="mt-1 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(event.receivedAt))}</p><pre className="mt-2 max-h-32 overflow-auto text-xs text-zinc-400">{JSON.stringify(event.payload, null, 2)}</pre><button type="button" onClick={() => void linkOrphan(event)} className="mt-2 border border-red-300/30 px-3 py-2 text-xs font-black uppercase text-red-200">Vincular a inscricao</button></div>)}</div></Panel>}
       {(details || detailLoading || actionError) && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/75">
           <button type="button" aria-label="Fechar" className="absolute inset-0" onClick={() => { setDetails(null); setActionError(''); }} />
@@ -829,6 +1014,22 @@ function PaymentControlPanel({
           </aside>
         </div>
       )}
+      {orphanDraft && (
+        <ActionModal
+          title="Vincular evento orfao"
+          description="Informe a inscricao correta e o motivo da vinculacao manual."
+          confirmLabel="Vincular evento"
+          confirmDisabled={!orphanDraft.registrationId.trim() || orphanDraft.reason.trim().length < 5}
+          onConfirm={() => void submitOrphanLink()}
+          onClose={() => setOrphanDraft(null)}
+        >
+          <EditInput label="ID da inscricao" value={orphanDraft.registrationId} onChange={(value) => setOrphanDraft({ ...orphanDraft, registrationId: value })} />
+          <label className="block text-xs font-bold text-zinc-400">
+            Motivo da vinculacao
+            <textarea value={orphanDraft.reason} onChange={(event) => setOrphanDraft({ ...orphanDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
+          </label>
+        </ActionModal>
+      )}
     </div>
   );
 }
@@ -837,58 +1038,71 @@ function OperationControlPanel({
   registrations,
   auditLogs,
   onOpenRegistration,
+  adminKey,
+  onRegistrationUpdated,
+  onRefreshAdminData,
 }: {
   registrations: AdminRegistration[];
   auditLogs: AdminAuditLog[];
   onOpenRegistration: (registration: AdminRegistration) => void;
+  adminKey: string;
+  onRegistrationUpdated: (registration: AdminRegistration) => void;
+  onRefreshAdminData: () => void;
 }) {
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'kit_pending' | 'checkin_pending' | 'completed'>('all');
-  const paidRegistrations = registrations.filter((registration) => registration.status === 'paid');
-  const normalizedQuery = normalizeSearch(query);
-  const kitPending = paidRegistrations.filter((registration) => registration.kitStatus !== 'delivered');
-  const checkInPending = paidRegistrations.filter((registration) => registration.checkInStatus !== 'checked_in');
-  const completed = paidRegistrations.filter((registration) => registration.kitStatus === 'delivered' && registration.checkInStatus === 'checked_in');
-  const filteredRegistrations = paidRegistrations
-    .filter((registration) => {
-      if (statusFilter === 'kit_pending') {
-        return registration.kitStatus !== 'delivered';
-      }
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanError, setScanError] = useState('');
+  const [operationRows, setOperationRows] = useState<AdminRegistration[]>([]);
+  const [operationTotals, setOperationTotals] = useState({ paid: 0, kitPending: 0, checkInPending: 0, completed: 0 });
+  const [operationPagination, setOperationPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
+  const [operationPage, setOperationPage] = useState(1);
+  const [busyAction, setBusyAction] = useState('');
+  const [operationError, setOperationError] = useState('');
+  const [quickActionDraft, setQuickActionDraft] = useState<{ registration: AdminRegistration; action: 'check-in' | 'kit'; notes: string } | null>(null);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void getAdminOperation(adminKey, { q: query, filter: statusFilter, page: String(operationPage), pageSize: '25' }).then((response) => { setOperationRows(response.registrations); setOperationTotals(response.totals); setOperationPagination(response.pagination); });
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [adminKey, query, statusFilter, operationPage]);
+  useEffect(() => { setOperationPage(1); }, [query, statusFilter]);
 
-      if (statusFilter === 'checkin_pending') {
-        return registration.checkInStatus !== 'checked_in';
-      }
+  const quickAction = async (registration: AdminRegistration, action: 'check-in' | 'kit') => {
+    setQuickActionDraft({ registration, action, notes: '' });
+  };
 
-      if (statusFilter === 'completed') {
-        return registration.kitStatus === 'delivered' && registration.checkInStatus === 'checked_in';
-      }
+  const submitQuickAction = async () => {
+    if (!quickActionDraft) return;
+    const key = `${quickActionDraft.registration.id}:${quickActionDraft.action}`; setBusyAction(key); setOperationError('');
+    try {
+      const response = quickActionDraft.action === 'check-in' ? await checkInAdminRegistration(adminKey, quickActionDraft.registration.id, quickActionDraft.notes) : await deliverAdminKit(adminKey, quickActionDraft.registration.id, quickActionDraft.notes);
+      onRegistrationUpdated(response.registration);
+      const refreshed = await getAdminOperation(adminKey, { q: query, filter: statusFilter, page: String(operationPage), pageSize: '25' });
+      setOperationRows(refreshed.registrations); setOperationTotals(refreshed.totals); setOperationPagination(refreshed.pagination);
+      setQuickActionDraft(null);
+      await onRefreshAdminData();
+    } catch (error) { setOperationError(error instanceof ApiError ? error.message : 'Nao foi possivel concluir a operacao.'); }
+    finally { setBusyAction(''); }
+  };
 
-      return true;
-    })
-    .filter((registration) => {
-      if (!normalizedQuery) {
-        return true;
-      }
-
-      return [
-        registration.id,
-        registration.fullName,
-        registration.email,
-        registration.phone,
-        registration.cpfMasked,
-        registration.distance,
-        registration.shirtSize,
-      ].some((value) => normalizeSearch(value).includes(normalizedQuery));
-    });
+  const openFromCode = (rawCode: string) => {
+    const code = rawCode.trim();
+    const registrationId = code.startsWith('funpace:registration:') ? code.slice('funpace:registration:'.length) : code;
+    const normalized = normalizeSearch(registrationId);
+    const registration = registrations.find((item) => item.id === registrationId || normalizeSearch(item.bibNumber || '') === normalized);
+    if (!registration) { setScanError('Inscricao nao encontrada. Confira o QR ou numero de peito.'); return; }
+    setScanError(''); setScannerOpen(false); onOpenRegistration(registration);
+  };
 
   return (
     <section className="mt-4 grid gap-4 xl:grid-cols-[0.72fr_1.28fr]">
       <Panel title="Controle presencial" eyebrow="Operação">
         <div className="grid gap-3 sm:grid-cols-2">
-          <MetricBox label="Aptos para operação" value={paidRegistrations.length} detail="Inscrições pagas" />
-          <MetricBox label="Kit pendente" value={kitPending.length} detail="Ainda não retirado" tone={kitPending.length > 0 ? 'warning' : 'default'} />
-          <MetricBox label="Check-in pendente" value={checkInPending.length} detail="Ainda não realizado" tone={checkInPending.length > 0 ? 'warning' : 'default'} />
-          <MetricBox label="Concluídos" value={completed.length} detail="Kit + check-in" />
+          <MetricBox label="Aptos para operação" value={operationTotals.paid} detail="Inscrições pagas" />
+          <MetricBox label="Kit pendente" value={operationTotals.kitPending} detail="Ainda não retirado" tone={operationTotals.kitPending > 0 ? 'warning' : 'default'} />
+          <MetricBox label="Check-in pendente" value={operationTotals.checkInPending} detail="Ainda não realizado" tone={operationTotals.checkInPending > 0 ? 'warning' : 'default'} />
+          <MetricBox label="Concluídos" value={operationTotals.completed} detail="Kit + check-in" />
         </div>
 
         <div className="mt-4 border border-white/10 bg-black/35 p-4">
@@ -899,9 +1113,10 @@ function OperationControlPanel({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               className="min-h-12 w-full border border-zinc-800 bg-black py-3 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand"
-              placeholder="Nome, CPF, e-mail, telefone ou ID"
+              placeholder="Nome, CPF, e-mail, telefone, ID ou peito"
             />
           </div>
+          <button type="button" onClick={() => { setScanError(''); setScannerOpen(true); }} className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 bg-brand px-4 text-xs font-black uppercase text-black"><ScanLine className="h-4 w-4" /> Ler QR Code</button>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
             <OperationFilterButton active={statusFilter === 'all'} label="Todos pagos" onClick={() => setStatusFilter('all')} />
             <OperationFilterButton active={statusFilter === 'kit_pending'} label="Kit pendente" onClick={() => setStatusFilter('kit_pending')} />
@@ -915,11 +1130,57 @@ function OperationControlPanel({
         </div>
       </Panel>
 
-      <Panel title="Fila de atendimento" eyebrow="Kit e check-in" action={`${filteredRegistrations.length} atletas`}>
-        <OperationalQueue registrations={filteredRegistrations} onOpenRegistration={onOpenRegistration} />
+      <Panel title="Fila de atendimento" eyebrow="Kit e check-in" action={`${operationPagination.total} atletas`}>
+        {operationError && <p className="mb-3 border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">{operationError}</p>}
+        <OperationalQueue registrations={operationRows} onOpenRegistration={onOpenRegistration} onQuickAction={quickAction} busyAction={busyAction} />
+        <div className="mt-3 flex items-center justify-between border-t border-white/10 pt-3 text-xs text-zinc-400"><button disabled={operationPagination.page <= 1} onClick={() => setOperationPage((page) => page - 1)} className="border border-white/10 px-3 py-2 disabled:opacity-30">Anterior</button><span>Pagina {operationPagination.page}/{operationPagination.totalPages}</span><button disabled={operationPagination.page >= operationPagination.totalPages} onClick={() => setOperationPage((page) => page + 1)} className="border border-white/10 px-3 py-2 disabled:opacity-30">Proxima</button></div>
       </Panel>
+      {scannerOpen && <QrScannerModal error={scanError} onDetected={openFromCode} onClose={() => setScannerOpen(false)} />}
+      {quickActionDraft && (
+        <ActionModal
+          title={quickActionDraft.action === 'check-in' ? 'Confirmar check-in' : 'Confirmar entrega de kit'}
+          description={`Confirme a operacao para ${quickActionDraft.registration.fullName}.`}
+          confirmLabel={quickActionDraft.action === 'check-in' ? 'Registrar check-in' : 'Registrar entrega'}
+          onConfirm={() => void submitQuickAction()}
+          onClose={() => setQuickActionDraft(null)}
+        >
+          <label className="block text-xs font-bold text-zinc-400">
+            Observacao da operacao
+            <textarea value={quickActionDraft.notes} onChange={(event) => setQuickActionDraft({ ...quickActionDraft, notes: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
+          </label>
+        </ActionModal>
+      )}
     </section>
   );
+}
+
+function QrScannerModal({ error, onDetected, onClose }: { error: string; onDetected: (code: string) => void; onClose: () => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const onDetectedRef = useRef(onDetected);
+  const [manualCode, setManualCode] = useState('');
+  const [cameraError, setCameraError] = useState('');
+
+  useEffect(() => { onDetectedRef.current = onDetected; }, [onDetected]);
+  useEffect(() => {
+    if (!videoRef.current) return undefined;
+    const scanner = new QrScanner(videoRef.current, (result) => onDetectedRef.current(result.data), {
+      preferredCamera: 'environment', highlightScanRegion: true, highlightCodeOutline: true, returnDetailedScanResult: true,
+    });
+    void scanner.start().catch(() => setCameraError('Nao foi possivel acessar a camera. Use HTTPS, permita a camera ou informe o codigo manualmente.'));
+    return () => { scanner.stop(); scanner.destroy(); };
+  }, []);
+
+  return <div className="fixed inset-0 z-60 flex items-end justify-center bg-black/85 p-0 sm:items-center sm:p-5">
+    <div className="w-full max-w-xl border border-white/10 bg-zinc-950 p-4 sm:p-6">
+      <div className="mb-4 flex items-center justify-between"><div><p className="text-xs font-black uppercase text-brand">Atendimento</p><h2 className="mt-1 text-xl font-black">Ler QR Code</h2></div><button type="button" onClick={onClose}><X /></button></div>
+      <div className="overflow-hidden border border-white/10 bg-black"><video ref={videoRef} className="aspect-square w-full object-cover" muted playsInline /></div>
+      {(cameraError || error) && <p className="mt-3 border border-amber-400/20 bg-amber-400/10 p-3 text-sm text-amber-100">{cameraError || error}</p>}
+      <form onSubmit={(event) => { event.preventDefault(); onDetected(manualCode); }} className="mt-4 flex gap-2">
+        <input value={manualCode} onChange={(event) => setManualCode(event.target.value)} className="min-h-12 min-w-0 flex-1 border border-white/10 bg-black px-3 text-white" placeholder="ID ou numero de peito" />
+        <button type="submit" disabled={!manualCode.trim()} className="bg-brand px-4 text-xs font-black uppercase text-black disabled:opacity-40">Abrir</button>
+      </form>
+    </div>
+  </div>;
 }
 
 function OperationFilterButton({
@@ -946,9 +1207,13 @@ function OperationFilterButton({
 function OperationalQueue({
   registrations,
   onOpenRegistration,
+  onQuickAction,
+  busyAction,
 }: {
   registrations: AdminRegistration[];
   onOpenRegistration: (registration: AdminRegistration) => void;
+  onQuickAction: (registration: AdminRegistration, action: 'check-in' | 'kit') => Promise<void>;
+  busyAction: string;
 }) {
   if (registrations.length === 0) {
     return <EmptyState />;
@@ -972,6 +1237,7 @@ function OperationalQueue({
               <td className="p-3">
                 <p className="font-bold">{registration.fullName}</p>
                 <p className="mt-1 font-mono text-xs text-zinc-500">{registration.cpfMasked}</p>
+                {registration.bibNumber && <p className="mt-1 text-xs font-black uppercase text-brand">Peito {registration.bibNumber}</p>}
               </td>
               <td className="p-3 text-sm font-bold text-zinc-300">{registration.distance} / camisa {registration.shirtSize}</td>
               <td className="p-3 text-xs font-black uppercase tracking-widest text-zinc-400">
@@ -981,6 +1247,10 @@ function OperationalQueue({
                 {registration.checkInStatus === 'checked_in' ? 'Realizado' : 'Pendente'}
               </td>
               <td className="p-3 text-right">
+                <div className="mb-2 flex justify-end gap-1">
+                  {registration.kitStatus !== 'delivered' && <button type="button" disabled={busyAction !== ''} onClick={() => void onQuickAction(registration, 'kit')} className="border border-white/10 px-2 py-1 text-[10px] font-black uppercase text-zinc-300 disabled:opacity-30">Kit</button>}
+                  {registration.checkInStatus !== 'checked_in' && <button type="button" disabled={busyAction !== ''} onClick={() => void onQuickAction(registration, 'check-in')} className="border border-brand/30 px-2 py-1 text-[10px] font-black uppercase text-brand disabled:opacity-30">Check-in</button>}
+                </div>
                 <button
                   type="button"
                   onClick={() => onOpenRegistration(registration)}
@@ -1010,37 +1280,30 @@ function ReportsPanel({
 }) {
   const paidRegistrations = registrations.filter((registration) => registration.status === 'paid');
   const pendingRegistrations = registrations.filter((registration) => registration.status === 'pending_payment');
-  const confirmedPayments = registrations.filter((registration) => registration.paymentStatus === 'paid' || registration.status === 'paid');
-  const manualPayments = registrations.filter((registration) => registration.gatewayStatus === 'manual_reconciled_paid');
-  const confirmationEmailSent = paidRegistrations.filter((registration) => registration.confirmationEmailSentAt);
   const confirmationEmailMissing = paidRegistrations.filter((registration) => !registration.confirmationEmailSentAt);
   const confirmationEmailFailed = paidRegistrations.filter((registration) => registration.confirmationEmailError);
   const kitDelivered = paidRegistrations.filter((registration) => registration.kitStatus === 'delivered');
   const checkIns = paidRegistrations.filter((registration) => registration.checkInStatus === 'checked_in');
-  const shirtSizes = registrations.reduce<Record<string, number>>((accumulator, registration) => {
-    accumulator[registration.shirtSize] = (accumulator[registration.shirtSize] || 0) + 1;
-    return accumulator;
-  }, {});
   const distanceRows = summary?.byDistance.map((distance) => ({
     label: distance.name,
     total: distance.total,
     paid: distance.paid,
-    pending: registrations.filter((registration) => registration.distanceId === distance.id && registration.status === 'pending_payment').length,
+    pending: distance.pending,
   })) || [];
   const reportCards = [
-    { label: 'Inscritos pagos', value: paidRegistrations.length, detail: currencyFormatter.format(dashboard.revenueCents / 100), icon: BadgeCheck },
-    { label: 'Inscritos pendentes', value: pendingRegistrations.length, detail: 'Aguardando pagamento', icon: TimerReset },
-    { label: 'Pagamentos confirmados', value: confirmedPayments.length, detail: 'Banco + gateway', icon: CreditCard },
-    { label: 'Conciliados manualmente', value: manualPayments.length, detail: 'Ajustes auditados', icon: ShieldCheck },
-    { label: 'Emails enviados', value: confirmationEmailSent.length, detail: 'Confirmacao', icon: Mail },
-    { label: 'Emails pendentes/falhos', value: confirmationEmailMissing.length + confirmationEmailFailed.length, detail: 'Exigem conferencia', icon: Activity },
-    { label: 'Kits retirados', value: kitDelivered.length, detail: `${paidRegistrations.length - kitDelivered.length} pendentes`, icon: Shirt },
-    { label: 'Check-ins', value: checkIns.length, detail: `${paidRegistrations.length - checkIns.length} pendentes`, icon: ClipboardCheck },
+    { label: 'Inscritos pagos', value: dashboard.paidRegistrations, detail: currencyFormatter.format(dashboard.revenueCents / 100), icon: BadgeCheck },
+    { label: 'Inscritos pendentes', value: dashboard.pendingPayments, detail: 'Aguardando pagamento', icon: TimerReset },
+    { label: 'Pagamentos confirmados', value: dashboard.paidRegistrations, detail: 'Banco + gateway', icon: CreditCard },
+    { label: 'Conciliados manualmente', value: summary?.totals.manualReconciledPayments ?? 0, detail: 'Ajustes auditados', icon: ShieldCheck },
+    { label: 'Emails enviados', value: summary?.totals.confirmationEmailsSent ?? 0, detail: 'Confirmacao', icon: Mail },
+    { label: 'Emails pendentes/falhos', value: summary?.totals.confirmationEmailsAttention ?? 0, detail: 'Exigem conferencia', icon: Activity },
+    { label: 'Kits retirados', value: dashboard.kitDeliveries, detail: `${Math.max(dashboard.paidRegistrations - dashboard.kitDeliveries, 0)} pendentes`, icon: Shirt },
+    { label: 'Check-ins', value: dashboard.checkIns, detail: `${Math.max(dashboard.paidRegistrations - dashboard.checkIns, 0)} pendentes`, icon: ClipboardCheck },
   ];
   const alerts = [
-    confirmationEmailMissing.length > 0 ? `${confirmationEmailMissing.length} inscritos pagos sem email de confirmacao.` : '',
-    confirmationEmailFailed.length > 0 ? `${confirmationEmailFailed.length} emails de confirmacao com erro registrado.` : '',
-    pendingRegistrations.length > 0 ? `${pendingRegistrations.length} inscrições ainda pendentes de pagamento.` : '',
+    (summary?.totals.paidWithoutEmail ?? 0) > 0 ? `${summary?.totals.paidWithoutEmail ?? 0} inscritos pagos sem email de confirmacao.` : '',
+    (summary?.totals.confirmationEmailsFailed ?? 0) > 0 ? `${summary?.totals.confirmationEmailsFailed ?? 0} emails de confirmacao com erro registrado.` : '',
+    dashboard.pendingPayments > 0 ? `${dashboard.pendingPayments} inscricoes ainda pendentes de pagamento.` : '',
   ].filter(Boolean);
 
   return (
@@ -1094,9 +1357,10 @@ function ReportsPanel({
         <Panel title="Lista por tamanho de camisa" eyebrow="Produção">
           <ReportTable
             columns={['Camisa', 'Quantidade']}
-            rows={Object.entries(shirtSizes)
-              .sort(([a], [b]) => shirtSizeOrder(a) - shirtSizeOrder(b))
-              .map(([size, total]) => [`Camisa ${size}`, total])}
+            rows={(summary?.shirtSizes || [])
+              .slice()
+              .sort((a, b) => shirtSizeOrder(a.size) - shirtSizeOrder(b.size))
+              .map((item) => [`Camisa ${item.size}`, item.total])}
           />
         </Panel>
       </div>
@@ -1207,56 +1471,30 @@ function ReportList({
   );
 }
 
-function LegacyReportsPanel({
-  summary,
-  dashboard,
-  registrations,
-  onExport,
-}: {
-  summary: AdminSummaryResponse | null;
-  dashboard: DashboardModel;
-  registrations: AdminRegistration[];
-  onExport: () => void;
-}) {
-  const shirtSizes = registrations.reduce<Record<string, number>>((accumulator, registration) => {
-    accumulator[registration.shirtSize] = (accumulator[registration.shirtSize] || 0) + 1;
-    return accumulator;
-  }, {});
-
-  return (
-    <div className="mt-4 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
-      <Panel title="Exportações" eyebrow="Relatórios">
-        <div className="space-y-3">
-          <button
-            type="button"
-            onClick={onExport}
-            className="flex min-h-12 w-full items-center justify-center gap-2 bg-brand px-4 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white"
-          >
-            <Download className="h-4 w-4" /> Exportar inscrições filtradas
-          </button>
-          <MetricBox label="Total de inscritos" value={dashboard.totalRegistrations} detail="Base completa" />
-          <MetricBox label="Receita paga" value={currencyFormatter.format(dashboard.revenueCents / 100)} detail="Pagamentos aprovados" />
-        </div>
-      </Panel>
-
-      <Panel title="Capacidade e camisetas" eyebrow="Produção">
-        <div className="grid gap-4 lg:grid-cols-2">
-          <LotDistancePanel summary={summary} />
-          <div className="space-y-3">
-            {Object.entries(shirtSizes).map(([size, total]) => (
-              <div key={size} className="flex items-center justify-between border border-white/10 bg-black/35 p-3">
-                <span className="text-xs font-black uppercase tracking-widest text-zinc-500">Camisa {size}</span>
-                <span className="font-mono text-xl font-black">{total}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-function AuditPanel({ auditLogs }: { auditLogs: AdminAuditLog[] }) {
+function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: { auditLogs: AdminAuditLog[]; adminKey: string; registrations: AdminRegistration[]; onOpenRegistration: (registration: AdminRegistration) => void }) {
+  const [logs, setLogs] = useState(auditLogs);
+  const [filters, setFilters] = useState({ q: '', action: '', actor: '', entityType: '', dateFrom: '', dateTo: '', page: '1', pageSize: '50' });
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 50, total: auditLogs.length, totalPages: 1 });
+  const [selectedLog, setSelectedLog] = useState<AdminAuditLog | null>(null);
+  const [auditError, setAuditError] = useState('');
+  const [openingRegistrationId, setOpeningRegistrationId] = useState('');
+  useEffect(() => {
+    const timeout = window.setTimeout(() => { void getAdminAuditLogs(adminKey, filters).then((response) => { setLogs(response.logs); setPagination(response.pagination); setAuditError(''); }).catch((error) => setAuditError(error instanceof ApiError ? error.message : 'Nao foi possivel carregar a auditoria.')); }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [adminKey, filters.q, filters.action, filters.actor, filters.entityType, filters.dateFrom, filters.dateTo, filters.page, filters.pageSize]);
+  const exportAudit = async () => {
+    try { const response = await fetch(getAdminAuditLogsCsvUrl(filters), { credentials: 'include' }); if (!response.ok) throw new Error('Nao foi possivel exportar a auditoria.'); const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-auditoria.csv'; link.click(); URL.revokeObjectURL(url); }
+    catch (error) { setAuditError(error instanceof Error ? error.message : 'Nao foi possivel exportar a auditoria.'); }
+  };
+  const openRegistrationFromLog = async (log: AdminAuditLog) => {
+    if (log.entityType !== 'registration') return;
+    const registration = registrations.find((item) => item.id === log.entityId);
+    if (registration) { onOpenRegistration(registration); return; }
+    setOpeningRegistrationId(log.entityId);
+    try { const response = await getAdminRegistrationDetails(adminKey, log.entityId); onOpenRegistration(response.registration); }
+    catch (error) { setAuditError(error instanceof ApiError ? error.message : 'Nao foi possivel abrir a inscricao relacionada.'); }
+    finally { setOpeningRegistrationId(''); }
+  };
   return (
     <section className="mt-4 border border-white/10 bg-zinc-950/80">
       <div className="border-b border-white/10 p-4 md:p-5">
@@ -1267,7 +1505,19 @@ function AuditPanel({ auditLogs }: { auditLogs: AdminAuditLog[] }) {
         </p>
       </div>
 
-      {auditLogs.length === 0 ? (
+      <div className="grid gap-2 border-b border-white/10 p-4 sm:grid-cols-2 xl:grid-cols-4">
+        <input value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Buscar em toda auditoria" />
+        <input value={filters.action} onChange={(event) => setFilters({ ...filters, action: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Acao" />
+        <input value={filters.actor} onChange={(event) => setFilters({ ...filters, actor: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Ator" />
+        <SelectFilter value={filters.entityType} onChange={(value) => setFilters({ ...filters, entityType: value, page: '1' })} options={[{ value: '', label: 'Todas entidades' }, { value: 'registration', label: 'Inscricao' }, { value: 'payment', label: 'Pagamento' }, { value: 'partnership', label: 'Parceria' }, { value: 'event', label: 'Evento' }, { value: 'distance', label: 'Distancia' }, { value: 'lot', label: 'Lote' }]} />
+        <input type="date" value={filters.dateFrom} onChange={(event) => setFilters({ ...filters, dateFrom: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data inicial" />
+        <input type="date" value={filters.dateTo} onChange={(event) => setFilters({ ...filters, dateTo: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data final" />
+        <button type="button" onClick={() => void exportAudit()} className="min-h-11 border border-brand px-3 text-xs font-black uppercase text-brand">Exportar CSV</button>
+        <button type="button" onClick={() => setFilters({ q: '', action: '', actor: '', entityType: '', dateFrom: '', dateTo: '', page: '1', pageSize: '50' })} className="min-h-11 border border-white/10 px-3 text-xs font-black uppercase">Limpar</button>
+      </div>
+      {auditError && <p className="m-4 border border-red-400/20 bg-red-400/10 p-3 text-red-100">{auditError}</p>}
+
+      {logs.length === 0 ? (
         <div className="p-6 text-sm text-zinc-500">Nenhum log administrativo encontrado.</div>
       ) : (
         <div className="overflow-x-auto">
@@ -1277,27 +1527,88 @@ function AuditPanel({ auditLogs }: { auditLogs: AdminAuditLog[] }) {
                 <th className="p-4">Ação</th>
                 <th className="p-4">Entidade</th>
                 <th className="p-4">Ator</th>
+                <th className="p-4">Origem</th>
                 <th className="p-4">Data</th>
+                <th className="p-4 text-right">Detalhes</th>
               </tr>
             </thead>
             <tbody>
-              {auditLogs.map((log) => (
+              {logs.map((log) => (
                 <tr key={log.id} className="border-t border-white/10">
-                  <td className="p-4 font-bold">{auditActionLabel(log.action)}</td>
+                  <td className="p-4"><p className="font-bold">{auditActionLabel(log.action)}</p><p className="mt-1 text-xs text-zinc-500">{summarizeAuditPayload(log.payload)}</p></td>
                   <td className="p-4">
-                    <p className="text-sm text-zinc-300">{log.entityType}</p>
+                    <p className="text-sm text-zinc-300">{auditEntityLabel(log.entityType)}</p>
                     <p className="mt-1 font-mono text-xs text-zinc-500">{log.entityId}</p>
                   </td>
-                  <td className="p-4 text-sm font-bold text-zinc-300">{log.actor}</td>
+                  <td className="p-4"><p className="text-sm font-bold text-zinc-300">{log.actor}</p><p className="mt-1 text-xs uppercase tracking-widest text-zinc-500">{log.actorRole || 'sistema'}</p></td>
+                  <td className="p-4"><p className="font-mono text-xs text-zinc-400">{log.ipAddress || 'IP n/a'}</p><p className="mt-1 font-mono text-[11px] text-zinc-600">{log.sessionId || 'sessao n/a'}</p></td>
                   <td className="p-4 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(log.createdAt))}</td>
+                  <td className="p-4 text-right"><button type="button" onClick={() => setSelectedLog(log)} className="border border-white/10 px-2 py-1 text-xs">Payload</button>{log.entityType === 'registration' && <button type="button" onClick={() => void openRegistrationFromLog(log)} className="ml-1 border border-brand/30 px-2 py-1 text-xs text-brand">{openingRegistrationId === log.entityId ? 'Abrindo...' : 'Abrir'}</button>}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+      <div className="flex items-center justify-between border-t border-white/10 p-4 text-xs text-zinc-400"><button disabled={pagination.page <= 1} onClick={() => setFilters({ ...filters, page: String(pagination.page - 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Anterior</button><span>{pagination.total} logs · pagina {pagination.page}/{pagination.totalPages}</span><button disabled={pagination.page >= pagination.totalPages} onClick={() => setFilters({ ...filters, page: String(pagination.page + 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Proxima</button></div>
+      {selectedLog && <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4"><div className="w-full max-w-2xl border border-white/10 bg-zinc-950 p-5"><div className="flex justify-between"><h3 className="text-xl font-black">{auditActionLabel(selectedLog.action)}</h3><button onClick={() => setSelectedLog(null)}><X /></button></div><p className="mt-2 font-mono text-xs text-zinc-500">{selectedLog.actor} · {dateTimeFormatter.format(new Date(selectedLog.createdAt))}</p><pre className="mt-4 max-h-[60vh] overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(selectedLog.payload, null, 2)}</pre></div></div>}
     </section>
   );
+}
+
+function EventManagementPanel({ adminKey }: { adminKey: string }) {
+  const [config, setConfig] = useState<AdminEventConfig | null>(null);
+  const [message, setMessage] = useState('');
+  const [saveDraft, setSaveDraft] = useState<{ kind: 'event' | 'distance' | 'lot'; id?: string; reason: string } | null>(null);
+  const load = () => getAdminEventConfig(adminKey).then(setConfig).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Nao foi possivel carregar o evento.'));
+  useEffect(() => { void load(); }, [adminKey]);
+  if (!config) return <section className="mt-4 border border-white/10 bg-zinc-950 p-6 text-zinc-400">{message || 'Carregando configuracao...'}</section>;
+  const updateEvent = (field: keyof AdminEventConfig['event'], value: string) => setConfig({ ...config, event: { ...config.event, [field]: value } });
+  const submitSave = async () => {
+    if (!saveDraft || saveDraft.reason.trim().length < 5) return;
+    try {
+      if (saveDraft.kind === 'event') {
+        await updateAdminEventConfig(adminKey, config.event, saveDraft.reason);
+        setMessage('Evento atualizado.');
+      } else if (saveDraft.kind === 'distance' && saveDraft.id) {
+        const distance = config.distances.find((item) => item.id === saveDraft.id);
+        if (!distance) return;
+        await updateAdminDistance(adminKey, distance.id, { capacity: distance.capacity, status: distance.status, reason: saveDraft.reason });
+        setMessage('Distancia atualizada.');
+      } else if (saveDraft.kind === 'lot' && saveDraft.id) {
+        const lot = config.lots.find((item) => item.id === saveDraft.id);
+        if (!lot) return;
+        await updateAdminLot(adminKey, lot.id, { ...lot, reason: saveDraft.reason });
+        setMessage('Lote atualizado.');
+        await load();
+      }
+      setSaveDraft(null);
+    } catch (error) {
+      setMessage(error instanceof ApiError ? error.message : 'Falha ao atualizar.');
+    }
+  };
+  return <section className="mt-4 space-y-4">
+    {message && <p className="border border-brand/20 bg-brand/10 p-3 text-sm text-brand">{message}</p>}
+    <Panel title="Dados do evento" eyebrow="Configuracao">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <EditInput label="Nome" value={config.event.name} onChange={(value) => updateEvent('name', value)} />
+        <EditInput label="Data" type="date" value={config.event.date} onChange={(value) => updateEvent('date', value)} />
+        <EditInput label="Horario" type="time" value={config.event.startTime} onChange={(value) => updateEvent('startTime', value)} />
+        <EditInput label="Local" value={config.event.locationName} onChange={(value) => updateEvent('locationName', value)} />
+        <EditInput label="Cidade" value={config.event.city} onChange={(value) => updateEvent('city', value)} />
+        <EditInput label="UF" value={config.event.state} maxLength={2} onChange={(value) => updateEvent('state', value.toUpperCase())} />
+        <label className="text-xs font-bold text-zinc-400">Status<select value={config.event.status} onChange={(event) => updateEvent('status', event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="published">Publicado</option><option value="draft">Rascunho</option><option value="closed">Encerrado</option></select></label>
+      </div>
+      <button type="button" onClick={() => setSaveDraft({ kind: 'event', reason: '' })} className="mt-4 bg-brand px-4 py-3 text-xs font-black uppercase text-black">Salvar evento</button>
+    </Panel>
+    <Panel title="Distancias" eyebrow="Capacidade">
+      <div className="grid gap-3 lg:grid-cols-2">{config.distances.map((distance) => <div key={distance.id} className="border border-white/10 bg-black/30 p-4"><p className="font-black">{distance.name}</p><div className="mt-3 grid grid-cols-2 gap-2"><EditInput label="Capacidade" type="number" value={String(distance.capacity)} onChange={(value) => setConfig({ ...config, distances: config.distances.map((item) => item.id === distance.id ? { ...item, capacity: Number(value) } : item) })} /><label className="text-xs font-bold text-zinc-400">Status<select value={distance.status} onChange={(event) => setConfig({ ...config, distances: config.distances.map((item) => item.id === distance.id ? { ...item, status: event.target.value } : item) })} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="active">Ativa</option><option value="inactive">Inativa</option><option value="sold_out">Esgotada</option></select></label></div><button type="button" onClick={() => setSaveDraft({ kind: 'distance', id: distance.id, reason: '' })} className="mt-3 border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Salvar</button></div>)}</div>
+    </Panel>
+    <Panel title="Lotes e vendas" eyebrow="Comercial">
+      <div className="grid gap-3 xl:grid-cols-2">{config.lots.map((lot) => <div key={lot.id} className="border border-white/10 bg-black/30 p-4"><div className="grid gap-2 sm:grid-cols-2"><EditInput label="Nome" value={lot.name} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, name: value } : item) })} /><EditInput label="Preco em centavos" type="number" value={String(lot.priceCents)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, priceCents: Number(value) } : item) })} /><EditInput label="Capacidade" type="number" value={String(lot.capacity)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, capacity: Number(value) } : item) })} /><label className="text-xs font-bold text-zinc-400">Status<select value={lot.status} onChange={(event) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, status: event.target.value } : item) })} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="active">Ativo</option><option value="scheduled">Agendado</option><option value="inactive">Inativo</option><option value="sold_out">Esgotado</option><option value="closed">Encerrado</option></select></label><EditInput label="Inicio" type="datetime-local" value={lot.startsAt.slice(0, 16)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, startsAt: value } : item) })} /><EditInput label="Fim" type="datetime-local" value={lot.endsAt.slice(0, 16)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, endsAt: value } : item) })} /></div><p className="mt-2 text-xs text-zinc-500">{lot.soldCount} vagas ocupadas</p><button type="button" onClick={() => setSaveDraft({ kind: 'lot', id: lot.id, reason: '' })} className="mt-3 border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Salvar lote</button></div>)}</div>
+    </Panel>
+    {saveDraft && <ActionModal title="Confirmar alteracao" description="Registre o motivo da alteracao antes de salvar." confirmLabel="Salvar alteracao" confirmDisabled={saveDraft.reason.trim().length < 5} onConfirm={() => void submitSave()} onClose={() => setSaveDraft(null)}><label className="block text-xs font-bold text-zinc-400">Motivo da alteracao<textarea value={saveDraft.reason} onChange={(event) => setSaveDraft({ ...saveDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" /></label></ActionModal>}
+  </section>;
 }
 
 function MetricBox({
@@ -1347,7 +1658,7 @@ function RegistrationsPanel({
             <p className="text-xs font-black uppercase tracking-widest text-brand">Inscrições</p>
             <h2 className="mt-2 text-2xl font-black tracking-tight">Mesa operacional de atletas</h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-              Pesquisa, filtros, exportação e acesso rápido ao histórico do atleta. CPF, cidade, equipe e paginação entram na próxima fase de API.
+              Pesquisa, filtros, exportação e acesso ao cadastro, pagamento e histórico operacional do atleta.
             </p>
           </div>
           <div className="flex flex-wrap gap-2 text-xs font-bold uppercase tracking-widest text-zinc-500">
@@ -1384,9 +1695,20 @@ function RegistrationsPanel({
             ]}
           />
         </form>
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <input value={filters.city} onChange={(event) => onFiltersChange({ ...filters, city: event.target.value, page: '1' })} className="min-h-12 border border-zinc-800 bg-black p-3 text-white outline-none focus:border-brand" placeholder="Filtrar por cidade" />
+          <input value={filters.team} onChange={(event) => onFiltersChange({ ...filters, team: event.target.value, page: '1' })} className="min-h-12 border border-zinc-800 bg-black p-3 text-white outline-none focus:border-brand" placeholder="Filtrar por equipe" />
+          <input value={filters.bibNumber} onChange={(event) => onFiltersChange({ ...filters, bibNumber: event.target.value, page: '1' })} className="min-h-12 border border-zinc-800 bg-black p-3 text-white outline-none focus:border-brand" placeholder="Numero de peito" />
+          <SelectFilter value={filters.shirtSize} onChange={(value) => onFiltersChange({ ...filters, shirtSize: value, page: '1' })} options={[{ value: '', label: 'Todas as camisas' }, ...eventInfo.shirtSizes.map((size) => ({ value: size, label: `Camisa ${size}` }))]} />
+        </div>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-500">
           <span>{pagination.total} resultado(s)</span>
-          <button type="button" onClick={() => onFiltersChange({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: filters.pageSize })} className="border border-white/10 px-3 py-2 font-black uppercase hover:border-brand hover:text-brand">Limpar filtros</button>
+          <div className="flex flex-wrap items-center gap-2">
+            <SelectFilter value={filters.sortBy} onChange={(value) => onFiltersChange({ ...filters, sortBy: value, page: '1' })} options={[{ value: 'createdAt', label: 'Ordenar por data' }, { value: 'fullName', label: 'Ordenar por nome' }, { value: 'status', label: 'Ordenar por status' }, { value: 'amountCents', label: 'Ordenar por valor' }, { value: 'bibNumber', label: 'Ordenar por peito' }]} />
+            <SelectFilter value={filters.sortOrder} onChange={(value) => onFiltersChange({ ...filters, sortOrder: value, page: '1' })} options={[{ value: 'desc', label: 'Decrescente' }, { value: 'asc', label: 'Crescente' }]} />
+            <SelectFilter value={filters.pageSize} onChange={(value) => onFiltersChange({ ...filters, pageSize: value, page: '1' })} options={[{ value: '25', label: '25 por pagina' }, { value: '50', label: '50 por pagina' }, { value: '100', label: '100 por pagina' }]} />
+            <button type="button" onClick={() => onFiltersChange({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: filters.pageSize, city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc' })} className="border border-white/10 px-3 py-2 font-black uppercase hover:border-brand hover:text-brand">Limpar filtros</button>
+          </div>
         </div>
       </div>
 
@@ -1420,6 +1742,7 @@ function RegistrationsPanel({
                       <div className="min-w-0">
                         <p className="truncate font-bold">{registration.fullName}</p>
                         <p className="mt-1 truncate font-mono text-xs text-zinc-500">{registration.id}</p>
+                        {registration.bibNumber && <p className="mt-1 text-xs font-black uppercase text-brand">Peito {registration.bibNumber}</p>}
                       </div>
                     </div>
                   </td>
@@ -1427,6 +1750,7 @@ function RegistrationsPanel({
                     <p className="truncate">{registration.email}</p>
                     <p className="mt-1 text-zinc-500">{registration.phone}</p>
                     <p className="mt-1 text-zinc-600">{registration.cpfMasked}</p>
+                    {(registration.city || registration.team) && <p className="mt-1 text-zinc-600">{[registration.city, registration.state, registration.team].filter(Boolean).join(' · ')}</p>}
                   </td>
                   <td className="p-4">
                     <p className="font-black">{registration.distance}</p>
@@ -1470,6 +1794,13 @@ function RegistrationEditForm({ registration, loading, onSave }: { registration:
     gender: registration.gender, shirtSize: registration.shirtSize, emergencyContactName: registration.emergencyContactName,
     emergencyContactPhone: registration.emergencyContactPhone, city: registration.city, state: registration.state, team: registration.team,
   }));
+  useEffect(() => {
+    setForm({
+      fullName: registration.fullName, email: registration.email, phone: registration.phone, birthDate: registration.birthDate,
+      gender: registration.gender, shirtSize: registration.shirtSize, emergencyContactName: registration.emergencyContactName,
+      emergencyContactPhone: registration.emergencyContactPhone, city: registration.city, state: registration.state, team: registration.team,
+    });
+  }, [registration.id, registration.updatedAt]);
   const update = (field: keyof AdminRegistrationEditable, value: string) => setForm((current) => ({ ...current, [field]: value }));
   if (!open) return <button type="button" onClick={() => setOpen(true)} className="mt-5 w-full border border-white/10 px-4 py-3 text-xs font-black uppercase hover:border-brand hover:text-brand">Editar dados cadastrais</button>;
   return <div className="mt-5 border border-white/10 bg-black/30 p-4">
@@ -1492,8 +1823,61 @@ function RegistrationEditForm({ registration, loading, onSave }: { registration:
   </div>;
 }
 
+function canAccessNav(role: AdminRole | null, nav: AdminNavKey) {
+  return role ? navPermissions[nav].includes(role) : false;
+}
+
 function EditInput({ label, value, onChange, type = 'text', maxLength }: { label: string; value: string; onChange: (value: string) => void; type?: string; maxLength?: number }) {
   return <label className="text-xs font-bold text-zinc-400">{label}<input type={type} maxLength={maxLength} value={value} onChange={(event) => onChange(event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white" /></label>;
+}
+
+function ActionModal({
+  title,
+  description,
+  confirmLabel,
+  confirmTone = 'brand',
+  confirmDisabled,
+  onConfirm,
+  onClose,
+  children,
+}: {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  confirmTone?: 'brand' | 'danger';
+  confirmDisabled?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={onClose} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">{title}</h3>
+            <p className="mt-2 text-sm text-zinc-400">{description}</p>
+          </div>
+          <button type="button" onClick={onClose} className="flex h-10 w-10 items-center justify-center border border-white/10">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        {children && <div className="mt-5 space-y-4">{children}</div>}
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300">Cancelar</button>
+          <button
+            type="button"
+            disabled={confirmDisabled}
+            onClick={onConfirm}
+            className={`${confirmTone === 'danger' ? 'bg-red-500 text-white' : 'bg-brand text-black'} px-4 py-3 text-xs font-black uppercase disabled:opacity-40`}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function OperationalQr({ registrationId }: { registrationId: string }) {
@@ -1506,6 +1890,7 @@ function AthleteDrawer({
   registration,
   details,
   actionLoading,
+  adminRole,
   onCheckIn,
   onKitDelivery,
   onMaintenance,
@@ -1516,6 +1901,7 @@ function AthleteDrawer({
   registration: AdminRegistration | null;
   details: AdminRegistrationDetailsResponse | null;
   actionLoading: string;
+  adminRole: AdminRole | null;
   onCheckIn: (registration: AdminRegistration) => void;
   onKitDelivery: (registration: AdminRegistration) => void;
   onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit') => void;
@@ -1529,6 +1915,11 @@ function AthleteDrawer({
 
   const createdAt = new Date(registration.createdAt);
   const canOperate = registration.status === 'paid';
+  const canEditRegistration = adminRole === 'administrator';
+  const canAssignBib = adminRole === 'administrator' || adminRole === 'operation';
+  const canHandleOperation = canAssignBib;
+  const canResendEmail = adminRole === 'administrator' || adminRole === 'finance';
+  const canCancelRegistration = adminRole === 'administrator';
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/75">
@@ -1567,8 +1958,8 @@ function AthleteDrawer({
           <Detail label="Telefone emergencia" value={registration.emergencyContactPhone} />
         </div>
 
-        <RegistrationEditForm registration={registration} loading={actionLoading === 'edit'} onSave={onUpdate} />
-        <button type="button" disabled={actionLoading !== ''} onClick={() => onAssignBib(registration)} className="mt-3 w-full border border-brand/30 px-4 py-3 text-xs font-black uppercase text-brand">{registration.bibNumber ? 'Alterar numero de peito' : 'Atribuir numero de peito'}</button>
+        {canEditRegistration && <RegistrationEditForm registration={registration} loading={actionLoading === 'edit'} onSave={onUpdate} />}
+        {canAssignBib && <button type="button" disabled={actionLoading !== ''} onClick={() => onAssignBib(registration)} className="mt-3 w-full border border-brand/30 px-4 py-3 text-xs font-black uppercase text-brand">{registration.bibNumber ? 'Alterar numero de peito' : 'Atribuir numero de peito'}</button>}
 
         <div className="mt-5 grid gap-4 sm:grid-cols-[160px_1fr]">
           <OperationalQr registrationId={registration.id} />
@@ -1585,7 +1976,7 @@ function AthleteDrawer({
         <div className="mt-5 grid gap-3 sm:grid-cols-2">
           <button
             type="button"
-            disabled={!canOperate || registration.checkInStatus === 'checked_in' || actionLoading !== ''}
+            disabled={!canHandleOperation || !canOperate || registration.checkInStatus === 'checked_in' || actionLoading !== ''}
             onClick={() => onCheckIn(registration)}
             className="flex min-h-12 items-center justify-center gap-2 border border-brand/30 bg-brand px-4 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-zinc-500"
           >
@@ -1594,7 +1985,7 @@ function AthleteDrawer({
           </button>
           <button
             type="button"
-            disabled={!canOperate || registration.kitStatus === 'delivered' || actionLoading !== ''}
+            disabled={!canHandleOperation || !canOperate || registration.kitStatus === 'delivered' || actionLoading !== ''}
             onClick={() => onKitDelivery(registration)}
             className="flex min-h-12 items-center justify-center gap-2 border border-white/10 px-4 text-xs font-black uppercase tracking-widest text-zinc-100 transition-colors hover:border-brand hover:text-brand disabled:cursor-not-allowed disabled:text-zinc-500"
           >
@@ -1604,10 +1995,10 @@ function AthleteDrawer({
         </div>
 
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {registration.status === 'paid' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'resend-email')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Reenviar email</button>}
-          {registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
-          {registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
-          {!['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscricao</button>}
+          {canResendEmail && registration.status === 'paid' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'resend-email')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Reenviar email</button>}
+          {canHandleOperation && registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
+          {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
+          {canCancelRegistration && !['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscricao</button>}
         </div>
 
         {!canOperate && (
@@ -1805,38 +2196,6 @@ function PaymentStatus({ status }: { status: RegistrationStatus }) {
   );
 }
 
-function StatusPill({ status: _status, label }: { status: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-brand/20 bg-brand/10 px-3 py-1 text-xs font-black uppercase tracking-widest text-brand">
-      <CheckCircle2 className="h-3.5 w-3.5" />
-      {label}
-    </span>
-  );
-}
-
-function MiniFact({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) {
-  return (
-    <div className="border border-white/10 bg-black/35 p-4">
-      <Icon className="mb-4 h-5 w-5 text-brand" />
-      <p className="text-xs font-black uppercase tracking-widest text-zinc-500">{label}</p>
-      <p className="mt-2 font-mono text-sm font-bold text-zinc-200">{value}</p>
-    </div>
-  );
-}
-
-function GhostAction({ icon: Icon, label, danger }: { icon: LucideIcon; label: string; danger?: boolean }) {
-  return (
-    <button
-      type="button"
-      className={`flex min-h-11 items-center justify-between border px-3 text-xs font-black uppercase tracking-widest transition-colors ${danger ? 'border-red-400/20 text-red-200 hover:bg-red-400/10' : 'border-white/10 text-zinc-200 hover:border-brand hover:text-brand'
-        }`}
-    >
-      <span className="flex items-center gap-2"><Icon className="h-4 w-4" /> {label}</span>
-      <ChevronRight className="h-4 w-4" />
-    </button>
-  );
-}
-
 function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 border border-white/10 bg-white/3 p-3">
@@ -1924,6 +2283,8 @@ type DashboardModel = {
   dailyRevenue: ChartPoint[];
   checkIns: number;
   kitDeliveries: number;
+  pendingPayments: number;
+  paidWithoutEmail: number;
 };
 
 function getDashboardModel(summary: AdminSummaryResponse | null, registrations: AdminRegistration[]): DashboardModel {
@@ -1934,9 +2295,9 @@ function getDashboardModel(summary: AdminSummaryResponse | null, registrations: 
 
   const activeLot = summary?.lots.find((lot) => lot.status === 'active') || summary?.lots[0];
   const paid = registrations.filter((registration) => registration.status === 'paid');
-  const todayRegistrations = registrations.filter((registration) => toDateKey(new Date(registration.createdAt)) === todayKey).length;
-  const weekRegistrations = registrations.filter((registration) => new Date(registration.createdAt) >= startOfDay(weekAgo)).length;
-  const todayRevenueCents = paid
+  const todayRegistrations = summary?.totals.todayRegistrations ?? registrations.filter((registration) => toDateKey(new Date(registration.createdAt)) === todayKey).length;
+  const weekRegistrations = summary?.totals.weekRegistrations ?? registrations.filter((registration) => new Date(registration.createdAt) >= startOfDay(weekAgo)).length;
+  const todayRevenueCents = summary?.totals.todayRevenueCents ?? paid
     .filter((registration) => toDateKey(new Date(registration.createdAt)) === todayKey)
     .reduce((total, registration) => total + registration.amountCents, 0);
   const revenueCents = summary?.totals.revenueCents ?? paid.reduce((total, registration) => total + registration.amountCents, 0);
@@ -1944,8 +2305,8 @@ function getDashboardModel(summary: AdminSummaryResponse | null, registrations: 
   const paidRegistrations = summary?.totals.paid ?? paid.length;
   const averageTicketCents = paidRegistrations > 0 ? Math.round(revenueCents / paidRegistrations) : activeLot?.priceCents || eventInfo.currentLotPriceCents;
   const conversionRate = totalRegistrations > 0 ? Math.round((paidRegistrations / totalRegistrations) * 100) : 0;
-  const dailyRegistrations = buildDailySeries(registrations, 'count');
-  const dailyRevenue = buildDailySeries(paid, 'amount');
+  const dailyRegistrations = summary?.daily || buildDailySeries(registrations, 'count');
+  const dailyRevenue = summary?.daily || buildDailySeries(paid, 'amount');
 
   return {
     totalRegistrations,
@@ -1965,6 +2326,8 @@ function getDashboardModel(summary: AdminSummaryResponse | null, registrations: 
     dailyRevenue,
     checkIns: summary?.totals.checkIns ?? registrations.filter((registration) => registration.checkInStatus === 'checked_in').length,
     kitDeliveries: summary?.totals.kitDeliveries ?? registrations.filter((registration) => registration.kitStatus === 'delivered').length,
+    pendingPayments: summary?.totals.pending ?? registrations.filter((registration) => registration.status === 'pending_payment').length,
+    paidWithoutEmail: summary?.totals.paidWithoutEmail ?? registrations.filter((registration) => registration.status === 'paid' && !registration.confirmationEmailSentAt).length,
   };
 }
 
@@ -2023,9 +2386,60 @@ function auditActionLabel(action: string) {
   const labels: Record<string, string> = {
     'registration.check_in': 'Check-in registrado',
     'registration.kit_delivered': 'Kit entregue',
+    'registration.updated': 'Cadastro atualizado',
+    'registration.cancel': 'Inscricao cancelada',
+    'registration.undo-check-in': 'Check-in desfeito',
+    'registration.undo-kit': 'Entrega de kit desfeita',
+    'registration.bib_assigned': 'Numero de peito atribuido',
+    'payment.webhook_processed': 'Webhook de pagamento processado',
+    'payment.amount_mismatch': 'Divergencia de valor',
+    'payment.manual_reconciled': 'Pagamento conciliado manualmente',
+    'payment.orphan_received': 'Evento de pagamento sem inscricao',
+    'payment.orphan_linked': 'Evento de pagamento vinculado',
+    'email.confirmation.attempted': 'Envio de confirmacao iniciado',
+    'email.confirmation.sent': 'Confirmacao enviada',
+    'email.confirmation.failed': 'Falha na confirmacao',
+    'email.confirmation.skipped': 'Confirmacao ignorada',
   };
 
   return labels[action] || action;
+}
+
+function auditEntityLabel(entityType: string) {
+  const labels: Record<string, string> = {
+    registration: 'Inscricao',
+    payment: 'Pagamento',
+    partnership: 'Parceria',
+    event: 'Evento',
+    distance: 'Distancia',
+    lot: 'Lote',
+  };
+
+  return labels[entityType] || entityType;
+}
+
+function summarizeAuditPayload(payload: unknown) {
+  if (!payload || typeof payload !== 'object') {
+    return 'Sem resumo disponivel.';
+  }
+
+  const data = payload as Record<string, unknown>;
+  const summary = [
+    typeof data.reason === 'string' && data.reason ? `Motivo: ${data.reason}` : null,
+    typeof data.status === 'string' && data.status ? `Status: ${data.status}` : null,
+    typeof data.transactionId === 'string' && data.transactionId ? `Transacao: ${data.transactionId}` : null,
+    typeof data.bibNumber === 'string' && data.bibNumber ? `Peito: ${data.bibNumber}` : null,
+    typeof data.method === 'string' && data.method ? `Metodo: ${data.method}` : null,
+    typeof data.amountCents === 'number' ? `Valor: ${currencyFormatter.format(data.amountCents / 100)}` : null,
+    typeof data.operator === 'string' && data.operator ? `Operador: ${data.operator}` : null,
+  ].filter(Boolean);
+
+  if (summary.length > 0) {
+    return summary.slice(0, 2).join(' · ');
+  }
+
+  const keys = Object.keys(data);
+  return keys.length > 0 ? `Campos: ${keys.slice(0, 4).join(', ')}` : 'Payload sem campos relevantes.';
 }
 
 function formatDateOnly(value: string) {

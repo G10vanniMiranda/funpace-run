@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation.js';
@@ -41,6 +41,22 @@ const infinitePayHandle = process.env.INFINITEPAY_HANDLE || process.env.INFINITI
 const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
 const partnershipWebhookUrl = process.env.PARTNERSHIP_WEBHOOK_URL || '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
+const adminSessionSecret = process.env.ADMIN_SESSION_SECRET || adminApiKey;
+const adminSessionSecretConfigured = adminSessionSecret.length >= 32 && adminSessionSecret !== adminApiKey;
+const adminSessionTtlSeconds = Math.max(Number(process.env.ADMIN_SESSION_TTL_SECONDS || 28_800), 900);
+const adminCookieName = 'funpace_admin_session';
+type AdminRole = 'administrator' | 'finance' | 'operation';
+type AdminCredential = { username: string; key: string; role: AdminRole };
+const configuredAdminUsers = (() => {
+  try {
+    const parsed = JSON.parse(process.env.ADMIN_USERS_JSON || '[]') as AdminCredential[];
+    return parsed.filter((item) => item.username && item.key && ['administrator', 'finance', 'operation'].includes(item.role));
+  } catch { return []; }
+})();
+const adminUsers: AdminCredential[] = configuredAdminUsers.length
+  ? configuredAdminUsers
+  : [{ username: process.env.ADMIN_USERNAME || 'Administrador', key: adminApiKey, role: 'administrator' }];
+const adminCredentialsConfigured = adminUsers.some((item) => item.key && item.key !== 'change-me');
 const isProduction = process.env.NODE_ENV === 'production';
 const pendingPaymentTtlMinutesInput = Number(process.env.PENDING_PAYMENT_TTL_MINUTES || 30);
 const pendingPaymentTtlMinutes = Number.isFinite(pendingPaymentTtlMinutesInput)
@@ -48,6 +64,8 @@ const pendingPaymentTtlMinutes = Number.isFinite(pendingPaymentTtlMinutesInput)
   : 30;
 
 const rateLimit = new Map<string, { count: number; resetAt: number }>();
+const adminLoginIpRateLimit = new Map<string, { count: number; resetAt: number }>();
+const adminLoginUserRateLimit = new Map<string, { count: number; resetAt: number }>();
 const partnershipRateLimit = new Map<string, { count: number; resetAt: number }>();
 
 function setCors(req: IncomingMessage, res: ServerResponse) {
@@ -55,15 +73,15 @@ function setCors(req: IncomingMessage, res: ServerResponse) {
 
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Credentials', 'false');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
 
   res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Webhook-Signature,X-Admin-Key,X-Admin-Actor,X-Request-ID');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Webhook-Signature,X-Request-ID');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=()');
   res.setHeader('X-Frame-Options', 'DENY');
 
   if (isProduction) {
@@ -113,23 +131,74 @@ function csv(res: ServerResponse, filename: string, content: string) {
   res.end(content);
 }
 
-function isAdminAuthorized(req: IncomingMessage) {
-  const key = Array.isArray(req.headers['x-admin-key']) ? req.headers['x-admin-key'][0] : req.headers['x-admin-key'];
-  return Boolean(key) && key === adminApiKey;
+type AdminSession = { id: string; actor: string; role: AdminRole; expiresAt: number };
+
+function signAdminSession(session: AdminSession) {
+  const payload = Buffer.from(JSON.stringify(session)).toString('base64url');
+  const signature = createHmac('sha256', adminSessionSecret).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
 }
 
-function requireAdmin(req: IncomingMessage, res: ServerResponse) {
-  if (isProduction && adminApiKey === 'change-me') {
-    json(res, 503, { message: 'Painel administrativo indisponivel. Configure ADMIN_API_KEY.' });
-    return false;
+function buildAdminCookie(token: string, maxAgeSeconds: number) {
+  return `${adminCookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${isProduction ? '; Secure' : ''}`;
+}
+
+function readSignedAdminSession(req: IncomingMessage): AdminSession | null {
+  const cookie = String(req.headers.cookie || '').split(';').map((item) => item.trim()).find((item) => item.startsWith(`${adminCookieName}=`));
+  const token = cookie?.slice(adminCookieName.length + 1);
+  if (!token) return null;
+  const [payload, signature] = token.split('.');
+  if (!payload || !signature) return null;
+  const expected = createHmac('sha256', adminSessionSecret).update(payload).digest('base64url');
+  const actualBuffer = Buffer.from(signature); const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) return null;
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as AdminSession;
+    return session.expiresAt > Date.now() && session.actor && session.id ? session : null;
+  } catch { return null; }
+}
+
+async function readAdminSession(req: IncomingMessage): Promise<AdminSession | null> {
+  const signedSession = readSignedAdminSession(req);
+  if (!signedSession) return null;
+
+  const storedSession = await transaction(
+    (database) => database.adminSessions.find((item) => item.id === signedSession.id) || null,
+    { persist: false, scope: 'admin-auth' },
+  );
+
+  if (!storedSession || storedSession.revokedAt) {
+    return null;
   }
 
-  if (isAdminAuthorized(req)) {
-    return true;
+  const storedExpiresAt = new Date(storedSession.expiresAt).getTime();
+  if (!Number.isFinite(storedExpiresAt) || storedExpiresAt <= Date.now()) {
+    return null;
   }
+
+  if (storedSession.actor !== signedSession.actor || storedSession.role !== signedSession.role || storedExpiresAt !== signedSession.expiresAt) {
+    return null;
+  }
+
+  return signedSession;
+}
+
+async function requireAdmin(req: IncomingMessage, res: ServerResponse, roles?: AdminRole[]) {
+  if (isProduction && !adminCredentialsConfigured) {
+    json(res, 503, { message: 'Painel administrativo indisponivel. Configure ADMIN_USERS_JSON ou ADMIN_API_KEY.' });
+    return null;
+  }
+  if (isProduction && !adminSessionSecretConfigured) { json(res, 503, { message: 'Configure ADMIN_SESSION_SECRET com pelo menos 32 caracteres.' }); return null; }
+
+  const session = await readAdminSession(req);
+  if (session && (!roles || roles.includes(session.role))) {
+    return session;
+  }
+
+  if (session && roles) { json(res, 403, { message: 'Seu perfil nao possui permissao para esta acao.' }); return null; }
 
   json(res, 401, { message: 'Acesso administrativo nao autorizado.' });
-  return false;
+  return null;
 }
 
 function requireAdminDatabase(res: ServerResponse) {
@@ -150,14 +219,67 @@ function requireAdminDatabase(res: ServerResponse) {
   return true;
 }
 
-function getAdminActor(req: IncomingMessage) {
-  const actor = Array.isArray(req.headers['x-admin-actor']) ? req.headers['x-admin-actor'][0] : req.headers['x-admin-actor'];
-  return actor?.trim() || 'admin';
+async function handleAdminLogin(req: IncomingMessage, res: ServerResponse) {
+  if (!requireJson(req, res)) return;
+  if (!requireAdminDatabase(res)) return;
+  if (isProduction && !adminSessionSecretConfigured) { json(res, 503, { message: 'Configure ADMIN_SESSION_SECRET com pelo menos 32 caracteres.' }); return; }
+  const body = parseJsonBody<{ key?: string; actor?: string }>(await readBody(req));
+  const supplied = String(body?.key || '');
+  const username = compactText(body?.actor, 80);
+  if (isAdminLoginRateLimited(req, username)) { json(res, 429, { message: 'Muitas tentativas de login. Aguarde alguns minutos.' }); return; }
+  const credential = adminUsers.find((item) => item.username.toLowerCase() === username.toLowerCase());
+  const suppliedBuffer = Buffer.from(supplied); const expectedBuffer = Buffer.from(credential?.key || adminSessionSecret);
+  if (!credential || suppliedBuffer.length !== expectedBuffer.length || !timingSafeEqual(suppliedBuffer, expectedBuffer)) { json(res, 401, { message: 'Credenciais administrativas invalidas.' }); return; }
+  resetAdminLoginRateLimit(req, username);
+  const session: AdminSession = { id: randomUUID(), actor: credential.username, role: credential.role, expiresAt: Date.now() + adminSessionTtlSeconds * 1000 };
+  await transaction((database) => {
+    database.adminSessions.push({
+      id: session.id,
+      actor: session.actor,
+      role: session.role,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      revokedAt: null,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+    });
+  });
+  res.setHeader('Set-Cookie', buildAdminCookie(signAdminSession(session), adminSessionTtlSeconds));
+  json(res, 200, { actor: session.actor, role: session.role, expiresAt: new Date(session.expiresAt).toISOString() });
+}
+
+async function handleAdminLogout(req: IncomingMessage, res: ServerResponse) {
+  if (!requireAdminDatabase(res)) return;
+  const session = await readAdminSession(req);
+  if (session) {
+    await transaction((database) => {
+      const storedSession = database.adminSessions.find((item) => item.id === session.id);
+      if (storedSession && !storedSession.revokedAt) {
+        storedSession.revokedAt = new Date().toISOString();
+      }
+    });
+  }
+  res.setHeader('Set-Cookie', buildAdminCookie('', 0));
+  json(res, 200, { ok: true });
+}
+
+function getClientIp(req: IncomingMessage) {
+  const forwardedFor = req.headers['x-forwarded-for'];
+  const value = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor || req.socket.remoteAddress || 'unknown';
+  return String(value).split(',')[0].trim() || 'unknown';
+}
+
+function getUserAgent(req: IncomingMessage) {
+  const userAgent = req.headers['user-agent'];
+  if (typeof userAgent === 'string') {
+    return userAgent.slice(0, 500);
+  }
+
+  return null;
 }
 
 function getClientKey(req: IncomingMessage) {
-  const forwardedFor = req.headers['x-forwarded-for'];
-  return Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor || req.socket.remoteAddress || 'unknown';
+  return getClientIp(req);
 }
 
 function isRateLimited(req: IncomingMessage) {
@@ -186,6 +308,60 @@ function isPartnershipRateLimited(req: IncomingMessage) {
 
   bucket.count += 1;
   return bucket.count > 5;
+}
+
+function hitRateLimitBucket(store: Map<string, { count: number; resetAt: number }>, key: string, limit: number, windowMs: number) {
+  const now = Date.now();
+  const bucket = store.get(key);
+
+  if (!bucket || bucket.resetAt < now) {
+    store.set(key, { count: 1, resetAt: now + windowMs });
+    return false;
+  }
+
+  bucket.count += 1;
+  return bucket.count > limit;
+}
+
+function isAdminLoginRateLimited(req: IncomingMessage, username: string) {
+  const ipKey = getClientIp(req);
+  const userKey = `${ipKey}:${username.trim().toLowerCase() || 'unknown'}`;
+  return hitRateLimitBucket(adminLoginIpRateLimit, ipKey, 10, 5 * 60_000)
+    || hitRateLimitBucket(adminLoginUserRateLimit, userKey, 5, 10 * 60_000);
+}
+
+function resetAdminLoginRateLimit(req: IncomingMessage, username: string) {
+  const ipKey = getClientIp(req);
+  adminLoginIpRateLimit.delete(ipKey);
+  adminLoginUserRateLimit.delete(`${ipKey}:${username.trim().toLowerCase() || 'unknown'}`);
+}
+
+function createAuditLog(
+  req: IncomingMessage,
+  session: AdminSession | null,
+  entry: {
+    actor?: string;
+    actorRole?: string | null;
+    action: string;
+    entityType: string;
+    entityId: string;
+    payload: unknown;
+    createdAt?: string;
+  },
+) {
+  return {
+    id: randomUUID(),
+    actor: entry.actor || session?.actor || 'system',
+    actorRole: entry.actorRole ?? session?.role ?? null,
+    action: entry.action,
+    entityType: entry.entityType,
+    entityId: entry.entityId,
+    payload: entry.payload,
+    sessionId: session?.id || null,
+    ipAddress: getClientIp(req),
+    userAgent: getUserAgent(req),
+    createdAt: entry.createdAt || new Date().toISOString(),
+  };
 }
 
 function readBody(req: IncomingMessage) {
@@ -1246,6 +1422,11 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     ));
 
     if (!registration) {
+      const orphanEventId = normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId || randomUUID();
+      if (!database.paymentEvents.some((item) => item.providerEventId === orphanEventId)) {
+        database.paymentEvents.push({ id: randomUUID(), paymentId: '', providerEventId: orphanEventId, eventType: 'infinitepay.orphan', payload: event, receivedAt: new Date().toISOString() });
+        database.auditLogs.push({ id: randomUUID(), actor: 'system', action: 'payment.orphan_received', entityType: 'payment', entityId: orphanEventId, payload: { registrationId: normalizedEvent.registrationId || null, providerTransactionId: normalizedEvent.providerTransactionId || null }, createdAt: new Date().toISOString() });
+      }
       console.error(JSON.stringify({
         at: new Date().toISOString(),
         message: 'payment_webhook_registration_not_found',
@@ -1504,12 +1685,22 @@ async function getAdminRows(url: URL) {
   const lotId = url.searchParams.get('lotId') || '';
   const distanceId = url.searchParams.get('distanceId') || '';
   const status = url.searchParams.get('status') || '';
+  const city = (url.searchParams.get('city') || '').trim().toLowerCase();
+  const team = (url.searchParams.get('team') || '').trim().toLowerCase();
+  const shirtSize = (url.searchParams.get('shirtSize') || '').trim().toUpperCase();
+  const bibNumber = (url.searchParams.get('bibNumber') || '').trim().toLowerCase();
+  const sortBy = url.searchParams.get('sortBy') || 'createdAt';
+  const sortOrder = url.searchParams.get('sortOrder') === 'asc' ? 1 : -1;
   const query = (url.searchParams.get('q') || '').trim().toLowerCase();
 
   return database.registrations
     .filter((registration) => !lotId || registration.lotId === lotId)
     .filter((registration) => !distanceId || registration.distanceId === distanceId)
     .filter((registration) => !status || registration.status === status)
+    .filter((registration) => !city || registration.payload.city?.toLowerCase().includes(city))
+    .filter((registration) => !team || registration.payload.team?.toLowerCase().includes(team))
+    .filter((registration) => !shirtSize || registration.payload.shirtSize === shirtSize)
+    .filter((registration) => !bibNumber || registration.bibNumber?.toLowerCase().includes(bibNumber))
     .filter((registration) => {
       if (!query) {
         return true;
@@ -1521,11 +1712,19 @@ async function getAdminRows(url: URL) {
         || registration.payload.email.toLowerCase().includes(query)
         || registration.payload.phone.includes(query)
         || registration.payload.cpf.includes(query)
+        || registration.payload.city?.toLowerCase().includes(query)
+        || registration.payload.team?.toLowerCase().includes(query)
+        || registration.bibNumber?.toLowerCase().includes(query)
         || (digitQuery.length > 0 && onlyDigits(registration.payload.cpf).includes(digitQuery))
       );
     })
     .map((registration) => toAdminRow(database, registration))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    .sort((a, b) => {
+      const allowedSorts: Record<string, keyof typeof a> = { createdAt: 'createdAt', fullName: 'fullName', status: 'status', amountCents: 'amountCents', bibNumber: 'bibNumber' };
+      const field = allowedSorts[sortBy] || 'createdAt';
+      const left = a[field] ?? ''; const right = b[field] ?? '';
+      return (typeof left === 'number' && typeof right === 'number' ? left - right : String(left).localeCompare(String(right), 'pt-BR')) * sortOrder;
+    });
 }
 
 function toAdminRow(database: Database, registration: RegistrationRecord) {
@@ -1587,7 +1786,7 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
 }
 
 async function handleAdminPaymentDetails(req: IncomingMessage, res: ServerResponse, registrationId: string) {
-  if (!requireAdmin(req, res) || !requireAdminDatabase(res)) return;
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
   const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
   const registration = database.registrations.find((item) => item.id === registrationId);
   const payment = database.payments.find((item) => item.registrationId === registrationId);
@@ -1599,8 +1798,71 @@ async function handleAdminPaymentDetails(req: IncomingMessage, res: ServerRespon
   });
 }
 
+async function getAdminPaymentRows(url: URL) {
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const query = (url.searchParams.get('q') || '').trim().toLowerCase();
+  const status = url.searchParams.get('status') || '';
+  const method = (url.searchParams.get('method') || '').trim().toLowerCase();
+  const dateFrom = url.searchParams.get('dateFrom') || '';
+  const dateTo = url.searchParams.get('dateTo') || '';
+  const rows = database.registrations.map((item) => toAdminRow(database, item)).filter((row) => {
+    if (status === 'divergent' && !row.hasPaymentDivergence) return false;
+    if (status === 'manual' && row.gatewayStatus !== 'manual_reconciled_paid') return false;
+    if (status === 'email' && !(row.status === 'paid' && !row.confirmationEmailSentAt)) return false;
+    if (status && !['divergent', 'manual', 'email'].includes(status) && row.status !== status) return false;
+    if (method && !String(row.paymentMethod || '').toLowerCase().includes(method)) return false;
+    const date = (row.paidAt || row.createdAt).slice(0, 10);
+    if (dateFrom && date < dateFrom) return false;
+    if (dateTo && date > dateTo) return false;
+    if (query && ![row.fullName, row.email, row.id, row.gatewayTransactionId || '', row.providerPaymentId || '', row.bibNumber || ''].some((value) => value.toLowerCase().includes(query))) return false;
+    return true;
+  }).sort((a, b) => (b.paidAt || b.createdAt).localeCompare(a.paidAt || a.createdAt));
+  const orphans = database.paymentEvents.filter((item) => item.eventType === 'infinitepay.orphan').sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
+  return { rows, orphans };
+}
+
+async function handleAdminPayments(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
+  const { rows, orphans } = await getAdminPaymentRows(url);
+  const pageSize = Math.min(Math.max(Number(url.searchParams.get('pageSize') || 25), 1), 100);
+  const totalPages = Math.max(Math.ceil(rows.length / pageSize), 1);
+  const page = Math.min(Math.max(Number(url.searchParams.get('page') || 1), 1), totalPages);
+  json(res, 200, { payments: rows.slice((page - 1) * pageSize, page * pageSize), pagination: { page, pageSize, total: rows.length, totalPages }, orphanEvents: orphans });
+}
+
+async function handleAdminPaymentsCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
+  const { rows } = await getAdminPaymentRows(url);
+  const headers = ['inscricao', 'atleta', 'email', 'status_sistema', 'status_gateway', 'metodo', 'transacao', 'valor', 'pago_em', 'email_confirmacao', 'divergente'];
+  const lines = rows.map((row) => [row.id, row.fullName, row.email, row.status, row.gatewayStatus, row.paymentMethod, row.gatewayTransactionId || row.providerPaymentId, (row.amountCents / 100).toFixed(2), row.paidAt, row.confirmationEmailSentAt, row.hasPaymentDivergence ? 'sim' : 'nao'].map(escapeCsv).join(','));
+  csv(res, 'funpace-run-pagamentos.csv', [headers.join(','), ...lines].join('\n'));
+}
+
+async function handleAdminOrphanLink(req: IncomingMessage, res: ServerResponse, eventId: string) {
+  const adminSession = await requireAdmin(req, res, ['administrator', 'finance']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ registrationId?: string; reason?: string }>(await readBody(req));
+  const registrationId = body?.registrationId?.trim() || ''; const reason = body?.reason?.trim() || '';
+  if (!registrationId || reason.length < 5) { json(res, 400, { message: 'Informe a inscricao e um motivo com pelo menos 5 caracteres.' }); return; }
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const event = database.paymentEvents.find((item) => item.id === eventId && item.eventType === 'infinitepay.orphan');
+    const registration = database.registrations.find((item) => item.id === registrationId);
+    const payment = database.payments.find((item) => item.registrationId === registrationId);
+    if (!event) return { statusCode: 404, payload: { message: 'Evento orfao nao encontrado.' } };
+    if (!registration || !payment) return { statusCode: 404, payload: { message: 'Inscricao ou pagamento nao encontrado.' } };
+    const normalized = normalizePaymentWebhook(event.payload);
+    if (normalized && normalized.amountCents !== null && normalized.amountCents !== registration.amountCents) return { statusCode: 409, payload: { message: 'O valor do evento diverge da inscricao informada.' } };
+    const now = new Date().toISOString(); event.paymentId = payment.id; event.eventType = 'infinitepay.orphan_linked';
+    payment.gatewayPayload = event.payload; payment.gatewayStatus = normalized?.gatewayStatus || payment.gatewayStatus; payment.gatewayTransactionId = normalized?.providerTransactionId || payment.gatewayTransactionId; payment.updatedAt = now;
+    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'payment.orphan_linked', entityType: 'registration', entityId: registrationId, payload: { reason, eventId, providerEventId: event.providerEventId }, createdAt: now }));
+    return { statusCode: 200, payload: { ok: true } };
+  }, { scope: 'checkout' });
+  json(res, result.statusCode, result.payload);
+}
+
 async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResponse, registrationId: string) {
-  if (!requireAdmin(req, res) || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const adminSession = await requireAdmin(req, res, ['administrator', 'finance']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const rawBody = await readBody(req);
   const body = parseJsonBody<{ reason?: string }>(rawBody);
   const reason = body?.reason?.trim() || '';
@@ -1614,7 +1876,7 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
     if (['payment_failed', 'expired', 'cancelled', 'refunded'].includes(registration.status)) claimRegistrationCapacity(database, registration);
     registration.status = 'paid'; registration.updatedAt = now; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null;
     payment.status = 'paid'; payment.gatewayStatus = 'manual_reconciled_paid'; payment.paidAt ||= now; payment.updatedAt = now; payment.expiresAt = null;
-    database.auditLogs.push({ id: randomUUID(), actor: 'admin', action: 'payment.manual_reconciled', entityType: 'registration', entityId: registrationId, payload: { reason, previousStatus }, createdAt: now });
+    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'payment.manual_reconciled', entityType: 'registration', entityId: registrationId, payload: { reason, previousStatus }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   }, { scope: 'checkout' });
   json(res, result.statusCode, result.payload);
@@ -1622,7 +1884,7 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
-  if (!requireAdmin(req, res)) {
+  if (!await requireAdmin(req, res)) {
     return;
   }
 
@@ -1636,6 +1898,24 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   const revenueCents = paid.reduce((total, item) => total + item.amountCents, 0);
   const checkIns = database.checkIns.length;
   const kitDeliveries = database.kitDeliveries.length;
+  const now = new Date();
+  const todayKey = now.toISOString().slice(0, 10);
+  const weekStart = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0, 0, 0, 0);
+  const paidWithoutEmail = paid.filter((item) => !item.confirmationEmailSentAt).length;
+  const manualReconciledPayments = database.payments.filter((item) => item.gatewayStatus === 'manual_reconciled_paid').length;
+  const confirmationEmailsSent = paid.filter((item) => item.confirmationEmailSentAt).length;
+  const confirmationEmailsFailed = paid.filter((item) => item.confirmationEmailError).length;
+  const confirmationEmailsAttention = paid.filter((item) => !item.confirmationEmailSentAt || item.confirmationEmailError).length;
+  const todayRegistrations = database.registrations.filter((item) => item.createdAt.slice(0, 10) === todayKey).length;
+  const weekRegistrations = database.registrations.filter((item) => new Date(item.createdAt) >= weekStart).length;
+  const todayRevenueCents = paid.filter((item) => (item.paidAt || item.createdAt).slice(0, 10) === todayKey).reduce((total, item) => total + item.amountCents, 0);
+  const daily = Array.from({ length: 7 }, (_, offset) => {
+    const date = new Date(now); date.setDate(now.getDate() - (6 - offset));
+    const key = date.toISOString().slice(0, 10);
+    const items = database.registrations.filter((item) => item.createdAt.slice(0, 10) === key);
+    const paidItems = paid.filter((item) => (item.paidAt || item.createdAt).slice(0, 10) === key);
+    return { label: key.slice(5), count: items.length, amountCents: paidItems.reduce((total, item) => total + item.amountCents, 0) };
+  });
   const byStatus = database.registrations.reduce<Record<string, number>>((acc, item) => {
     acc[item.status] = (acc[item.status] || 0) + 1;
     return acc;
@@ -1646,7 +1926,12 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     capacity: distance.capacity,
     total: database.registrations.filter((registration) => registration.distanceId === distance.id).length,
     paid: database.registrations.filter((registration) => registration.distanceId === distance.id && registration.status === 'paid').length,
+    pending: database.registrations.filter((registration) => registration.distanceId === distance.id && registration.status === 'pending_payment').length,
   }));
+  const shirtSizes = Object.entries(database.registrations.reduce<Record<string, number>>((accumulator, registration) => {
+    accumulator[registration.payload.shirtSize] = (accumulator[registration.payload.shirtSize] || 0) + 1;
+    return accumulator;
+  }, {})).map(([size, total]) => ({ size, total }));
   const lots = database.lots.map((lot) => ({
     id: lot.id,
     name: lot.name,
@@ -1665,11 +1950,79 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
       revenueCents,
       checkIns,
       kitDeliveries,
+      paidWithoutEmail,
+      manualReconciledPayments,
+      confirmationEmailsSent,
+      confirmationEmailsFailed,
+      confirmationEmailsAttention,
+      todayRegistrations,
+      weekRegistrations,
+      todayRevenueCents,
     },
     byStatus,
     byDistance,
     lots,
+    shirtSizes,
+    daily,
   });
+}
+
+async function handleAdminEventConfig(req: IncomingMessage, res: ServerResponse) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false });
+  json(res, 200, { event: database.events[0] || null, distances: database.distances, lots: database.lots });
+}
+
+async function handleAdminEventUpdate(req: IncomingMessage, res: ServerResponse) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ reason?: string; changes?: Record<string, unknown> }>(await readBody(req)); const reason = body?.reason?.trim() || '';
+  if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const event = database.events[0]; if (!event) return { statusCode: 404, payload: { message: 'Evento nao encontrado.' } };
+    const allowed = ['name', 'date', 'startTime', 'locationName', 'city', 'state', 'status'] as const; const before: Record<string, unknown> = {}; const after: Record<string, unknown> = {};
+    for (const field of allowed) { if (body?.changes?.[field] === undefined) continue; const value = compactText(body.changes[field], field === 'state' ? 2 : 160); if (value === event[field]) continue; before[field] = event[field]; after[field] = value; (event as unknown as Record<string, unknown>)[field] = value; }
+    if (!event.name || !event.date || !event.city || !event.state) return { statusCode: 400, payload: { message: 'Nome, data, cidade e UF sao obrigatorios.' } };
+    if (!['draft', 'published', 'closed'].includes(event.status) || !/^\d{4}-\d{2}-\d{2}$/.test(event.date) || !/^[A-Z]{2}$/.test(event.state.toUpperCase())) return { statusCode: 400, payload: { message: 'Status, data ou UF invalido.' } };
+    event.state = event.state.toUpperCase();
+    const now = new Date().toISOString(); database.auditLogs.push(createAuditLog(req, adminSession, { action: 'event.updated', entityType: 'event', entityId: event.id, payload: { reason, before, after }, createdAt: now }));
+    return { statusCode: 200, payload: { event } };
+  }); json(res, result.statusCode, result.payload);
+}
+
+async function handleAdminDistanceUpdate(req: IncomingMessage, res: ServerResponse, distanceId: string) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ reason?: string; capacity?: number; status?: string }>(await readBody(req)); const reason = body?.reason?.trim() || '';
+  if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const distance = database.distances.find((item) => item.id === distanceId); if (!distance) return { statusCode: 404, payload: { message: 'Distancia nao encontrada.' } };
+    const occupied = database.registrations.filter((item) => item.distanceId === distanceId && ['pending_payment', 'paid'].includes(item.status)).length;
+    const capacity = Math.floor(Number(body?.capacity)); if (!Number.isFinite(capacity) || capacity < occupied) return { statusCode: 409, payload: { message: `A capacidade nao pode ser menor que ${occupied} vagas ocupadas.` } };
+    if (!['active', 'inactive', 'sold_out'].includes(body?.status || '')) return { statusCode: 400, payload: { message: 'Status de distancia invalido.' } };
+    const before = { capacity: distance.capacity, status: distance.status }; distance.capacity = capacity; distance.status = body!.status as typeof distance.status;
+    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'distance.updated', entityType: 'distance', entityId: distanceId, payload: { reason, before, after: { capacity, status: distance.status } }, createdAt: new Date().toISOString() }));
+    return { statusCode: 200, payload: { distance } };
+  }); json(res, result.statusCode, result.payload);
+}
+
+async function handleAdminLotUpdate(req: IncomingMessage, res: ServerResponse, lotId: string) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ reason?: string; name?: string; capacity?: number; priceCents?: number; status?: string; startsAt?: string; endsAt?: string }>(await readBody(req)); const reason = body?.reason?.trim() || '';
+  if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const lot = database.lots.find((item) => item.id === lotId); if (!lot) return { statusCode: 404, payload: { message: 'Lote nao encontrado.' } };
+    const capacity = Math.floor(Number(body?.capacity)); const priceCents = Math.floor(Number(body?.priceCents));
+    if (!Number.isFinite(capacity) || capacity < lot.soldCount) return { statusCode: 409, payload: { message: `A capacidade nao pode ser menor que ${lot.soldCount} vagas ocupadas.` } };
+    if (!Number.isFinite(priceCents) || priceCents < 0) return { statusCode: 400, payload: { message: 'Preco invalido.' } };
+    if (!['active', 'inactive', 'sold_out', 'scheduled', 'closed'].includes(body?.status || '')) return { statusCode: 400, payload: { message: 'Status de lote invalido.' } };
+    if (body?.status === 'active' && database.lots.some((item) => item.id !== lotId && item.eventId === lot.eventId && item.status === 'active')) return { statusCode: 409, payload: { message: 'Ja existe outro lote ativo. Encerre-o antes de ativar este lote.' } };
+    if (body?.startsAt && body?.endsAt && body.startsAt >= body.endsAt) return { statusCode: 400, payload: { message: 'O encerramento deve ser posterior ao inicio.' } };
+    const before = { ...lot }; lot.name = compactText(body?.name, 100) || lot.name; lot.capacity = capacity; lot.priceCents = priceCents; lot.status = body!.status as typeof lot.status; lot.startsAt = body?.startsAt || ''; lot.endsAt = body?.endsAt || '';
+    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'lot.updated', entityType: 'lot', entityId: lotId, payload: { reason, before, after: lot }, createdAt: new Date().toISOString() }));
+    return { statusCode: 200, payload: { lot } };
+  }); json(res, result.statusCode, result.payload);
 }
 
 type AdminActionRequest = {
@@ -1677,7 +2030,8 @@ type AdminActionRequest = {
 };
 
 async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, registrationId: string) {
-  if (!requireAdmin(req, res)) {
+  const adminSession = await requireAdmin(req, res, ['administrator', 'operation']);
+  if (!adminSession) {
     return;
   }
 
@@ -1691,7 +2045,7 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
 
   const rawBody = await readBody(req);
   const payload = parseJsonBody<AdminActionRequest>(rawBody) || {};
-  const actor = getAdminActor(req);
+  const actor = adminSession.actor;
   const now = new Date().toISOString();
 
   const result = await transaction((database) => {
@@ -1708,9 +2062,7 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
     const existing = database.checkIns.find((item) => item.registrationId === registration.id);
 
     if (existing) {
-      existing.checkedInAt = now;
-      existing.checkedInBy = actor;
-      existing.notes = payload.notes?.trim() || null;
+      return { statusCode: 200, payload: { registration: toAdminRow(database, registration), duplicated: true } };
     } else {
       database.checkIns.push({
         id: randomUUID(),
@@ -1722,15 +2074,14 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
       });
     }
 
-    database.auditLogs.push({
-      id: randomUUID(),
+    database.auditLogs.push(createAuditLog(req, adminSession, {
       actor,
       action: 'registration.check_in',
       entityType: 'registration',
       entityId: registration.id,
       payload: { notes: payload.notes?.trim() || null },
       createdAt: now,
-    });
+    }));
 
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
@@ -1739,7 +2090,8 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
 }
 
 async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse, registrationId: string) {
-  if (!requireAdmin(req, res)) {
+  const adminSession = await requireAdmin(req, res, ['administrator', 'operation']);
+  if (!adminSession) {
     return;
   }
 
@@ -1753,7 +2105,7 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
 
   const rawBody = await readBody(req);
   const payload = parseJsonBody<AdminActionRequest>(rawBody) || {};
-  const actor = getAdminActor(req);
+  const actor = adminSession.actor;
   const now = new Date().toISOString();
 
   const result = await transaction((database) => {
@@ -1770,9 +2122,7 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
     const existing = database.kitDeliveries.find((item) => item.registrationId === registration.id);
 
     if (existing) {
-      existing.deliveredAt = now;
-      existing.deliveredBy = actor;
-      existing.notes = payload.notes?.trim() || null;
+      return { statusCode: 200, payload: { registration: toAdminRow(database, registration), duplicated: true } };
     } else {
       database.kitDeliveries.push({
         id: randomUUID(),
@@ -1784,15 +2134,14 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
       });
     }
 
-    database.auditLogs.push({
-      id: randomUUID(),
+    database.auditLogs.push(createAuditLog(req, adminSession, {
       actor,
       action: 'registration.kit_delivered',
       entityType: 'registration',
       entityId: registration.id,
       payload: { notes: payload.notes?.trim() || null },
       createdAt: now,
-    });
+    }));
 
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
@@ -1801,7 +2150,9 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
 }
 
 async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: ServerResponse, registrationId: string, action: string) {
-  if (!requireAdmin(req, res) || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const roles: AdminRole[] = action === 'resend-email' ? ['administrator', 'finance'] : action === 'cancel' ? ['administrator'] : ['administrator', 'operation'];
+  const adminSession = await requireAdmin(req, res, roles);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<{ reason?: string }>(await readBody(req)) || {};
   const reason = body.reason?.trim() || '';
   if (['cancel', 'undo-check-in', 'undo-kit'].includes(action) && reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
@@ -1816,7 +2167,7 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
     const registration = database.registrations.find((item) => item.id === registrationId);
     if (!registration) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
-    const now = new Date().toISOString(); const actor = getAdminActor(req);
+    const now = new Date().toISOString(); const actor = adminSession.actor;
     if (action === 'cancel') {
       if (['cancelled', 'refunded'].includes(registration.status)) return { statusCode: 409, payload: { message: 'Inscricao ja encerrada.' } };
       if (['pending_payment', 'paid'].includes(registration.status)) releaseRegistrationCapacity(database, registration);
@@ -1827,14 +2178,15 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
     } else if (action === 'undo-kit') {
       database.kitDeliveries = database.kitDeliveries.filter((item) => item.registrationId !== registrationId);
     }
-    database.auditLogs.push({ id: randomUUID(), actor, action: `registration.${action}`, entityType: 'registration', entityId: registrationId, payload: { reason }, createdAt: now });
+    database.auditLogs.push(createAuditLog(req, adminSession, { actor, action: `registration.${action}`, entityType: 'registration', entityId: registrationId, payload: { reason }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
   json(res, result.statusCode, result.payload);
 }
 
 async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerResponse, registrationId: string) {
-  if (!requireAdmin(req, res) || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<{ reason?: string; changes?: Partial<RegistrationFormData> }>(await readBody(req));
   const reason = body?.reason?.trim() || '';
   if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
@@ -1856,16 +2208,20 @@ async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerRe
     }
     if (!String(registration.payload.fullName).trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registration.payload.email)) return { statusCode: 400, payload: { message: 'Nome e email valido sao obrigatorios.' } };
     if (!['female', 'male'].includes(registration.payload.gender) || !['P', 'M', 'G', 'GG'].includes(registration.payload.shirtSize)) return { statusCode: 400, payload: { message: 'Sexo ou tamanho de camisa invalido.' } };
+    const birthDate = new Date(`${registration.payload.birthDate}T00:00:00`);
+    if (onlyDigits(registration.payload.phone).length < 10 || onlyDigits(registration.payload.emergencyContactPhone).length < 10) return { statusCode: 400, payload: { message: 'Telefones devem conter DDD e numero validos.' } };
+    if (!/^[A-Z]{2}$/.test(registration.payload.state) || !registration.payload.city.trim()) return { statusCode: 400, payload: { message: 'Cidade e UF validas sao obrigatorias.' } };
+    if (Number.isNaN(birthDate.getTime()) || birthDate > new Date() || birthDate.getFullYear() < new Date().getFullYear() - 100) return { statusCode: 400, payload: { message: 'Data de nascimento invalida.' } };
     if (!Object.keys(after).length) return { statusCode: 400, payload: { message: 'Nenhuma alteracao foi informada.' } };
     const now = new Date().toISOString(); registration.updatedAt = now;
-    database.auditLogs.push({ id: randomUUID(), actor: getAdminActor(req), action: 'registration.updated', entityType: 'registration', entityId: registrationId, payload: { reason, before, after }, createdAt: now });
+    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'registration.updated', entityType: 'registration', entityId: registrationId, payload: { reason, before, after }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
   json(res, result.statusCode, result.payload);
 }
 
 async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerResponse, registrationId: string) {
-  if (!requireAdmin(req, res) || !requireAdminDatabase(res)) return;
+  if (!await requireAdmin(req, res) || !requireAdminDatabase(res)) return;
   const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
   const registration = database.registrations.find((item) => item.id === registrationId);
   if (!registration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
@@ -1878,7 +2234,8 @@ async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerR
 }
 
 async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, registrationId: string) {
-  if (!requireAdmin(req, res) || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const adminSession = await requireAdmin(req, res, ['administrator', 'operation']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<{ bibNumber?: string; reason?: string }>(await readBody(req));
   const bibNumber = compactText(body?.bibNumber, 20).toUpperCase(); const reason = body?.reason?.trim() || '';
   if (!/^[A-Z0-9-]{1,20}$/.test(bibNumber) || reason.length < 5) { json(res, 400, { message: 'Numero de peito invalido ou motivo insuficiente.' }); return; }
@@ -1887,14 +2244,14 @@ async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, r
     if (!registration) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
     if (database.registrations.some((item) => item.eventId === registration.eventId && item.id !== registrationId && item.bibNumber === bibNumber)) return { statusCode: 409, payload: { message: 'Numero de peito ja utilizado neste evento.' } };
     const previous = registration.bibNumber || null; const now = new Date().toISOString(); registration.bibNumber = bibNumber; registration.updatedAt = now;
-    database.auditLogs.push({ id: randomUUID(), actor: getAdminActor(req), action: 'registration.bib_assigned', entityType: 'registration', entityId: registrationId, payload: { reason, previous, bibNumber }, createdAt: now });
+    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'registration.bib_assigned', entityType: 'registration', entityId: registrationId, payload: { reason, previous, bibNumber }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
   json(res, result.statusCode, result.payload);
 }
 
 async function handleAdminRegistrations(req: IncomingMessage, res: ServerResponse, url: URL) {
-  if (!requireAdmin(req, res)) {
+  if (!await requireAdmin(req, res)) {
     return;
   }
 
@@ -1913,8 +2270,47 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
   json(res, 200, { registrations: rows.slice((page - 1) * pageSize, page * pageSize), pagination: { page, pageSize, total, totalPages } });
 }
 
-async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse) {
-  if (!requireAdmin(req, res)) {
+async function handleAdminOperation(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator', 'operation']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const query = (url.searchParams.get('q') || '').trim().toLowerCase();
+  const filter = url.searchParams.get('filter') || 'all';
+  const allPaid = database.registrations.filter((item) => item.status === 'paid').map((item) => toAdminRow(database, item));
+  const rows = allPaid.filter((row) => {
+    if (filter === 'kit_pending' && row.kitStatus === 'delivered') return false;
+    if (filter === 'checkin_pending' && row.checkInStatus === 'checked_in') return false;
+    if (filter === 'completed' && !(row.kitStatus === 'delivered' && row.checkInStatus === 'checked_in')) return false;
+    if (query && ![row.id, row.fullName, row.email, row.phone, row.cpfMasked, row.bibNumber || ''].some((value) => value.toLowerCase().includes(query))) return false;
+    return true;
+  }).sort((a, b) => a.fullName.localeCompare(b.fullName, 'pt-BR'));
+  const pageSize = Math.min(Math.max(Number(url.searchParams.get('pageSize') || 25), 1), 100);
+  const totalPages = Math.max(Math.ceil(rows.length / pageSize), 1); const page = Math.min(Math.max(Number(url.searchParams.get('page') || 1), 1), totalPages);
+  json(res, 200, {
+    registrations: rows.slice((page - 1) * pageSize, page * pageSize),
+    pagination: { page, pageSize, total: rows.length, totalPages },
+    totals: { paid: allPaid.length, kitPending: allPaid.filter((row) => row.kitStatus !== 'delivered').length, checkInPending: allPaid.filter((row) => row.checkInStatus !== 'checked_in').length, completed: allPaid.filter((row) => row.kitStatus === 'delivered' && row.checkInStatus === 'checked_in').length },
+  });
+}
+
+async function getFilteredAuditLogs(url: URL) {
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'audit' });
+  const action = (url.searchParams.get('action') || '').trim().toLowerCase();
+  const actor = (url.searchParams.get('actor') || '').trim().toLowerCase();
+  const entityType = (url.searchParams.get('entityType') || '').trim().toLowerCase();
+  const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+  const dateFrom = url.searchParams.get('dateFrom') || ''; const dateTo = url.searchParams.get('dateTo') || '';
+  return database.auditLogs.filter((log) => {
+    if (action && !log.action.toLowerCase().includes(action)) return false;
+    if (actor && !log.actor.toLowerCase().includes(actor)) return false;
+    if (entityType && log.entityType.toLowerCase() !== entityType) return false;
+    const date = log.createdAt.slice(0, 10); if (dateFrom && date < dateFrom) return false; if (dateTo && date > dateTo) return false;
+    if (q && ![log.action, log.actor, log.entityType, log.entityId, JSON.stringify(log.payload)].some((value) => value.toLowerCase().includes(q))) return false;
+    return true;
+  }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator'])) {
     return;
   }
 
@@ -1922,17 +2318,22 @@ async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'audit' });
-  const logs = database.auditLogs
-    .slice()
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, 50);
+  const logs = await getFilteredAuditLogs(url);
+  const pageSize = Math.min(Math.max(Number(url.searchParams.get('pageSize') || 50), 1), 100);
+  const totalPages = Math.max(Math.ceil(logs.length / pageSize), 1); const page = Math.min(Math.max(Number(url.searchParams.get('page') || 1), 1), totalPages);
+  json(res, 200, { logs: logs.slice((page - 1) * pageSize, page * pageSize), pagination: { page, pageSize, total: logs.length, totalPages } });
+}
 
-  json(res, 200, { logs });
+async function handleAdminAuditLogsCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const logs = await getFilteredAuditLogs(url);
+  const headers = ['data', 'ator', 'perfil', 'acao', 'entidade', 'id_entidade', 'sessao', 'ip', 'user_agent', 'payload'];
+  const lines = logs.map((log) => [log.createdAt, log.actor, log.actorRole, log.action, log.entityType, log.entityId, log.sessionId, log.ipAddress, log.userAgent, JSON.stringify(log.payload)].map(escapeCsv).join(','));
+  csv(res, 'funpace-run-auditoria.csv', [headers.join(','), ...lines].join('\n'));
 }
 
 async function handleAdminPartnerships(req: IncomingMessage, res: ServerResponse) {
-  if (!requireAdmin(req, res)) {
+  if (!await requireAdmin(req, res)) {
     return;
   }
 
@@ -1950,7 +2351,8 @@ async function handleAdminPartnerships(req: IncomingMessage, res: ServerResponse
 }
 
 async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerResponse, partnershipId: string) {
-  if (!requireAdmin(req, res)) {
+  const adminSession = await requireAdmin(req, res);
+  if (!adminSession) {
     return;
   }
 
@@ -1972,7 +2374,7 @@ async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerRes
     return;
   }
 
-  const actor = getAdminActor(req);
+  const actor = adminSession.actor;
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
     const lead = database.partnershipLeads.find((item) => item.id === partnershipId);
 
@@ -1983,15 +2385,14 @@ async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerRes
     lead.status = nextStatus;
     lead.updatedAt = new Date().toISOString();
 
-    database.auditLogs.push({
-      id: randomUUID(),
+    database.auditLogs.push(createAuditLog(req, adminSession, {
       actor,
       action: 'partnership.status_updated',
       entityType: 'partnership',
       entityId: lead.id,
       payload: { status: nextStatus },
       createdAt: new Date().toISOString(),
-    });
+    }));
 
     return { statusCode: 200, payload: { partnership: toAdminPartnershipLead(lead) } };
   });
@@ -2005,7 +2406,7 @@ function escapeCsv(value: unknown) {
 }
 
 async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
-  if (!requireAdmin(req, res)) {
+  if (!await requireAdmin(req, res)) {
     return;
   }
 
@@ -2091,7 +2492,7 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
 }
 
 async function handleAdminPartnershipsCsv(req: IncomingMessage, res: ServerResponse) {
-  if (!requireAdmin(req, res)) {
+  if (!await requireAdmin(req, res)) {
     return;
   }
 
@@ -2148,6 +2549,15 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/admin/session') { await handleAdminLogin(req, res); return; }
+    if (req.method === 'DELETE' && url.pathname === '/api/admin/session') { await handleAdminLogout(req, res); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/session') {
+      if (!requireAdminDatabase(res)) return;
+      const session = await readAdminSession(req);
+      if (!session) { json(res, 401, { message: 'Sessao administrativa ausente ou expirada.' }); return; }
+      json(res, 200, { actor: session.actor, role: session.role, expiresAt: new Date(session.expiresAt).toISOString() }); return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/registrations') {
       await handleCreateRegistration(req, res);
       return;
@@ -2172,11 +2582,22 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       await handleAdminSummary(req, res);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/admin/event-config') { await handleAdminEventConfig(req, res); return; }
+    if (req.method === 'PATCH' && url.pathname === '/api/admin/event-config') { await handleAdminEventUpdate(req, res); return; }
+    const adminDistanceUpdate = url.pathname.match(/^\/api\/admin\/distances\/([^/]+)$/);
+    if (req.method === 'PATCH' && adminDistanceUpdate) { await handleAdminDistanceUpdate(req, res, decodeURIComponent(adminDistanceUpdate[1])); return; }
+    const adminLotUpdate = url.pathname.match(/^\/api\/admin\/lots\/([^/]+)$/);
+    if (req.method === 'PATCH' && adminLotUpdate) { await handleAdminLotUpdate(req, res, decodeURIComponent(adminLotUpdate[1])); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/payments') { await handleAdminPayments(req, res, url); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/payments.csv') { await handleAdminPaymentsCsv(req, res, url); return; }
+    const adminOrphanLink = url.pathname.match(/^\/api\/admin\/payment-events\/([^/]+)\/link$/);
+    if (req.method === 'POST' && adminOrphanLink) { await handleAdminOrphanLink(req, res, decodeURIComponent(adminOrphanLink[1])); return; }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/registrations') {
       await handleAdminRegistrations(req, res, url);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/admin/operation') { await handleAdminOperation(req, res, url); return; }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/registrations.csv') {
       await handleAdminRegistrationsCsv(req, res, url);
@@ -2184,9 +2605,10 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/audit-logs') {
-      await handleAdminAuditLogs(req, res);
+      await handleAdminAuditLogs(req, res, url);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/admin/audit-logs.csv') { await handleAdminAuditLogsCsv(req, res, url); return; }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/partnerships') {
       await handleAdminPartnerships(req, res);
