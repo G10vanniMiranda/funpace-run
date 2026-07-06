@@ -132,6 +132,24 @@ function requireAdmin(req: IncomingMessage, res: ServerResponse) {
   return false;
 }
 
+function requireAdminDatabase(res: ServerResponse) {
+  const configurationIssue = getDatabaseConfigurationIssue();
+
+  if (configurationIssue) {
+    json(res, 503, { message: configurationIssue });
+    return false;
+  }
+
+  if (!usesPostgresDatabase()) {
+    json(res, 503, {
+      message: 'Painel administrativo exige banco real Supabase/Postgres. Configure DATABASE_PROVIDER=supabase e DATABASE_URL.',
+    });
+    return false;
+  }
+
+  return true;
+}
+
 function getAdminActor(req: IncomingMessage) {
   const actor = Array.isArray(req.headers['x-admin-actor']) ? req.headers['x-admin-actor'][0] : req.headers['x-admin-actor'];
   return actor?.trim() || 'admin';
@@ -1523,16 +1541,30 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     shirtSize: registration.payload.shirtSize,
     status: registration.status,
     paymentStatus: payment?.status || registration.status,
+    paymentProvider: payment?.provider || null,
+    providerPaymentId: payment?.providerPaymentId || null,
     amountCents: registration.amountCents,
     createdAt: registration.createdAt,
+    updatedAt: registration.updatedAt,
     expiresAt: registration.expiresAt || null,
+    paidAt: registration.paidAt || payment?.paidAt || null,
+    confirmedAt: registration.confirmedAt || null,
+    gatewayStatus: payment?.gatewayStatus || null,
+    gatewayTransactionId: payment?.gatewayTransactionId || null,
     pendingEmailSentAt: registration.pendingEmailSentAt || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
+    confirmationEmailProvider: registration.confirmationEmailProvider || null,
+    confirmationEmailId: registration.confirmationEmailId || null,
+    confirmationEmailError: registration.confirmationEmailError || null,
   };
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  if (!requireAdminDatabase(res)) {
     return;
   }
 
@@ -1584,6 +1616,10 @@ type AdminActionRequest = {
 
 async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, registrationId: string) {
   if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  if (!requireAdminDatabase(res)) {
     return;
   }
 
@@ -1645,6 +1681,10 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
     return;
   }
 
+  if (!requireAdminDatabase(res)) {
+    return;
+  }
+
   if (!requireJson(req, res)) {
     return;
   }
@@ -1703,11 +1743,19 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  if (!requireAdminDatabase(res)) {
+    return;
+  }
+
   json(res, 200, { registrations: await getAdminRows(url) });
 }
 
 async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse) {
   if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  if (!requireAdminDatabase(res)) {
     return;
   }
 
@@ -1725,6 +1773,10 @@ async function handleAdminPartnerships(req: IncomingMessage, res: ServerResponse
     return;
   }
 
+  if (!requireAdminDatabase(res)) {
+    return;
+  }
+
   const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'partnerships' });
   const partnerships = database.partnershipLeads
     .slice()
@@ -1736,6 +1788,10 @@ async function handleAdminPartnerships(req: IncomingMessage, res: ServerResponse
 
 async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerResponse, partnershipId: string) {
   if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  if (!requireAdminDatabase(res)) {
     return;
   }
 
@@ -1790,6 +1846,10 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     return;
   }
 
+  if (!requireAdminDatabase(res)) {
+    return;
+  }
+
   const rows = await getAdminRows(url);
   const headers = [
     'id',
@@ -1807,8 +1867,17 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     'camisa',
     'status',
     'pagamento',
+    'provider_pagamento',
+    'id_pagamento_provider',
+    'status_gateway',
+    'transacao_gateway',
     'check_in',
     'kit',
+    'pago_em',
+    'confirmado_em',
+    'email_confirmacao_enviado_em',
+    'email_confirmacao_provider',
+    'email_confirmacao_erro',
     'valor',
     'criado_em',
   ];
@@ -1828,8 +1897,17 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     row.shirtSize,
     row.status,
     row.paymentStatus,
+    row.paymentProvider,
+    row.providerPaymentId,
+    row.gatewayStatus,
+    row.gatewayTransactionId,
     row.checkInStatus,
     row.kitStatus,
+    row.paidAt,
+    row.confirmedAt,
+    row.confirmationEmailSentAt,
+    row.confirmationEmailProvider,
+    row.confirmationEmailError,
     (row.amountCents / 100).toFixed(2),
     row.createdAt,
   ].map(escapeCsv).join(','));
@@ -1839,6 +1917,10 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
 
 async function handleAdminPartnershipsCsv(req: IncomingMessage, res: ServerResponse) {
   if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  if (!requireAdminDatabase(res)) {
     return;
   }
 

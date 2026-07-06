@@ -143,11 +143,21 @@ export type AdminRegistration = {
   shirtSize: string;
   status: RegistrationStatus;
   paymentStatus: RegistrationStatus;
+  paymentProvider: string | null;
+  providerPaymentId: string | null;
   amountCents: number;
   createdAt: string;
+  updatedAt: string;
   expiresAt: string | null;
+  paidAt: string | null;
+  confirmedAt: string | null;
+  gatewayStatus: string | null;
+  gatewayTransactionId: string | null;
   pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
+  confirmationEmailProvider?: string | null;
+  confirmationEmailId?: string | null;
+  confirmationEmailError?: string | null;
 };
 
 export type AdminRegistrationsResponse = {

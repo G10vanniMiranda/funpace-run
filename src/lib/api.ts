@@ -14,7 +14,10 @@ import type {
 } from '../types/registration';
 
 const configuredApiUrl = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
-const API_BASE_URL = configuredApiUrl || (import.meta.env.DEV ? 'http://localhost:3001' : '');
+const configuredLocalApiUrl = (import.meta.env.VITE_API_URL_LOCAL || '').replace(/\/$/, '');
+const API_BASE_URL = import.meta.env.DEV
+  ? configuredLocalApiUrl || 'http://localhost:3001'
+  : configuredApiUrl;
 const REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || 15_000);
 const RETRY_DELAYS_MS = [500, 1000, 2000];
 const isDevelopment = import.meta.env.DEV;

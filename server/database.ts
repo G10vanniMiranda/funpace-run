@@ -1,10 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { loadEnvFile } from 'node:process';
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
 
 const { Pool } = pg;
+
+if (!process.env.VERCEL && existsSync(resolve('.env'))) {
+  loadEnvFile(resolve('.env'));
+}
 
 export type EventRecord = {
   id: string;
@@ -465,8 +470,6 @@ async function ensurePostgresReady() {
 }
 
 async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope = 'all'): Promise<Database> {
-  await ensurePostgresReady();
-
   const include = {
     events: ['all', 'availability', 'checkout'].includes(scope),
     distances: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
@@ -845,6 +848,8 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
   const client = await requirePool().connect();
 
   try {
+    await ensurePostgresReady();
+
     await client.query('begin');
 
     const eventResult = await client.query(
@@ -1001,6 +1006,8 @@ export async function attachCheckoutToPaymentInPostgres(input: {
   const client = await requirePool().connect();
 
   try {
+    await ensurePostgresReady();
+
     await client.query('begin');
     const now = new Date().toISOString();
     const paymentResult = await client.query(
@@ -1038,6 +1045,8 @@ export async function markPaymentCreationFailedInPostgres(registrationId: string
   const client = await requirePool().connect();
 
   try {
+    await ensurePostgresReady();
+
     await client.query('begin');
     const now = new Date().toISOString();
     const registrationResult = await client.query(
@@ -1119,6 +1128,10 @@ export async function transaction<Result>(
   const client = await requirePool().connect();
 
   try {
+    if (shouldPersist) {
+      await ensurePostgresReady();
+    }
+
     await client.query('begin');
 
     const database = await readPostgresDatabase(client, options.scope);

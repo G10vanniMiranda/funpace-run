@@ -2,12 +2,10 @@ import { type FormEvent, type ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
-  Archive,
   ArrowDownRight,
   ArrowUpRight,
   BadgeCheck,
   BarChart3,
-  Bell,
   CalendarClock,
   CheckCircle2,
   ChevronRight,
@@ -16,28 +14,22 @@ import {
   Download,
   Eye,
   FileBarChart,
-  FileText,
   Flag,
   Gift,
-  Handshake,
-  LayoutDashboard,
   Loader2,
   Lock,
   Mail,
   MapPin,
   Medal,
   Menu,
-  Percent,
   QrCode,
   RefreshCcw,
   Search,
-  Settings,
   ShieldCheck,
   Shirt,
   Ticket,
   TimerReset,
   Trophy,
-  UserCog,
   Users,
   WalletCards,
   X,
@@ -50,13 +42,10 @@ import {
   deliverAdminKit,
   getAdminAuditLogs,
   getAdminCsvUrl,
-  getAdminPartnerships,
-  getAdminPartnershipsCsvUrl,
   getAdminRegistrations,
   getAdminSummary,
-  updateAdminPartnershipStatus,
 } from '../lib/api';
-import type { AdminAuditLog, AdminPartnershipLead, AdminRegistration, AdminSummaryResponse, PartnershipLeadStatus, RegistrationStatus } from '../types/registration';
+import type { AdminAuditLog, AdminRegistration, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
 
 type AdminFilters = {
   status: string;
@@ -90,23 +79,11 @@ const statusOptions = [
 ];
 
 const navItems: Array<{ label: string; icon: LucideIcon; status?: 'soon' }> = [
-  { label: 'Dashboard', icon: LayoutDashboard },
-  { label: 'Eventos', icon: CalendarClock },
-  { label: 'Inscricoes', icon: Ticket },
-  { label: 'Atletas', icon: Users },
+  { label: 'Inscrições', icon: Ticket },
   { label: 'Pagamentos', icon: CreditCard },
-  { label: 'Parceiros', icon: Handshake },
-  { label: 'Lotes', icon: Flag },
-  { label: 'Cupons', icon: Percent, status: 'soon' },
-  { label: 'Check-in', icon: ClipboardCheck },
-  { label: 'Resultados', icon: Trophy, status: 'soon' },
-  { label: 'Kit do Atleta', icon: Shirt },
-  { label: 'Financeiro', icon: WalletCards },
-  { label: 'Relatorios', icon: FileBarChart },
-  { label: 'Notificacoes', icon: Bell, status: 'soon' },
-  { label: 'Equipe', icon: UserCog, status: 'soon' },
-  { label: 'Configuracoes', icon: Settings },
-  { label: 'Logs', icon: Activity },
+  { label: 'Operação', icon: ClipboardCheck },
+  { label: 'Relatórios', icon: FileBarChart },
+  { label: 'Auditoria', icon: Activity },
 ];
 
 const statusLabels: Record<RegistrationStatus, string> = {
@@ -132,12 +109,11 @@ export function AdminPage() {
   const [draftKey, setDraftKey] = useState(adminKey);
   const [summary, setSummary] = useState<AdminSummaryResponse | null>(null);
   const [registrations, setRegistrations] = useState<AdminRegistration[]>([]);
-  const [partnerships, setPartnerships] = useState<AdminPartnershipLead[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
   const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [activeNav, setActiveNav] = useState('Dashboard');
+  const [activeNav, setActiveNav] = useState('Inscrições');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [selectedRegistration, setSelectedRegistration] = useState<AdminRegistration | null>(null);
   const [actionLoading, setActionLoading] = useState<'check-in' | 'kit' | ''>('');
@@ -163,15 +139,10 @@ export function AdminPage() {
       setSummary(summaryResponse);
       setRegistrations(registrationsResponse.registrations);
       setAuditLogs(auditLogsResponse.logs);
-
-      if (activeNav === 'Parceiros') {
-        const partnershipsResponse = await getAdminPartnerships(key);
-        setPartnerships(partnershipsResponse.partnerships);
-      }
     } catch (requestError) {
       const message = requestError instanceof ApiError
         ? requestError.message
-        : 'Nao foi possivel carregar o painel.';
+        : 'Não foi possivel carregar o painel.';
       setError(message);
     } finally {
       setLoading(false);
@@ -199,7 +170,7 @@ export function AdminPage() {
       return;
     }
 
-    const response = await fetch(activeNav === 'Parceiros' ? getAdminPartnershipsCsvUrl() : csvUrl, {
+    const response = await fetch(csvUrl, {
       headers: {
         'X-Admin-Key': adminKey,
       },
@@ -209,21 +180,9 @@ export function AdminPage() {
     const link = document.createElement('a');
 
     link.href = url;
-    link.download = activeNav === 'Parceiros' ? 'funpace-run-parceiros.csv' : 'funpace-run-inscritos.csv';
+    link.download = 'funpace-run-inscritos.csv';
     link.click();
     window.URL.revokeObjectURL(url);
-  };
-
-  const handlePartnershipStatus = async (partnershipId: string, status: PartnershipLeadStatus) => {
-    setError('');
-
-    try {
-      const response = await updateAdminPartnershipStatus(adminKey, partnershipId, status);
-      setPartnerships((current) => current.map((item) => (item.id === partnershipId ? response.partnership : item)));
-      await loadAdminData();
-    } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel atualizar a proposta.');
-    }
   };
 
   const updateRegistration = (registration: AdminRegistration) => {
@@ -240,7 +199,7 @@ export function AdminPage() {
       updateRegistration(response.registration);
       await loadAdminData();
     } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel registrar o check-in.');
+      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possivel registrar o check-in.');
     } finally {
       setActionLoading('');
     }
@@ -255,13 +214,13 @@ export function AdminPage() {
       updateRegistration(response.registration);
       await loadAdminData();
     } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel registrar a entrega do kit.');
+      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possivel registrar a entrega do kit.');
     } finally {
       setActionLoading('');
     }
   };
 
-  if (!adminKey || error === 'Acesso administrativo nao autorizado.') {
+  if (!adminKey || error === 'Acesso administrativo não autorizado.') {
     return (
       <LoginScreen
         draftKey={draftKey}
@@ -274,10 +233,10 @@ export function AdminPage() {
 
   return (
     <main className="min-h-screen bg-black text-white">
-      <div className="fixed inset-0 pointer-events-none bg-[radial-gradient(circle_at_top_left,rgba(215,255,0,0.12),transparent_32rem),linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-[size:auto,36px_36px,36px_36px]" />
+      <div className="fixed inset-0 pointer-events-none bg-[radial-gradient(circle_at_top_left,rgba(215,255,0,0.12),transparent_32rem),linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-size-[auto,36px_36px,36px_36px]" />
 
       <div className="relative flex min-h-screen">
-        <aside className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 w-[280px] border-r border-white/10 bg-zinc-950/95 px-3 py-4 backdrop-blur-sm transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
+        <aside className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 w-70 border-r border-white/10 bg-zinc-950/95 px-3 py-4 backdrop-blur-sm transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
           <Sidebar
             activeNav={activeNav}
             onSelect={(label) => {
@@ -305,54 +264,24 @@ export function AdminPage() {
             onExport={() => void downloadCsv()}
           />
 
-          <div className="mx-auto max-w-[1600px] px-4 pb-10 pt-4 sm:px-6 lg:px-8">
-            {error && error !== 'Acesso administrativo nao autorizado.' && (
+          <div className="mx-auto max-w-400 px-4 pb-10 pt-4 sm:px-6 lg:px-8">
+            {error && error !== 'Acesso administrativo não autorizado.' && (
               <StatusMessage tone="error" message={error} />
             )}
 
-            {activeNav === 'Parceiros' ? (
-              <PartnershipsPanel
-                partnerships={partnerships}
-                loading={loading}
-                onStatusChange={handlePartnershipStatus}
-              />
-            ) : (
-              <>
-                <EventHero summary={summary} dashboard={dashboard} />
-
-                <KpiGrid dashboard={dashboard} loading={loading && !summary} />
-
-                <div className="mt-6 grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
-                  <Panel title="Inscricoes por dia" eyebrow="Performance comercial" action="Ultimos registros">
-                    <TimelineChart data={dashboard.dailyRegistrations} />
-                  </Panel>
-
-                  <Panel title="Lotes e distancias" eyebrow="Capacidade">
-                    <LotDistancePanel summary={summary} />
-                  </Panel>
-                </div>
-
-                <div className="mt-4 grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-                  <Panel title="Receita por dia" eyebrow="Financeiro">
-                    <RevenueChart data={dashboard.dailyRevenue} />
-                  </Panel>
-
-                  <Panel title="Operacao presencial" eyebrow="Check-in, kit e logs">
-                    <OperationsPanel auditLogs={auditLogs} />
-                  </Panel>
-                </div>
-
-                <RegistrationsPanel
-                  summary={summary}
-                  registrations={registrations}
-                  filters={filters}
-                  loading={loading}
-                  onFiltersChange={setFilters}
-                  onSearch={handleSearch}
-                  onOpenRegistration={setSelectedRegistration}
-                />
-              </>
-            )}
+            <AdminSection
+              activeNav={activeNav}
+              summary={summary}
+              dashboard={dashboard}
+              registrations={registrations}
+              auditLogs={auditLogs}
+              filters={filters}
+              loading={loading}
+              onFiltersChange={setFilters}
+              onSearch={handleSearch}
+              onOpenRegistration={setSelectedRegistration}
+              onExport={() => void downloadCsv()}
+            />
           </div>
         </section>
       </div>
@@ -365,6 +294,90 @@ export function AdminPage() {
         onClose={() => setSelectedRegistration(null)}
       />
     </main>
+  );
+}
+
+function AdminSection({
+  activeNav,
+  summary,
+  dashboard,
+  registrations,
+  auditLogs,
+  filters,
+  loading,
+  onFiltersChange,
+  onSearch,
+  onOpenRegistration,
+  onExport,
+}: {
+  activeNav: string;
+  summary: AdminSummaryResponse | null;
+  dashboard: DashboardModel;
+  registrations: AdminRegistration[];
+  auditLogs: AdminAuditLog[];
+  filters: AdminFilters;
+  loading: boolean;
+  onFiltersChange: (filters: AdminFilters) => void;
+  onSearch: (event: FormEvent) => void;
+  onOpenRegistration: (registration: AdminRegistration) => void;
+  onExport: () => void;
+}) {
+  if (activeNav === 'Pagamentos') {
+    return (
+      <>
+        <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
+        <PaymentControlPanel registrations={registrations} dashboard={dashboard} />
+      </>
+    );
+  }
+
+  if (activeNav === 'Operacao') {
+    return (
+      <>
+        <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
+        <div className="mt-4 grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+          <Panel title="Operacao presencial" eyebrow="Kit e check-in">
+            <OperationsPanel auditLogs={auditLogs} />
+          </Panel>
+          <Panel title="Fila operacional" eyebrow="Atletas pagos">
+            <OperationalQueue registrations={registrations} onOpenRegistration={onOpenRegistration} />
+          </Panel>
+        </div>
+      </>
+    );
+  }
+
+  if (activeNav === 'Relatorios') {
+    return (
+      <>
+        <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
+        <ReportsPanel summary={summary} dashboard={dashboard} registrations={registrations} onExport={onExport} />
+      </>
+    );
+  }
+
+  if (activeNav === 'Auditoria') {
+    return (
+      <>
+        <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
+        <AuditPanel auditLogs={auditLogs} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
+      <RegistrationsPanel
+        summary={summary}
+        registrations={registrations}
+        filters={filters}
+        loading={loading}
+        onFiltersChange={onFiltersChange}
+        onSearch={onSearch}
+        onOpenRegistration={onOpenRegistration}
+      />
+    </>
   );
 }
 
@@ -387,7 +400,7 @@ function LoginScreen({
         <p className="mb-3 text-xs font-black uppercase tracking-[0.28em] text-brand">Centro de comando</p>
         <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FunPace Run</h1>
         <p className="mb-8 font-mono text-sm leading-relaxed text-zinc-400">
-          Acesse vendas, inscricoes, lotes, pagamentos e operacao do evento com a chave administrativa.
+          Acesse vendas, inscrições, lotes, pagamentos e operação do evento com a chave administrativa.
         </p>
         <div className="relative">
           <Lock className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
@@ -427,9 +440,8 @@ function Sidebar({ activeNav, onSelect }: { activeNav: string; onSelect: (label:
                 type="button"
                 key={item.label}
                 onClick={() => onSelect(item.label)}
-                className={`flex w-full items-center gap-3 rounded px-3 py-2.5 text-left text-sm font-bold transition-colors ${
-                  active ? 'bg-brand text-black' : 'text-zinc-300 hover:bg-white/5 hover:text-white'
-                }`}
+                className={`flex w-full items-center gap-3 rounded px-3 py-2.5 text-left text-sm font-bold transition-colors ${active ? 'bg-brand text-black' : 'text-zinc-300 hover:bg-white/5 hover:text-white'
+                  }`}
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 flex-1">{item.label}</span>
@@ -445,7 +457,7 @@ function Sidebar({ activeNav, onSelect }: { activeNav: string; onSelect: (label:
       </nav>
 
       <div className="mt-4 border-t border-white/10 px-3 pt-4">
-        <div className="rounded border border-white/10 bg-white/[0.03] p-3">
+        <div className="rounded border border-white/10 bg-white/3 p-3">
           <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Evento ativo</p>
           <p className="mt-2 text-sm font-bold">{eventInfo.name}</p>
           <p className="mt-1 font-mono text-xs text-zinc-500">{eventInfo.city} - {eventInfo.state}</p>
@@ -470,19 +482,19 @@ function Topbar({
 }) {
   return (
     <header className="sticky top-0 z-20 border-b border-white/10 bg-black/85 px-4 py-3 backdrop-blur-sm sm:px-6 lg:px-8">
-      <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-3">
+      <div className="mx-auto flex max-w-400 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <button
             type="button"
             aria-label="Abrir menu"
             onClick={onOpenSidebar}
-            className="flex h-10 w-10 items-center justify-center border border-white/10 bg-white/[0.03] lg:hidden"
+            className="flex h-10 w-10 items-center justify-center border border-white/10 bg-white/3 lg:hidden"
           >
             <Menu className="h-5 w-5" />
           </button>
           <div className="min-w-0">
             <p className="text-xs font-black uppercase tracking-widest text-brand">{activeNav}</p>
-            <h1 className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operacoes FunPace Run</h1>
+            <h1 className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operações FunPace Run</h1>
           </div>
         </div>
 
@@ -490,7 +502,7 @@ function Topbar({
           <button
             type="button"
             onClick={onRefresh}
-            className="flex min-h-10 items-center gap-2 border border-white/10 bg-white/[0.03] px-3 text-xs font-bold uppercase tracking-widest text-zinc-200 transition-colors hover:border-brand"
+            className="flex min-h-10 items-center gap-2 border border-white/10 bg-white/3 px-3 text-xs font-bold uppercase tracking-widest text-zinc-200 transition-colors hover:border-brand"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
             <span className="hidden sm:inline">Atualizar</span>
@@ -509,48 +521,6 @@ function Topbar({
   );
 }
 
-function EventHero({ summary, dashboard }: { summary: AdminSummaryResponse | null; dashboard: DashboardModel }) {
-  const activeLot = summary?.lots.find((lot) => lot.status === 'active') || summary?.lots[0];
-
-  return (
-    <section className="grid gap-4 overflow-hidden border border-white/10 bg-zinc-950/85 p-4 shadow-2xl md:p-6 xl:grid-cols-[1.4fr_0.6fr]">
-      <div className="min-w-0">
-        <div className="mb-6 flex flex-wrap items-center gap-2">
-          <StatusPill status="published" label="Publicado" />
-          <StatusPill status="active" label={activeLot?.status === 'sold_out' ? 'Lote esgotado' : 'Inscricoes abertas'} />
-          <span className="rounded border border-white/10 px-2.5 py-1 text-xs font-bold uppercase tracking-widest text-zinc-400">
-            {eventInfo.currentLot}
-          </span>
-        </div>
-
-        <p className="text-xs font-black uppercase tracking-[0.28em] text-brand">Evento principal</p>
-        <h2 className="mt-3 max-w-4xl font-display text-[clamp(2.5rem,9vw,5.8rem)] font-black uppercase leading-[0.9] tracking-tighter">
-          {eventInfo.name}
-        </h2>
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
-          <MiniFact icon={CalendarClock} label="Data da prova" value={eventInfo.dateLabel} />
-          <MiniFact icon={TimerReset} label="Dias restantes" value={`${dashboard.daysRemaining}`} />
-          <MiniFact icon={MapPin} label="Cidade" value={`${eventInfo.city} - ${eventInfo.state}`} />
-        </div>
-      </div>
-
-      <div className="flex flex-col justify-between gap-4 border border-white/10 bg-black/40 p-4">
-        <div>
-          <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Acoes do evento</p>
-          <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-            As acoes abaixo estao mapeadas para a proxima fase de backend administrativo.
-          </p>
-        </div>
-        <div className="grid gap-2">
-          <GhostAction icon={FileText} label="Editar Evento" />
-          <GhostAction icon={BadgeCheck} label="Publicar" />
-          <GhostAction icon={Archive} label="Encerrar Inscricoes" danger />
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function KpiGrid({ dashboard, loading }: { dashboard: DashboardModel; loading: boolean }) {
   const cards: Array<{
     label: string;
@@ -559,19 +529,19 @@ function KpiGrid({ dashboard, loading }: { dashboard: DashboardModel; loading: b
     detail: string;
     trend: 'up' | 'neutral';
   }> = [
-    { label: 'Total de inscritos', value: dashboard.totalRegistrations, icon: Users, detail: `${dashboard.paidRegistrations} pagos`, trend: 'up' },
-    { label: 'Inscricoes hoje', value: dashboard.todayRegistrations, icon: Activity, detail: 'Janela operacional', trend: 'neutral' },
-    { label: 'Inscricoes na semana', value: dashboard.weekRegistrations, icon: BarChart3, detail: 'Ultimos 7 dias', trend: 'up' },
-    { label: 'Faturamento', value: currencyFormatter.format(dashboard.revenueCents / 100), icon: WalletCards, detail: 'Receita paga', trend: 'up' },
-    { label: 'Faturamento hoje', value: currencyFormatter.format(dashboard.todayRevenueCents / 100), icon: CreditCard, detail: 'Pagos hoje', trend: 'neutral' },
-    { label: 'Ticket medio', value: currencyFormatter.format(dashboard.averageTicketCents / 100), icon: Ticket, detail: 'Por inscricao paga', trend: 'neutral' },
-    { label: 'Taxa de conversao', value: `${dashboard.conversionRate}%`, icon: ArrowUpRight, detail: 'Pagas / total', trend: 'up' },
-    { label: 'Check-ins realizados', value: dashboard.checkIns, icon: ClipboardCheck, detail: 'Operacao presencial', trend: 'neutral' },
-    { label: 'Kits entregues', value: dashboard.kitDeliveries, icon: Gift, detail: 'Retirada registrada', trend: 'neutral' },
-    { label: 'Vagas restantes', value: dashboard.remainingSpots, icon: Medal, detail: `${dashboard.currentLotName}`, trend: 'neutral' },
-    { label: 'Lote atual', value: dashboard.currentLotName, icon: Flag, detail: currencyFormatter.format(dashboard.currentLotPriceCents / 100), trend: 'neutral' },
-    { label: 'Atletas por distancia', value: dashboard.distanceSummary, icon: Trophy, detail: 'Total inscrito', trend: 'neutral' },
-  ];
+      { label: 'Total de inscritos', value: dashboard.totalRegistrations, icon: Users, detail: `${dashboard.paidRegistrations} pagos`, trend: 'up' },
+      { label: 'Inscrições hoje', value: dashboard.todayRegistrations, icon: Activity, detail: 'Janela operacional', trend: 'neutral' },
+      { label: 'Inscrições na semana', value: dashboard.weekRegistrations, icon: BarChart3, detail: 'Últimos 7 dias', trend: 'up' },
+      { label: 'Faturamento', value: currencyFormatter.format(dashboard.revenueCents / 100), icon: WalletCards, detail: 'Receita paga', trend: 'up' },
+      { label: 'Faturamento hoje', value: currencyFormatter.format(dashboard.todayRevenueCents / 100), icon: CreditCard, detail: 'Pagos hoje', trend: 'neutral' },
+      { label: 'Ticket médio', value: currencyFormatter.format(dashboard.averageTicketCents / 100), icon: Ticket, detail: 'Por inscrição paga', trend: 'neutral' },
+      { label: 'Taxa de conversão', value: `${dashboard.conversionRate}%`, icon: ArrowUpRight, detail: 'Pagas / total', trend: 'up' },
+      { label: 'Check-ins realizados', value: dashboard.checkIns, icon: ClipboardCheck, detail: 'Operação presencial', trend: 'neutral' },
+      { label: 'Kits entregues', value: dashboard.kitDeliveries, icon: Gift, detail: 'Retirada registrada', trend: 'neutral' },
+      { label: 'Vagas restantes', value: dashboard.remainingSpots, icon: Medal, detail: `${dashboard.currentLotName}`, trend: 'neutral' },
+      { label: 'Lote atual', value: dashboard.currentLotName, icon: Flag, detail: currencyFormatter.format(dashboard.currentLotPriceCents / 100), trend: 'neutral' },
+      { label: 'Atletas por distância', value: dashboard.distanceSummary, icon: Trophy, detail: 'Total inscrito', trend: 'neutral' },
+    ];
 
   return (
     <section className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -617,7 +587,7 @@ function KpiCard({
             <p className="mt-3 truncate font-mono text-2xl font-black text-white">{value}</p>
           )}
         </div>
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center border border-white/10 bg-white/[0.03]">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center border border-white/10 bg-white/3">
           <Icon className="h-5 w-5 text-brand" />
         </div>
       </div>
@@ -629,97 +599,250 @@ function KpiCard({
   );
 }
 
-const partnershipStatusOptions: Array<{ value: PartnershipLeadStatus; label: string }> = [
-  { value: 'new', label: 'Novo' },
-  { value: 'contacted', label: 'Contatado' },
-  { value: 'negotiating', label: 'Negociando' },
-  { value: 'approved', label: 'Aprovado' },
-  { value: 'rejected', label: 'Rejeitado' },
-];
-
-const partnershipStatusLabels: Record<PartnershipLeadStatus, string> = {
-  new: 'Novo',
-  contacted: 'Contatado',
-  negotiating: 'Negociando',
-  approved: 'Aprovado',
-  rejected: 'Rejeitado',
-};
-
-function PartnershipsPanel({
-  partnerships,
+function ControlSummary({
+  dashboard,
+  registrations,
   loading,
-  onStatusChange,
 }: {
-  partnerships: AdminPartnershipLead[];
+  dashboard: DashboardModel;
+  registrations: AdminRegistration[];
   loading: boolean;
-  onStatusChange: (partnershipId: string, status: PartnershipLeadStatus) => void;
 }) {
-  return (
-    <section className="border border-white/10 bg-zinc-950/80">
-      <div className="border-b border-white/10 p-4 md:p-5">
-        <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
-          <div>
-            <p className="text-xs font-black uppercase tracking-widest text-brand">Parceiros</p>
-            <h2 className="mt-2 text-2xl font-black tracking-tight">Propostas de parceria</h2>
-            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-              Leads comerciais enviados pelo formulario publico. Use o status para acompanhar contato, negociacao e aprovacao.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2 text-xs font-bold uppercase tracking-widest text-zinc-500">
-            <span className="border border-white/10 px-2.5 py-1">{partnerships.length} propostas</span>
-            <span className="border border-white/10 px-2.5 py-1">Exportacao CSV no topo</span>
-          </div>
-        </div>
-      </div>
+  const pendingPayments = registrations.filter((registration) => registration.status === 'pending_payment').length;
+  const paidWithoutEmail = registrations.filter((registration) => registration.status === 'paid' && !registration.confirmationEmailSentAt).length;
 
-      {loading && partnerships.length === 0 ? (
-        <TableSkeleton />
-      ) : partnerships.length === 0 ? (
-        <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
-          <Handshake className="h-10 w-10 text-zinc-600" />
-          <h3 className="mt-5 text-xl font-black">Nenhuma proposta recebida</h3>
-          <p className="mt-2 max-w-md text-sm leading-relaxed text-zinc-500">
-            Quando uma empresa enviar interesse pelo site, a proposta aparecera nesta mesa comercial.
-          </p>
+  const cards: Array<{
+    label: string;
+    value: string | number;
+    icon: LucideIcon;
+    detail: string;
+    trend: 'up' | 'neutral';
+  }> = [
+      { label: 'Pagas', value: dashboard.paidRegistrations, icon: BadgeCheck, detail: 'Inscrições confirmadas', trend: 'up' },
+      { label: 'Pendentes', value: pendingPayments, icon: TimerReset, detail: 'Aguardando pagamento', trend: 'neutral' },
+      { label: 'Receita', value: currencyFormatter.format(dashboard.revenueCents / 100), icon: WalletCards, detail: 'Pagamentos aprovados', trend: 'up' },
+      { label: 'Emails pendentes', value: paidWithoutEmail, icon: Mail, detail: 'Confirmação não enviada', trend: 'neutral' },
+      { label: 'Kits entregues', value: dashboard.kitDeliveries, icon: Shirt, detail: 'Retirada registrada', trend: 'neutral' },
+      { label: 'Check-ins', value: dashboard.checkIns, icon: ClipboardCheck, detail: 'Presença registrada', trend: 'neutral' },
+    ];
+
+  return (
+    <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-6">
+      {cards.map((card) => (
+        <KpiCard
+          key={card.label}
+          label={card.label}
+          value={card.value}
+          icon={card.icon}
+          detail={card.detail}
+          trend={card.trend}
+          loading={loading}
+        />
+      ))}
+    </section>
+  );
+}
+
+function PaymentControlPanel({
+  registrations,
+  dashboard,
+}: {
+  registrations: AdminRegistration[];
+  dashboard: DashboardModel;
+}) {
+  const paid = registrations.filter((registration) => registration.status === 'paid');
+  const pending = registrations.filter((registration) => registration.status === 'pending_payment');
+  const failed = registrations.filter((registration) => ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(registration.status));
+  const paidWithoutEmail = paid.filter((registration) => !registration.confirmationEmailSentAt);
+
+  return (
+    <div className="mt-4 grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+      <Panel title="Conciliação" eyebrow="Pagamentos">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <MetricBox label="Pagos" value={paid.length} detail={currencyFormatter.format(dashboard.revenueCents / 100)} />
+          <MetricBox label="Pendentes" value={pending.length} detail="Aguardando gateway" />
+          <MetricBox label="Não aprovados" value={failed.length} detail="Falha, expirado ou cancelado" />
+          <MetricBox label="Pagos sem email" value={paidWithoutEmail.length} detail="Exige reenvio" tone={paidWithoutEmail.length > 0 ? 'warning' : 'default'} />
         </div>
-      ) : (
+        <div className="mt-4">
+          <RevenueChart data={dashboard.dailyRevenue} />
+        </div>
+      </Panel>
+
+      <Panel title="Últimos pagamentos" eyebrow="Controle operacional">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1060px] text-left">
+          <table className="w-full min-w-190 text-left">
             <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
               <tr>
-                <th className="p-4">Empresa</th>
-                <th className="p-4">Contato</th>
-                <th className="p-4">Mensagem</th>
-                <th className="p-4">Status</th>
-                <th className="p-4">Recebido em</th>
+                <th className="p-3">Atleta</th>
+                <th className="p-3">Status</th>
+                <th className="p-3">Email</th>
+                <th className="p-3">Valor</th>
+                <th className="p-3">Criado em</th>
               </tr>
             </thead>
             <tbody>
-              {partnerships.map((partnership) => (
-                <tr key={partnership.id} className="border-t border-white/10 transition-colors hover:bg-white/[0.03]">
-                  <td className="p-4">
-                    <p className="font-bold">{partnership.companyName}</p>
-                    <p className="mt-1 font-mono text-xs text-zinc-500">{partnership.id}</p>
+              {registrations.slice(0, 12).map((registration) => (
+                <tr key={registration.id} className="border-t border-white/10">
+                  <td className="p-3">
+                    <p className="font-bold">{registration.fullName}</p>
+                    <p className="mt-1 font-mono text-xs text-zinc-500">{registration.id}</p>
                   </td>
-                  <td className="p-4">
-                    <p className="font-bold text-zinc-200">{partnership.contactName}</p>
-                    <p className="mt-1 text-sm text-zinc-500">{partnership.contactRole}</p>
-                    <p className="mt-1 font-mono text-xs text-zinc-400">{partnership.corporateEmail}</p>
+                  <td className="p-3"><PaymentStatus status={registration.status} /></td>
+                  <td className="p-3 text-xs font-bold uppercase tracking-widest text-zinc-400">
+                    {registration.confirmationEmailSentAt ? 'Enviado' : registration.status === 'paid' ? 'Pendente' : 'Não aplicável'}
                   </td>
-                  <td className="max-w-xl p-4 text-sm leading-relaxed text-zinc-300">{partnership.involvementMessage}</td>
+                  <td className="p-3 font-mono font-bold">{currencyFormatter.format(registration.amountCents / 100)}</td>
+                  <td className="p-3 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(registration.createdAt))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function OperationalQueue({
+  registrations,
+  onOpenRegistration,
+}: {
+  registrations: AdminRegistration[];
+  onOpenRegistration: (registration: AdminRegistration) => void;
+}) {
+  const paidRegistrations = registrations.filter((registration) => registration.status === 'paid');
+
+  if (paidRegistrations.length === 0) {
+    return <EmptyState />;
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-190 text-left">
+        <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
+          <tr>
+            <th className="p-3">Atleta</th>
+            <th className="p-3">Prova</th>
+            <th className="p-3">Kit</th>
+            <th className="p-3">Check-in</th>
+            <th className="p-3 text-right">Acao</th>
+          </tr>
+        </thead>
+        <tbody>
+          {paidRegistrations.slice(0, 18).map((registration) => (
+            <tr key={registration.id} className="border-t border-white/10">
+              <td className="p-3">
+                <p className="font-bold">{registration.fullName}</p>
+                <p className="mt-1 font-mono text-xs text-zinc-500">{registration.cpfMasked}</p>
+              </td>
+              <td className="p-3 text-sm font-bold text-zinc-300">{registration.distance} / camisa {registration.shirtSize}</td>
+              <td className="p-3 text-xs font-black uppercase tracking-widest text-zinc-400">
+                {registration.kitStatus === 'delivered' ? 'Entregue' : 'Pendente'}
+              </td>
+              <td className="p-3 text-xs font-black uppercase tracking-widest text-zinc-400">
+                {registration.checkInStatus === 'checked_in' ? 'Realizado' : 'Pendente'}
+              </td>
+              <td className="p-3 text-right">
+                <button
+                  type="button"
+                  onClick={() => onOpenRegistration(registration)}
+                  className="inline-flex min-h-10 items-center gap-2 border border-white/10 px-3 text-xs font-black uppercase tracking-widest text-zinc-200 transition-colors hover:border-brand hover:text-brand"
+                >
+                  <Eye className="h-4 w-4" /> Abrir
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ReportsPanel({
+  summary,
+  dashboard,
+  registrations,
+  onExport,
+}: {
+  summary: AdminSummaryResponse | null;
+  dashboard: DashboardModel;
+  registrations: AdminRegistration[];
+  onExport: () => void;
+}) {
+  const shirtSizes = registrations.reduce<Record<string, number>>((accumulator, registration) => {
+    accumulator[registration.shirtSize] = (accumulator[registration.shirtSize] || 0) + 1;
+    return accumulator;
+  }, {});
+
+  return (
+    <div className="mt-4 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+      <Panel title="Exportações" eyebrow="Relatórios">
+        <div className="space-y-3">
+          <button
+            type="button"
+            onClick={onExport}
+            className="flex min-h-12 w-full items-center justify-center gap-2 bg-brand px-4 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white"
+          >
+            <Download className="h-4 w-4" /> Exportar inscrições filtradas
+          </button>
+          <MetricBox label="Total de inscritos" value={dashboard.totalRegistrations} detail="Base completa" />
+          <MetricBox label="Receita paga" value={currencyFormatter.format(dashboard.revenueCents / 100)} detail="Pagamentos aprovados" />
+        </div>
+      </Panel>
+
+      <Panel title="Capacidade e camisetas" eyebrow="Produção">
+        <div className="grid gap-4 lg:grid-cols-2">
+          <LotDistancePanel summary={summary} />
+          <div className="space-y-3">
+            {Object.entries(shirtSizes).map(([size, total]) => (
+              <div key={size} className="flex items-center justify-between border border-white/10 bg-black/35 p-3">
+                <span className="text-xs font-black uppercase tracking-widest text-zinc-500">Camisa {size}</span>
+                <span className="font-mono text-xl font-black">{total}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function AuditPanel({ auditLogs }: { auditLogs: AdminAuditLog[] }) {
+  return (
+    <section className="mt-4 border border-white/10 bg-zinc-950/80">
+      <div className="border-b border-white/10 p-4 md:p-5">
+        <p className="text-xs font-black uppercase tracking-widest text-brand">Auditoria</p>
+        <h2 className="mt-2 text-2xl font-black tracking-tight">Histórico administrativo</h2>
+        <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
+          Registro das ações críticas feitas no admin e por automações do sistema.
+        </p>
+      </div>
+
+      {auditLogs.length === 0 ? (
+        <div className="p-6 text-sm text-zinc-500">Nenhum log administrativo encontrado.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-215 text-left">
+            <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
+              <tr>
+                <th className="p-4">Ação</th>
+                <th className="p-4">Entidade</th>
+                <th className="p-4">Ator</th>
+                <th className="p-4">Data</th>
+              </tr>
+            </thead>
+            <tbody>
+              {auditLogs.map((log) => (
+                <tr key={log.id} className="border-t border-white/10">
+                  <td className="p-4 font-bold">{auditActionLabel(log.action)}</td>
                   <td className="p-4">
-                    <select
-                      value={partnership.status}
-                      onChange={(event) => onStatusChange(partnership.id, event.target.value as PartnershipLeadStatus)}
-                      className="min-h-10 border border-zinc-800 bg-black p-2 text-sm font-bold text-white outline-none transition-colors focus:border-brand"
-                    >
-                      {partnershipStatusOptions.map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
-                    <p className="mt-2 text-xs font-black uppercase tracking-widest text-brand">{partnershipStatusLabels[partnership.status]}</p>
+                    <p className="text-sm text-zinc-300">{log.entityType}</p>
+                    <p className="mt-1 font-mono text-xs text-zinc-500">{log.entityId}</p>
                   </td>
-                  <td className="p-4 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(partnership.createdAt))}</td>
+                  <td className="p-4 text-sm font-bold text-zinc-300">{log.actor}</td>
+                  <td className="p-4 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(log.createdAt))}</td>
                 </tr>
               ))}
             </tbody>
@@ -727,6 +850,26 @@ function PartnershipsPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function MetricBox({
+  label,
+  value,
+  detail,
+  tone = 'default',
+}: {
+  label: string;
+  value: string | number;
+  detail: string;
+  tone?: 'default' | 'warning';
+}) {
+  return (
+    <div className={`border p-4 ${tone === 'warning' ? 'border-amber-400/20 bg-amber-400/10' : 'border-white/10 bg-black/35'}`}>
+      <p className="text-xs font-black uppercase tracking-widest text-zinc-500">{label}</p>
+      <p className="mt-3 font-mono text-2xl font-black">{value}</p>
+      <p className="mt-1 text-xs font-bold uppercase tracking-widest text-zinc-500">{detail}</p>
+    </div>
   );
 }
 
@@ -752,15 +895,15 @@ function RegistrationsPanel({
       <div className="border-b border-white/10 p-4 md:p-5">
         <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
           <div>
-            <p className="text-xs font-black uppercase tracking-widest text-brand">Inscricoes</p>
+            <p className="text-xs font-black uppercase tracking-widest text-brand">Inscrições</p>
             <h2 className="mt-2 text-2xl font-black tracking-tight">Mesa operacional de atletas</h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-              Pesquisa, filtros, exportacao e acesso rapido ao historico do atleta. CPF, cidade, equipe e paginacao entram na proxima fase de API.
+              Pesquisa, filtros, exportação e acesso rápido ao histórico do atleta. CPF, cidade, equipe e paginação entram na próxima fase de API.
             </p>
           </div>
           <div className="flex flex-wrap gap-2 text-xs font-bold uppercase tracking-widest text-zinc-500">
-            <span className="border border-white/10 px-2.5 py-1">Colunas: padrao</span>
-            <span className="border border-white/10 px-2.5 py-1">Ordenacao: recentes</span>
+            <span className="border border-white/10 px-2.5 py-1">Colunas: padrão</span>
+            <span className="border border-white/10 px-2.5 py-1">Ordenação: recentes</span>
           </div>
         </div>
 
@@ -800,7 +943,7 @@ function RegistrationsPanel({
         <EmptyState />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1100px] text-left">
+          <table className="w-full min-w-275 text-left">
             <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
               <tr>
                 <th className="p-4">Atleta</th>
@@ -809,13 +952,13 @@ function RegistrationsPanel({
                 <th className="p-4">Lote</th>
                 <th className="p-4">Pagamento</th>
                 <th className="p-4">Valor</th>
-                <th className="p-4">Inscricao</th>
-                <th className="p-4 text-right">Acao</th>
+                <th className="p-4">Inscrição</th>
+                <th className="p-4 text-right">Ação</th>
               </tr>
             </thead>
             <tbody>
               {registrations.map((registration) => (
-                <tr key={registration.id} className="border-t border-white/10 transition-colors hover:bg-white/[0.03]">
+                <tr key={registration.id} className="border-t border-white/10 transition-colors hover:bg-white/3">
                   <td className="p-4">
                     <div className="flex items-center gap-3">
                       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-white/10 bg-brand/10 text-sm font-black text-brand">
@@ -922,7 +1065,7 @@ function AthleteDrawer({
           <div className="flex aspect-square items-center justify-center border border-white/10 bg-black">
             <QrCode className="h-20 w-20 text-brand" />
           </div>
-          <div className="border border-white/10 bg-white/[0.03] p-4">
+          <div className="border border-white/10 bg-white/3 p-4">
             <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Pagamento</p>
             <div className="mt-3">
               <PaymentStatus status={registration.status} />
@@ -959,7 +1102,7 @@ function AthleteDrawer({
           </p>
         )}
 
-        <div className="mt-5 border border-white/10 bg-white/[0.03] p-4">
+        <div className="mt-5 border border-white/10 bg-white/3 p-4">
           <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Historico completo</p>
           <div className="mt-4 space-y-4">
             <TimelineItem icon={Ticket} title="Inscricao criada" detail={dateTimeFormatter.format(createdAt)} />
@@ -1076,33 +1219,6 @@ function LotDistancePanel({ summary }: { summary: AdminSummaryResponse | null })
   );
 }
 
-function ModuleGrid() {
-  const modules = [
-    { icon: QrCode, label: 'Scanner QR Code', detail: 'Check-in e retirada de kit' },
-    { icon: Percent, label: 'Cupons', detail: 'Limites, validade e desconto' },
-    { icon: Mail, label: 'Notificacoes', detail: 'Email, WhatsApp, SMS e push' },
-    { icon: FileBarChart, label: 'Relatorios', detail: 'CSV, Excel, PDF e financeiro' },
-    { icon: Trophy, label: 'Resultados', detail: 'Cronometragem e certificados' },
-    { icon: Activity, label: 'Auditoria', detail: 'Logs de acoes e exportacoes' },
-  ];
-
-  return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {modules.map((module) => {
-        const Icon = module.icon;
-
-        return (
-          <div key={module.label} className="border border-white/10 bg-black/35 p-4">
-            <Icon className="h-5 w-5 text-brand" />
-            <p className="mt-4 font-bold">{module.label}</p>
-            <p className="mt-1 text-sm leading-relaxed text-zinc-500">{module.detail}</p>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function OperationsPanel({ auditLogs }: { auditLogs: AdminAuditLog[] }) {
   return (
     <div className="space-y-4">
@@ -1196,9 +1312,8 @@ function GhostAction({ icon: Icon, label, danger }: { icon: LucideIcon; label: s
   return (
     <button
       type="button"
-      className={`flex min-h-11 items-center justify-between border px-3 text-xs font-black uppercase tracking-widest transition-colors ${
-        danger ? 'border-red-400/20 text-red-200 hover:bg-red-400/10' : 'border-white/10 text-zinc-200 hover:border-brand hover:text-brand'
-      }`}
+      className={`flex min-h-11 items-center justify-between border px-3 text-xs font-black uppercase tracking-widest transition-colors ${danger ? 'border-red-400/20 text-red-200 hover:bg-red-400/10' : 'border-white/10 text-zinc-200 hover:border-brand hover:text-brand'
+        }`}
     >
       <span className="flex items-center gap-2"><Icon className="h-4 w-4" /> {label}</span>
       <ChevronRight className="h-4 w-4" />
@@ -1208,9 +1323,9 @@ function GhostAction({ icon: Icon, label, danger }: { icon: LucideIcon; label: s
 
 function Detail({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 border border-white/10 bg-white/[0.03] p-3">
+    <div className="min-w-0 border border-white/10 bg-white/3 p-3">
       <p className="text-[11px] font-black uppercase tracking-widest text-zinc-500">{label}</p>
-      <p className="mt-2 break-words text-sm font-bold text-zinc-200">{value}</p>
+      <p className="mt-2 wrap-break-word text-sm font-bold text-zinc-200">{value}</p>
     </div>
   );
 }
@@ -1245,7 +1360,7 @@ function TableSkeleton() {
   return (
     <div className="space-y-3 p-4">
       {Array.from({ length: 7 }).map((_, index) => (
-        <div key={index} className="h-16 animate-pulse bg-white/[0.04]" />
+        <div key={index} className="h-16 animate-pulse bg-white/4" />
       ))}
     </div>
   );
