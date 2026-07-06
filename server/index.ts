@@ -562,7 +562,7 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
       return null;
     }
 
-    if (registration[sentField] || registration[attemptField]) {
+    if (registration[sentField]) {
       return null;
     }
 
@@ -615,15 +615,24 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
   }
 
   let result;
+  const maxAttempts = 3;
 
-  try {
-    result = await sendRegistrationEmail(kind, context);
-  } catch (error) {
-    result = {
-      ok: false,
-      provider,
-      error: error instanceof Error ? error.message : 'Unknown email error',
-    };
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      result = await sendRegistrationEmail(kind, context);
+    } catch (error) {
+      result = {
+        ok: false,
+        provider,
+        error: error instanceof Error ? error.message : 'Unknown email error',
+      };
+    }
+
+    if (result.ok || attempt === maxAttempts) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
   }
 
   const completedAt = new Date().toISOString();
