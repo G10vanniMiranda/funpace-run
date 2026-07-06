@@ -11,6 +11,9 @@ export type RegistrationFormData = {
   email: string;
   cpf: string;
   phone: string;
+  city: string;
+  state: string;
+  team: string;
   birthDate: string;
   gender: Gender | '';
   shirtSize: ShirtSize;
@@ -153,6 +156,8 @@ export type AdminRegistration = {
   confirmedAt: string | null;
   gatewayStatus: string | null;
   gatewayTransactionId: string | null;
+  paymentMethod: string | null;
+  hasPaymentDivergence: boolean;
   pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
   confirmationEmailProvider?: string | null;
@@ -162,11 +167,18 @@ export type AdminRegistration = {
 
 export type AdminRegistrationsResponse = {
   registrations: AdminRegistration[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
 
 export type AdminRegistrationActionResponse = {
   registration: AdminRegistration;
 };
+
+export type AdminRegistrationEditable = Pick<AdminRegistration, 'fullName' | 'email' | 'phone' | 'birthDate' | 'gender' | 'shirtSize' | 'emergencyContactName' | 'emergencyContactPhone' | 'city' | 'state' | 'team'>;
+export type AdminRegistrationDetailsResponse = { registration: AdminRegistration; auditLogs: AdminAuditLog[]; paymentEvents: AdminPaymentEvent[] };
+
+export type AdminPaymentEvent = { id: string; paymentId: string; providerEventId: string; eventType: string; payload: unknown; receivedAt: string };
+export type AdminPaymentDetailsResponse = { payment: AdminRegistration; gatewayPayload: unknown; events: AdminPaymentEvent[] };
 
 export type AdminAuditLog = {
   id: string;

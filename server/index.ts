@@ -267,6 +267,9 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
     email: String(input.email || '').trim().toLowerCase(),
     cpf: String(input.cpf || '').trim(),
     phone: String(input.phone || '').trim(),
+    city: compactText(input.city, 120),
+    state: compactText(input.state, 2).toUpperCase(),
+    team: compactText(input.team, 120),
     birthDate: String(input.birthDate || '').trim(),
     gender: input.gender || '',
     shirtSize: input.shirtSize || 'M',
@@ -579,6 +582,7 @@ type NormalizedPaymentWebhook = {
   providerPaymentId: string;
   eventType: string;
   gatewayStatus: string;
+  paymentMethod: string;
   amountCents: number | null;
   paidAmountCents: number | null;
   receiptUrl: string;
@@ -644,6 +648,7 @@ function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWebhook | 
     providerPaymentId,
     eventType,
     gatewayStatus,
+    paymentMethod: toStringValue(findFirstValue(rawEvent, ['payment_method', 'paymentMethod', 'method', 'payment_type', 'paymentType', 'capture_method'])),
     amountCents,
     paidAmountCents,
     receiptUrl: toStringValue(findFirstValue(rawEvent, ['receipt_url', 'receiptUrl'])),
@@ -681,7 +686,7 @@ async function markPaymentCreationFailed(registrationId: string) {
   }, { scope: 'checkout' });
 }
 
-async function processRegistrationEmail(kind: RegistrationEmailKind, registrationId: string) {
+async function processRegistrationEmail(kind: RegistrationEmailKind, registrationId: string, options: { force?: boolean } = {}) {
   const provider = getEmailProvider();
   const attemptField = kind === 'pending' ? 'pendingEmailLastAttemptAt' : 'confirmationEmailLastAttemptAt';
   const sentField = kind === 'pending' ? 'pendingEmailSentAt' : 'confirmationEmailSentAt';
@@ -728,7 +733,7 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
       return null;
     }
 
-    if (registration[sentField]) {
+    if (registration[sentField] && !options.force) {
       return null;
     }
 
@@ -1259,6 +1264,22 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     const nextStatus = normalizedEvent.nextStatus;
 
     if (normalizedEvent.amountCents !== null && normalizedEvent.amountCents !== registration.amountCents) {
+      if (payment) {
+        payment.gatewayStatus = normalizedEvent.gatewayStatus || 'amount_mismatch';
+        payment.gatewayTransactionId = normalizedEvent.providerTransactionId || payment.gatewayTransactionId || null;
+        payment.gatewayPayload = event;
+        payment.updatedAt = now;
+      }
+      if (!providerEventId || !database.paymentEvents.some((item) => item.providerEventId === providerEventId)) {
+        database.paymentEvents.push({
+          id: randomUUID(), paymentId: payment?.id || '', providerEventId: providerEventId || randomUUID(),
+          eventType: 'infinitepay.amount_mismatch', payload: event, receivedAt: now,
+        });
+      }
+      database.auditLogs.push({
+        id: randomUUID(), actor: 'system', action: 'payment.amount_mismatch', entityType: 'registration', entityId: registration.id,
+        payload: { expectedAmountCents: registration.amountCents, receivedAmountCents: normalizedEvent.amountCents, providerEventId: providerEventId || null }, createdAt: now,
+      });
       return { statusCode: 400, payload: { message: 'Valor do pagamento divergente.' } };
     }
 
@@ -1494,12 +1515,13 @@ async function getAdminRows(url: URL) {
         return true;
       }
 
+      const digitQuery = onlyDigits(query);
       return (
         registration.payload.fullName.toLowerCase().includes(query)
         || registration.payload.email.toLowerCase().includes(query)
         || registration.payload.phone.includes(query)
         || registration.payload.cpf.includes(query)
-        || onlyDigits(registration.payload.cpf).includes(onlyDigits(query))
+        || (digitQuery.length > 0 && onlyDigits(registration.payload.cpf).includes(digitQuery))
       );
     })
     .map((registration) => toAdminRow(database, registration))
@@ -1512,6 +1534,9 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
   const payment = database.payments.find((item) => item.registrationId === registration.id);
   const checkIn = database.checkIns.find((item) => item.registrationId === registration.id);
   const kitDelivery = database.kitDeliveries.find((item) => item.registrationId === registration.id);
+  const paymentEvents = payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id) : [];
+  const paymentMethod = toStringValue(findFirstValue(payment?.gatewayPayload, ['payment_method', 'paymentMethod', 'method', 'payment_type', 'paymentType']));
+  const hasPaymentDivergence = paymentEvents.some((item) => item.eventType === 'infinitepay.amount_mismatch');
 
   return {
     id: registration.id,
@@ -1524,10 +1549,10 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     gender: registration.payload.gender,
     emergencyContactName: registration.payload.emergencyContactName,
     emergencyContactPhone: registration.payload.emergencyContactPhone,
-    city: null,
-    state: null,
-    team: null,
-    bibNumber: null,
+    city: registration.payload.city || null,
+    state: registration.payload.state || null,
+    team: registration.payload.team || null,
+    bibNumber: registration.bibNumber || null,
     checkInStatus: checkIn ? 'checked_in' : 'not_started',
     checkInAt: checkIn?.checkedInAt || null,
     checkInBy: checkIn?.checkedInBy || null,
@@ -1551,12 +1576,49 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     confirmedAt: registration.confirmedAt || null,
     gatewayStatus: payment?.gatewayStatus || null,
     gatewayTransactionId: payment?.gatewayTransactionId || null,
+    paymentMethod: paymentMethod || null,
+    hasPaymentDivergence,
     pendingEmailSentAt: registration.pendingEmailSentAt || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
     confirmationEmailProvider: registration.confirmationEmailProvider || null,
     confirmationEmailId: registration.confirmationEmailId || null,
     confirmationEmailError: registration.confirmationEmailError || null,
   };
+}
+
+async function handleAdminPaymentDetails(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!requireAdmin(req, res) || !requireAdminDatabase(res)) return;
+  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
+  const registration = database.registrations.find((item) => item.id === registrationId);
+  const payment = database.payments.find((item) => item.registrationId === registrationId);
+  if (!registration || !payment) { json(res, 404, { message: 'Pagamento nao encontrado.' }); return; }
+  json(res, 200, {
+    payment: toAdminRow(database, registration),
+    gatewayPayload: payment.gatewayPayload || null,
+    events: database.paymentEvents.filter((item) => item.paymentId === payment.id).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)),
+  });
+}
+
+async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!requireAdmin(req, res) || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const rawBody = await readBody(req);
+  const body = parseJsonBody<{ reason?: string }>(rawBody);
+  const reason = body?.reason?.trim() || '';
+  if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+    const payment = database.payments.find((item) => item.registrationId === registrationId);
+    if (!registration || !payment) return { statusCode: 404, payload: { message: 'Pagamento nao encontrado.' } };
+    const now = new Date().toISOString();
+    const previousStatus = registration.status;
+    if (['payment_failed', 'expired', 'cancelled', 'refunded'].includes(registration.status)) claimRegistrationCapacity(database, registration);
+    registration.status = 'paid'; registration.updatedAt = now; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null;
+    payment.status = 'paid'; payment.gatewayStatus = 'manual_reconciled_paid'; payment.paidAt ||= now; payment.updatedAt = now; payment.expiresAt = null;
+    database.auditLogs.push({ id: randomUUID(), actor: 'admin', action: 'payment.manual_reconciled', entityType: 'registration', entityId: registrationId, payload: { reason, previousStatus }, createdAt: now });
+    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  }, { scope: 'checkout' });
+  json(res, result.statusCode, result.payload);
+  if (result.statusCode === 200) await processRegistrationEmail('confirmation', registrationId);
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -1738,6 +1800,99 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
   json(res, result.statusCode, result.payload);
 }
 
+async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: ServerResponse, registrationId: string, action: string) {
+  if (!requireAdmin(req, res) || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ reason?: string }>(await readBody(req)) || {};
+  const reason = body.reason?.trim() || '';
+  if (['cancel', 'undo-check-in', 'undo-kit'].includes(action) && reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
+  if (action === 'resend-email') {
+    const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+    const registration = database.registrations.find((item) => item.id === registrationId);
+    if (!registration || registration.status !== 'paid') { json(res, 409, { message: 'Reenvio permitido apenas para inscricoes pagas.' }); return; }
+    await processRegistrationEmail('confirmation', registrationId, { force: true });
+    const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+    json(res, 200, { registration: toAdminRow(refreshed, refreshed.registrations.find((item) => item.id === registrationId)!) }); return;
+  }
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+    if (!registration) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
+    const now = new Date().toISOString(); const actor = getAdminActor(req);
+    if (action === 'cancel') {
+      if (['cancelled', 'refunded'].includes(registration.status)) return { statusCode: 409, payload: { message: 'Inscricao ja encerrada.' } };
+      if (['pending_payment', 'paid'].includes(registration.status)) releaseRegistrationCapacity(database, registration);
+      registration.status = 'cancelled'; registration.updatedAt = now;
+      const payment = database.payments.find((item) => item.registrationId === registrationId); if (payment) { payment.status = 'cancelled'; payment.updatedAt = now; }
+    } else if (action === 'undo-check-in') {
+      database.checkIns = database.checkIns.filter((item) => item.registrationId !== registrationId);
+    } else if (action === 'undo-kit') {
+      database.kitDeliveries = database.kitDeliveries.filter((item) => item.registrationId !== registrationId);
+    }
+    database.auditLogs.push({ id: randomUUID(), actor, action: `registration.${action}`, entityType: 'registration', entityId: registrationId, payload: { reason }, createdAt: now });
+    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  });
+  json(res, result.statusCode, result.payload);
+}
+
+async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!requireAdmin(req, res) || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ reason?: string; changes?: Partial<RegistrationFormData> }>(await readBody(req));
+  const reason = body?.reason?.trim() || '';
+  if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
+  const allowedFields = ['fullName', 'email', 'phone', 'birthDate', 'gender', 'shirtSize', 'emergencyContactName', 'emergencyContactPhone', 'city', 'state', 'team'] as const;
+  const changes = body?.changes || {};
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+    if (!registration) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
+    const before: Record<string, unknown> = {}; const after: Record<string, unknown> = {};
+    for (const field of allowedFields) {
+      if (changes[field] === undefined) continue;
+      let value: unknown = changes[field];
+      if (typeof value === 'string') value = compactText(value, field === 'state' ? 2 : 180);
+      if (field === 'email') value = String(value).toLowerCase();
+      if (field === 'state') value = String(value).toUpperCase();
+      if (value === registration.payload[field]) continue;
+      before[field] = registration.payload[field]; after[field] = value;
+      (registration.payload as unknown as Record<string, unknown>)[field] = value;
+    }
+    if (!String(registration.payload.fullName).trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registration.payload.email)) return { statusCode: 400, payload: { message: 'Nome e email valido sao obrigatorios.' } };
+    if (!['female', 'male'].includes(registration.payload.gender) || !['P', 'M', 'G', 'GG'].includes(registration.payload.shirtSize)) return { statusCode: 400, payload: { message: 'Sexo ou tamanho de camisa invalido.' } };
+    if (!Object.keys(after).length) return { statusCode: 400, payload: { message: 'Nenhuma alteracao foi informada.' } };
+    const now = new Date().toISOString(); registration.updatedAt = now;
+    database.auditLogs.push({ id: randomUUID(), actor: getAdminActor(req), action: 'registration.updated', entityType: 'registration', entityId: registrationId, payload: { reason, before, after }, createdAt: now });
+    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  });
+  json(res, result.statusCode, result.payload);
+}
+
+async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!requireAdmin(req, res) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const registration = database.registrations.find((item) => item.id === registrationId);
+  if (!registration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  const payment = database.payments.find((item) => item.registrationId === registrationId);
+  json(res, 200, {
+    registration: toAdminRow(database, registration),
+    auditLogs: database.auditLogs.filter((item) => item.entityId === registrationId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    paymentEvents: payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)) : [],
+  });
+}
+
+async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!requireAdmin(req, res) || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ bibNumber?: string; reason?: string }>(await readBody(req));
+  const bibNumber = compactText(body?.bibNumber, 20).toUpperCase(); const reason = body?.reason?.trim() || '';
+  if (!/^[A-Z0-9-]{1,20}$/.test(bibNumber) || reason.length < 5) { json(res, 400, { message: 'Numero de peito invalido ou motivo insuficiente.' }); return; }
+  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+    if (!registration) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
+    if (database.registrations.some((item) => item.eventId === registration.eventId && item.id !== registrationId && item.bibNumber === bibNumber)) return { statusCode: 409, payload: { message: 'Numero de peito ja utilizado neste evento.' } };
+    const previous = registration.bibNumber || null; const now = new Date().toISOString(); registration.bibNumber = bibNumber; registration.updatedAt = now;
+    database.auditLogs.push({ id: randomUUID(), actor: getAdminActor(req), action: 'registration.bib_assigned', entityType: 'registration', entityId: registrationId, payload: { reason, previous, bibNumber }, createdAt: now });
+    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  });
+  json(res, result.statusCode, result.payload);
+}
+
 async function handleAdminRegistrations(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!requireAdmin(req, res)) {
     return;
@@ -1747,7 +1902,15 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
     return;
   }
 
-  json(res, 200, { registrations: await getAdminRows(url) });
+  const rows = await getAdminRows(url);
+  const requestedPage = Math.max(Number.parseInt(url.searchParams.get('page') || '1', 10) || 1, 1);
+  const pageSize = url.searchParams.has('pageSize')
+    ? Math.min(Math.max(Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25, 1), 200)
+    : Math.max(rows.length, 1);
+  const total = rows.length;
+  const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+  const page = Math.min(requestedPage, totalPages);
+  json(res, 200, { registrations: rows.slice((page - 1) * pageSize, page * pageSize), pagination: { page, pageSize, total, totalPages } });
 }
 
 async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse) {
@@ -1857,6 +2020,9 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     'email',
     'cpf',
     'telefone',
+    'cidade',
+    'estado',
+    'equipe',
     'nascimento',
     'idade',
     'sexo',
@@ -1865,12 +2031,15 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     'distancia',
     'lote',
     'camisa',
+    'numero_peito',
     'status',
     'pagamento',
     'provider_pagamento',
     'id_pagamento_provider',
     'status_gateway',
     'transacao_gateway',
+    'metodo_pagamento',
+    'divergencia_pagamento',
     'check_in',
     'kit',
     'pago_em',
@@ -1887,6 +2056,9 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     row.email,
     row.cpfMasked,
     row.phone,
+    row.city,
+    row.state,
+    row.team,
     row.birthDate,
     row.age ?? '',
     row.gender,
@@ -1895,12 +2067,15 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     row.distance,
     row.lot,
     row.shirtSize,
+    row.bibNumber,
     row.status,
     row.paymentStatus,
     row.paymentProvider,
     row.providerPaymentId,
     row.gatewayStatus,
     row.gatewayTransactionId,
+    row.paymentMethod,
+    row.hasPaymentDivergence ? 'sim' : 'nao',
     row.checkInStatus,
     row.kitStatus,
     row.paidAt,
@@ -2031,6 +2206,23 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     }
 
     const adminRegistrationAction = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/(check-in|kit)$/);
+
+    const adminRegistrationMaintenance = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/(cancel|resend-email|undo-check-in|undo-kit)$/);
+    if (req.method === 'POST' && adminRegistrationMaintenance) {
+      await handleAdminRegistrationMaintenance(req, res, decodeURIComponent(adminRegistrationMaintenance[1]), adminRegistrationMaintenance[2]); return;
+    }
+    const adminRegistrationUpdate = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)$/);
+    if (req.method === 'PATCH' && adminRegistrationUpdate) { await handleAdminRegistrationUpdate(req, res, decodeURIComponent(adminRegistrationUpdate[1])); return; }
+    if (req.method === 'GET' && adminRegistrationUpdate) { await handleAdminRegistrationDetails(req, res, decodeURIComponent(adminRegistrationUpdate[1])); return; }
+    const adminBibNumber = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/bib-number$/);
+    if (req.method === 'POST' && adminBibNumber) { await handleAdminBibNumber(req, res, decodeURIComponent(adminBibNumber[1])); return; }
+
+    const adminPaymentAction = url.pathname.match(/^\/api\/admin\/payments\/([^/]+)(?:\/(reconcile))?$/);
+    if (adminPaymentAction) {
+      const registrationId = decodeURIComponent(adminPaymentAction[1]);
+      if (req.method === 'GET' && !adminPaymentAction[2]) { await handleAdminPaymentDetails(req, res, registrationId); return; }
+      if (req.method === 'POST' && adminPaymentAction[2] === 'reconcile') { await handleAdminPaymentReconcile(req, res, registrationId); return; }
+    }
 
     if (req.method === 'POST' && adminRegistrationAction) {
       const registrationId = decodeURIComponent(adminRegistrationAction[1]);

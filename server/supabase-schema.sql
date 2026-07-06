@@ -52,6 +52,7 @@ create table if not exists "run-registrations" (
   confirmation_email_provider text,
   confirmation_email_id text,
   confirmation_email_error text
+  ,bib_number text
 );
 
 create table if not exists "run-payments" (
@@ -140,6 +141,8 @@ alter table "run-registrations" add column if not exists confirmation_email_last
 alter table "run-registrations" add column if not exists confirmation_email_provider text;
 alter table "run-registrations" add column if not exists confirmation_email_id text;
 alter table "run-registrations" add column if not exists confirmation_email_error text;
+alter table "run-registrations" add column if not exists bib_number text;
+create unique index if not exists "run-registrations_event_bib_idx" on "run-registrations"(event_id, bib_number) where bib_number is not null;
 alter table "run-payments" add column if not exists expires_at text;
 alter table "run-payments" add column if not exists paid_at text;
 alter table "run-payments" add column if not exists gateway_status text;

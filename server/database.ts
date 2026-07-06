@@ -58,6 +58,7 @@ export type RegistrationRecord = {
   expiresAt?: string | null;
   paidAt?: string | null;
   confirmedAt?: string | null;
+  bibNumber?: string | null;
   pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
   pendingEmailLastAttemptAt?: string | null;
@@ -355,6 +356,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       confirmation_email_provider text,
       confirmation_email_id text,
       confirmation_email_error text
+      ,bib_number text
     );
 
     create table if not exists ${table.payments} (
@@ -444,6 +446,8 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_provider text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_id text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_error text`);
+  await client.query(`alter table ${table.registrations} add column if not exists bib_number text`);
+  await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
   await client.query(`alter table ${table.payments} add column if not exists expires_at text`);
   await client.query(`alter table ${table.payments} add column if not exists paid_at text`);
   await client.query(`alter table ${table.payments} add column if not exists gateway_status text`);
@@ -476,10 +480,10 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     lots: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
     registrations: ['all', 'availability', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
     payments: ['all', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
-    paymentEvents: ['all', 'checkout'].includes(scope),
+    paymentEvents: ['all', 'checkout', 'admin-registrations'].includes(scope),
     checkIns: ['all', 'admin-registrations'].includes(scope),
     kitDeliveries: ['all', 'admin-registrations'].includes(scope),
-    auditLogs: ['all', 'audit', 'checkout'].includes(scope),
+    auditLogs: ['all', 'audit', 'checkout', 'admin-registrations'].includes(scope),
     partnershipLeads: ['all', 'partnerships'].includes(scope),
   };
   const emptyRows = Promise.resolve({ rows: [] });
@@ -487,7 +491,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     include.events ? client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows,
     include.distances ? client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows,
     include.lots ? client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows,
-    include.registrations ? client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error from ${table.registrations}`) : emptyRows,
+    include.registrations ? client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number from ${table.registrations}`) : emptyRows,
     include.payments ? client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows,
     include.paymentEvents ? client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows,
     include.checkIns ? client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows,
@@ -548,6 +552,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       confirmationEmailProvider: row.confirmation_email_provider,
       confirmationEmailId: row.confirmation_email_id,
       confirmationEmailError: row.confirmation_email_error,
+      bibNumber: row.bib_number,
     })),
     payments: payments.rows.map((row) => ({
       id: row.id,
@@ -664,8 +669,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -684,7 +689,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          confirmation_email_last_attempt_at = excluded.confirmation_email_last_attempt_at,
          confirmation_email_provider = excluded.confirmation_email_provider,
          confirmation_email_id = excluded.confirmation_email_id,
-         confirmation_email_error = excluded.confirmation_email_error`,
+         confirmation_email_error = excluded.confirmation_email_error,
+         bib_number = excluded.bib_number`,
       [
         item.id,
         item.eventId,
@@ -706,6 +712,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.confirmationEmailProvider || null,
         item.confirmationEmailId || null,
         item.confirmationEmailError || null,
+        item.bibNumber || null,
       ],
     );
   }

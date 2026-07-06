@@ -4,6 +4,9 @@ import type {
   AdminPartnershipsResponse,
   AdminRegistrationsResponse,
   AdminRegistrationActionResponse,
+  AdminRegistrationEditable,
+  AdminRegistrationDetailsResponse,
+  AdminPaymentDetailsResponse,
   AdminSummaryResponse,
   AvailabilityResponse,
   CreateRegistrationResponse,
@@ -370,4 +373,36 @@ export function checkInAdminRegistration(adminKey: string, registrationId: strin
 
 export function deliverAdminKit(adminKey: string, registrationId: string) {
   return postAdminRegistrationAction(adminKey, registrationId, 'kit');
+}
+
+export function maintainAdminRegistration(adminKey: string, registrationId: string, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit', reason = '') {
+  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`, adminKey, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }),
+  });
+}
+
+export function updateAdminRegistration(adminKey: string, registrationId: string, changes: AdminRegistrationEditable, reason: string) {
+  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}`, adminKey, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes, reason }),
+  });
+}
+
+export function getAdminRegistrationDetails(adminKey: string, registrationId: string) {
+  return adminFetch<AdminRegistrationDetailsResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}`, adminKey);
+}
+
+export function assignAdminBibNumber(adminKey: string, registrationId: string, bibNumber: string, reason: string) {
+  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/bib-number`, adminKey, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bibNumber, reason }),
+  });
+}
+
+export function getAdminPaymentDetails(adminKey: string, registrationId: string) {
+  return adminFetch<AdminPaymentDetailsResponse>(`/api/admin/payments/${encodeURIComponent(registrationId)}`, adminKey);
+}
+
+export function reconcileAdminPayment(adminKey: string, registrationId: string, reason: string) {
+  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/payments/${encodeURIComponent(registrationId)}/reconcile`, adminKey, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }),
+  });
 }

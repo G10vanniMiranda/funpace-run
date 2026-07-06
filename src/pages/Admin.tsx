@@ -22,7 +22,6 @@ import {
   MapPin,
   Medal,
   Menu,
-  QrCode,
   RefreshCcw,
   Search,
   ShieldCheck,
@@ -36,6 +35,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { eventInfo } from '../config/event';
+import QRCode from 'qrcode';
 import {
   ApiError,
   checkInAdminRegistration,
@@ -43,16 +43,26 @@ import {
   getAdminAuditLogs,
   getAdminCsvUrl,
   getAdminRegistrations,
+  getAdminPaymentDetails,
   getAdminSummary,
+  maintainAdminRegistration,
+  reconcileAdminPayment,
+  updateAdminRegistration,
+  getAdminRegistrationDetails,
+  assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAuditLog, AdminRegistration, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
+import type { AdminAuditLog, AdminPaymentDetailsResponse, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
 
 type AdminFilters = {
   status: string;
   distanceId: string;
   lotId: string;
   q: string;
+  page: string;
+  pageSize: string;
 };
+
+type AdminNavKey = 'registrations' | 'payments' | 'operation' | 'reports' | 'audit';
 
 const currencyFormatter = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -74,16 +84,17 @@ const statusOptions = [
   { value: 'pending_payment', label: 'Pendente' },
   { value: 'paid', label: 'Pago' },
   { value: 'payment_failed', label: 'Falhou' },
+  { value: 'expired', label: 'Expirado' },
   { value: 'cancelled', label: 'Cancelado' },
   { value: 'refunded', label: 'Reembolsado' },
 ];
 
-const navItems: Array<{ label: string; icon: LucideIcon; status?: 'soon' }> = [
-  { label: 'Inscrições', icon: Ticket },
-  { label: 'Pagamentos', icon: CreditCard },
-  { label: 'Operação', icon: ClipboardCheck },
-  { label: 'Relatórios', icon: FileBarChart },
-  { label: 'Auditoria', icon: Activity },
+const navItems: Array<{ key: AdminNavKey; label: string; icon: LucideIcon; status?: 'soon' }> = [
+  { key: 'registrations', label: 'Inscrições', icon: Ticket },
+  { key: 'payments', label: 'Pagamentos', icon: CreditCard },
+  { key: 'operation', label: 'Operação', icon: ClipboardCheck },
+  { key: 'reports', label: 'Relatórios', icon: FileBarChart },
+  { key: 'audit', label: 'Auditoria', icon: Activity },
 ];
 
 const statusLabels: Record<RegistrationStatus, string> = {
@@ -110,13 +121,15 @@ export function AdminPage() {
   const [summary, setSummary] = useState<AdminSummaryResponse | null>(null);
   const [registrations, setRegistrations] = useState<AdminRegistration[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
-  const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '' });
+  const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: '25' });
+  const [registrationPagination, setRegistrationPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [activeNav, setActiveNav] = useState('Inscrições');
+  const [activeNav, setActiveNav] = useState<AdminNavKey>('registrations');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [selectedRegistration, setSelectedRegistration] = useState<AdminRegistration | null>(null);
-  const [actionLoading, setActionLoading] = useState<'check-in' | 'kit' | ''>('');
+  const [registrationDetails, setRegistrationDetails] = useState<AdminRegistrationDetailsResponse | null>(null);
+  const [actionLoading, setActionLoading] = useState<string>('');
 
   const csvUrl = useMemo(() => getAdminCsvUrl(filters), [filters]);
   const dashboard = useMemo(() => getDashboardModel(summary, registrations), [summary, registrations]);
@@ -132,12 +145,13 @@ export function AdminPage() {
     try {
       const [summaryResponse, registrationsResponse, auditLogsResponse] = await Promise.all([
         getAdminSummary(key),
-        getAdminRegistrations(key, filters),
+        getAdminRegistrations(key, activeNav === 'registrations' ? filters : { status: '', distanceId: '', lotId: '', q: '' }),
         getAdminAuditLogs(key),
       ]);
 
       setSummary(summaryResponse);
       setRegistrations(registrationsResponse.registrations);
+      setRegistrationPagination(registrationsResponse.pagination);
       setAuditLogs(auditLogsResponse.logs);
     } catch (requestError) {
       const message = requestError instanceof ApiError
@@ -151,7 +165,7 @@ export function AdminPage() {
 
   useEffect(() => {
     void loadAdminData();
-  }, [filters.status, filters.distanceId, filters.lotId, activeNav]);
+  }, [filters.status, filters.distanceId, filters.lotId, filters.page, activeNav]);
 
   const handleLogin = (event: FormEvent) => {
     event.preventDefault();
@@ -220,6 +234,40 @@ export function AdminPage() {
     }
   };
 
+  const handleMaintenance = async (registration: AdminRegistration, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit') => {
+    const needsReason = action !== 'resend-email';
+    if (!window.confirm('Confirma esta acao administrativa?')) return;
+    const reason = needsReason ? window.prompt('Informe o motivo (minimo 5 caracteres):') || '' : '';
+    if (needsReason && reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
+    setActionLoading(action); setError('');
+    try { const response = await maintainAdminRegistration(adminKey, registration.id, action, reason); updateRegistration(response.registration); await loadAdminData(); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel concluir a acao.'); }
+    finally { setActionLoading(''); }
+  };
+
+  const handleRegistrationUpdate = async (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => {
+    setActionLoading('edit'); setError('');
+    try { const response = await updateAdminRegistration(adminKey, registration.id, changes, reason); updateRegistration(response.registration); await loadAdminData(); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel atualizar a inscricao.'); throw requestError; }
+    finally { setActionLoading(''); }
+  };
+
+  const openRegistration = async (registration: AdminRegistration) => {
+    setSelectedRegistration(registration); setRegistrationDetails(null);
+    try { setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id)); } catch { /* resumo continua disponivel */ }
+  };
+
+  const handleBibNumber = async (registration: AdminRegistration) => {
+    const bibNumber = window.prompt('Numero de peito (letras, numeros ou hifen):', registration.bibNumber || '') || '';
+    if (!bibNumber) return;
+    const reason = window.prompt('Motivo da atribuicao/alteracao:') || '';
+    if (reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
+    setActionLoading('bib');
+    try { const response = await assignAdminBibNumber(adminKey, registration.id, bibNumber, reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id)); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel atribuir o numero de peito.'); }
+    finally { setActionLoading(''); }
+  };
+
   if (!adminKey || error === 'Acesso administrativo não autorizado.') {
     return (
       <LoginScreen
@@ -239,8 +287,8 @@ export function AdminPage() {
         <aside className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 w-70 border-r border-white/10 bg-zinc-950/95 px-3 py-4 backdrop-blur-sm transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
           <Sidebar
             activeNav={activeNav}
-            onSelect={(label) => {
-              setActiveNav(label);
+            onSelect={(key) => {
+              setActiveNav(key);
               setSidebarOpen(false);
             }}
           />
@@ -270,17 +318,20 @@ export function AdminPage() {
             )}
 
             <AdminSection
+              adminKey={adminKey}
               activeNav={activeNav}
               summary={summary}
               dashboard={dashboard}
               registrations={registrations}
               auditLogs={auditLogs}
               filters={filters}
+              registrationPagination={registrationPagination}
               loading={loading}
               onFiltersChange={setFilters}
               onSearch={handleSearch}
-              onOpenRegistration={setSelectedRegistration}
+              onOpenRegistration={(registration) => void openRegistration(registration)}
               onExport={() => void downloadCsv()}
+              onRegistrationUpdated={updateRegistration}
             />
           </div>
         </section>
@@ -291,63 +342,66 @@ export function AdminPage() {
         actionLoading={actionLoading}
         onCheckIn={handleCheckIn}
         onKitDelivery={handleKitDelivery}
-        onClose={() => setSelectedRegistration(null)}
+        onMaintenance={handleMaintenance}
+        onUpdate={handleRegistrationUpdate}
+        details={registrationDetails}
+        onAssignBib={handleBibNumber}
+        onClose={() => { setSelectedRegistration(null); setRegistrationDetails(null); }}
       />
     </main>
   );
 }
 
 function AdminSection({
+  adminKey,
   activeNav,
   summary,
   dashboard,
   registrations,
   auditLogs,
   filters,
+  registrationPagination,
   loading,
   onFiltersChange,
   onSearch,
   onOpenRegistration,
   onExport,
+  onRegistrationUpdated,
 }: {
-  activeNav: string;
+  adminKey: string;
+  activeNav: AdminNavKey;
   summary: AdminSummaryResponse | null;
   dashboard: DashboardModel;
   registrations: AdminRegistration[];
   auditLogs: AdminAuditLog[];
   filters: AdminFilters;
+  registrationPagination: { page: number; pageSize: number; total: number; totalPages: number };
   loading: boolean;
   onFiltersChange: (filters: AdminFilters) => void;
   onSearch: (event: FormEvent) => void;
   onOpenRegistration: (registration: AdminRegistration) => void;
   onExport: () => void;
+  onRegistrationUpdated: (registration: AdminRegistration) => void;
 }) {
-  if (activeNav === 'Pagamentos') {
+  if (activeNav === 'payments') {
     return (
       <>
         <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
-        <PaymentControlPanel registrations={registrations} dashboard={dashboard} />
+        <PaymentControlPanel registrations={registrations} dashboard={dashboard} adminKey={adminKey} onRegistrationUpdated={onRegistrationUpdated} />
       </>
     );
   }
 
-  if (activeNav === 'Operacao') {
+  if (activeNav === 'operation') {
     return (
       <>
         <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
-        <div className="mt-4 grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
-          <Panel title="Operacao presencial" eyebrow="Kit e check-in">
-            <OperationsPanel auditLogs={auditLogs} />
-          </Panel>
-          <Panel title="Fila operacional" eyebrow="Atletas pagos">
-            <OperationalQueue registrations={registrations} onOpenRegistration={onOpenRegistration} />
-          </Panel>
-        </div>
+        <OperationControlPanel registrations={registrations} auditLogs={auditLogs} onOpenRegistration={onOpenRegistration} />
       </>
     );
   }
 
-  if (activeNav === 'Relatorios') {
+  if (activeNav === 'reports') {
     return (
       <>
         <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
@@ -356,7 +410,7 @@ function AdminSection({
     );
   }
 
-  if (activeNav === 'Auditoria') {
+  if (activeNav === 'audit') {
     return (
       <>
         <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
@@ -372,6 +426,7 @@ function AdminSection({
         summary={summary}
         registrations={registrations}
         filters={filters}
+        pagination={registrationPagination}
         loading={loading}
         onFiltersChange={onFiltersChange}
         onSearch={onSearch}
@@ -421,7 +476,11 @@ function LoginScreen({
   );
 }
 
-function Sidebar({ activeNav, onSelect }: { activeNav: string; onSelect: (label: string) => void }) {
+function getNavLabel(key: AdminNavKey) {
+  return navItems.find((item) => item.key === key)?.label || 'Admin';
+}
+
+function Sidebar({ activeNav, onSelect }: { activeNav: AdminNavKey; onSelect: (key: AdminNavKey) => void }) {
   return (
     <div className="flex h-full flex-col">
       <div className="mb-5 border-b border-white/10 px-3 pb-5">
@@ -433,13 +492,13 @@ function Sidebar({ activeNav, onSelect }: { activeNav: string; onSelect: (label:
         <div className="space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const active = activeNav === item.label;
+            const active = activeNav === item.key;
 
             return (
               <button
                 type="button"
-                key={item.label}
-                onClick={() => onSelect(item.label)}
+                key={item.key}
+                onClick={() => onSelect(item.key)}
                 className={`flex w-full items-center gap-3 rounded px-3 py-2.5 text-left text-sm font-bold transition-colors ${active ? 'bg-brand text-black' : 'text-zinc-300 hover:bg-white/5 hover:text-white'
                   }`}
               >
@@ -474,7 +533,7 @@ function Topbar({
   onRefresh,
   onExport,
 }: {
-  activeNav: string;
+  activeNav: AdminNavKey;
   loading: boolean;
   onOpenSidebar: () => void;
   onRefresh: () => void;
@@ -493,7 +552,7 @@ function Topbar({
             <Menu className="h-5 w-5" />
           </button>
           <div className="min-w-0">
-            <p className="text-xs font-black uppercase tracking-widest text-brand">{activeNav}</p>
+            <p className="text-xs font-black uppercase tracking-widest text-brand">{getNavLabel(activeNav)}</p>
             <h1 className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operações FunPace Run</h1>
           </div>
         </div>
@@ -646,14 +705,50 @@ function ControlSummary({
 function PaymentControlPanel({
   registrations,
   dashboard,
+  adminKey,
+  onRegistrationUpdated,
 }: {
   registrations: AdminRegistration[];
   dashboard: DashboardModel;
+  adminKey: string;
+  onRegistrationUpdated: (registration: AdminRegistration) => void;
 }) {
+  const [filter, setFilter] = useState<'all' | 'divergent' | 'pending' | 'expired' | 'manual' | 'email'>('all');
+  const [details, setDetails] = useState<AdminPaymentDetailsResponse | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [reason, setReason] = useState('');
+  const [actionError, setActionError] = useState('');
   const paid = registrations.filter((registration) => registration.status === 'paid');
   const pending = registrations.filter((registration) => registration.status === 'pending_payment');
   const failed = registrations.filter((registration) => ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(registration.status));
   const paidWithoutEmail = paid.filter((registration) => !registration.confirmationEmailSentAt);
+  const filtered = registrations.filter((registration) => {
+    if (filter === 'divergent') return registration.hasPaymentDivergence;
+    if (filter === 'pending') return registration.status === 'pending_payment';
+    if (filter === 'expired') return registration.status === 'expired';
+    if (filter === 'manual') return registration.gatewayStatus === 'manual_reconciled_paid';
+    if (filter === 'email') return registration.status === 'paid' && !registration.confirmationEmailSentAt;
+    return true;
+  });
+
+  const openDetails = async (registration: AdminRegistration) => {
+    setDetailLoading(true); setActionError('');
+    try { setDetails(await getAdminPaymentDetails(adminKey, registration.id)); }
+    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel carregar o pagamento.'); }
+    finally { setDetailLoading(false); }
+  };
+
+  const reconcile = async () => {
+    if (!details) return;
+    setDetailLoading(true); setActionError('');
+    try {
+      const response = await reconcileAdminPayment(adminKey, details.payment.id, reason);
+      onRegistrationUpdated(response.registration);
+      setDetails(await getAdminPaymentDetails(adminKey, response.registration.id));
+      setReason('');
+    } catch (error) { setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel conciliar o pagamento.'); }
+    finally { setDetailLoading(false); }
+  };
 
   return (
     <div className="mt-4 grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
@@ -670,6 +765,11 @@ function PaymentControlPanel({
       </Panel>
 
       <Panel title="Últimos pagamentos" eyebrow="Controle operacional">
+        <div className="mb-4 flex flex-wrap gap-2">
+          {([['all','Todos'],['divergent','Divergentes'],['pending','Pendentes'],['expired','Expirados'],['manual','Manuais'],['email','Sem email']] as const).map(([value, label]) => (
+            <button key={value} type="button" onClick={() => setFilter(value)} className={`border px-3 py-2 text-xs font-black uppercase ${filter === value ? 'border-brand text-brand' : 'border-white/10 text-zinc-400'}`}>{label}</button>
+          ))}
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-190 text-left">
             <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
@@ -682,7 +782,7 @@ function PaymentControlPanel({
               </tr>
             </thead>
             <tbody>
-              {registrations.slice(0, 12).map((registration) => (
+              {filtered.slice(0, 50).map((registration) => (
                 <tr key={registration.id} className="border-t border-white/10">
                   <td className="p-3">
                     <p className="font-bold">{registration.fullName}</p>
@@ -694,13 +794,152 @@ function PaymentControlPanel({
                   </td>
                   <td className="p-3 font-mono font-bold">{currencyFormatter.format(registration.amountCents / 100)}</td>
                   <td className="p-3 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(registration.createdAt))}</td>
+                  <td className="p-3 text-xs text-zinc-400">
+                    <p>{registration.gatewayStatus || 'Gateway nao informado'}</p>
+                    <p className="mt-1 uppercase">{registration.paymentMethod || 'Metodo nao informado'}</p>
+                    {registration.paidAt && <p className="mt-1 font-mono">Pago: {dateTimeFormatter.format(new Date(registration.paidAt))}</p>}
+                    {registration.hasPaymentDivergence && <p className="mt-1 font-black text-red-300">VALOR DIVERGENTE</p>}
+                    <button type="button" onClick={() => void openDetails(registration)} className="mt-2 inline-flex items-center gap-1 border border-white/10 px-2 py-1 hover:border-brand hover:text-brand"><Eye className="h-3 w-3" /> Detalhes</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </Panel>
+      {(details || detailLoading || actionError) && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/75">
+          <button type="button" aria-label="Fechar" className="absolute inset-0" onClick={() => { setDetails(null); setActionError(''); }} />
+          <aside className="relative h-full w-full max-w-2xl overflow-y-auto border-l border-white/10 bg-zinc-950 p-5">
+            <div className="flex justify-between"><h2 className="text-xl font-black">Detalhes do pagamento</h2><button type="button" onClick={() => { setDetails(null); setActionError(''); }}><X /></button></div>
+            {detailLoading && !details && <p className="mt-6 text-zinc-400">Carregando...</p>}
+            {actionError && <p className="mt-4 border border-red-400/20 bg-red-400/10 p-3 text-red-200">{actionError}</p>}
+            {details && <>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <Detail label="Inscricao" value={details.payment.id} /><Detail label="Atleta" value={details.payment.fullName} />
+                <Detail label="Status sistema" value={statusLabels[details.payment.status]} /><Detail label="Status gateway" value={details.payment.gatewayStatus || 'Nao informado'} />
+                <Detail label="Transacao InfinitePay" value={details.payment.gatewayTransactionId || details.payment.providerPaymentId || 'Nao informada'} /><Detail label="Metodo" value={details.payment.paymentMethod || 'Nao informado'} />
+              </div>
+              <p className="mb-2 mt-5 text-xs font-black uppercase text-zinc-500">Payload do gateway</p>
+              <pre className="max-h-72 overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(details.gatewayPayload, null, 2) || 'Nenhum payload recebido'}</pre>
+              <p className="mb-2 mt-5 text-xs font-black uppercase text-zinc-500">Eventos ({details.events.length})</p>
+              {details.events.map((event) => <div key={event.id} className="border-t border-white/10 py-3"><p className="font-bold">{event.eventType}</p><p className="font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(event.receivedAt))} · {event.providerEventId}</p></div>)}
+              {details.payment.status !== 'paid' && <div className="mt-5 border border-amber-400/20 p-4"><label className="text-xs font-black uppercase text-amber-200">Motivo da conciliacao manual</label><textarea value={reason} onChange={(event) => setReason(event.target.value)} className="mt-2 min-h-24 w-full border border-white/10 bg-black p-3" /><button type="button" disabled={detailLoading || reason.trim().length < 5} onClick={() => void reconcile()} className="mt-3 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40">Marcar como pago e conciliar</button></div>}
+            </>}
+          </aside>
+        </div>
+      )}
     </div>
+  );
+}
+
+function OperationControlPanel({
+  registrations,
+  auditLogs,
+  onOpenRegistration,
+}: {
+  registrations: AdminRegistration[];
+  auditLogs: AdminAuditLog[];
+  onOpenRegistration: (registration: AdminRegistration) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'kit_pending' | 'checkin_pending' | 'completed'>('all');
+  const paidRegistrations = registrations.filter((registration) => registration.status === 'paid');
+  const normalizedQuery = normalizeSearch(query);
+  const kitPending = paidRegistrations.filter((registration) => registration.kitStatus !== 'delivered');
+  const checkInPending = paidRegistrations.filter((registration) => registration.checkInStatus !== 'checked_in');
+  const completed = paidRegistrations.filter((registration) => registration.kitStatus === 'delivered' && registration.checkInStatus === 'checked_in');
+  const filteredRegistrations = paidRegistrations
+    .filter((registration) => {
+      if (statusFilter === 'kit_pending') {
+        return registration.kitStatus !== 'delivered';
+      }
+
+      if (statusFilter === 'checkin_pending') {
+        return registration.checkInStatus !== 'checked_in';
+      }
+
+      if (statusFilter === 'completed') {
+        return registration.kitStatus === 'delivered' && registration.checkInStatus === 'checked_in';
+      }
+
+      return true;
+    })
+    .filter((registration) => {
+      if (!normalizedQuery) {
+        return true;
+      }
+
+      return [
+        registration.id,
+        registration.fullName,
+        registration.email,
+        registration.phone,
+        registration.cpfMasked,
+        registration.distance,
+        registration.shirtSize,
+      ].some((value) => normalizeSearch(value).includes(normalizedQuery));
+    });
+
+  return (
+    <section className="mt-4 grid gap-4 xl:grid-cols-[0.72fr_1.28fr]">
+      <Panel title="Controle presencial" eyebrow="Operação">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <MetricBox label="Aptos para operação" value={paidRegistrations.length} detail="Inscrições pagas" />
+          <MetricBox label="Kit pendente" value={kitPending.length} detail="Ainda não retirado" tone={kitPending.length > 0 ? 'warning' : 'default'} />
+          <MetricBox label="Check-in pendente" value={checkInPending.length} detail="Ainda não realizado" tone={checkInPending.length > 0 ? 'warning' : 'default'} />
+          <MetricBox label="Concluídos" value={completed.length} detail="Kit + check-in" />
+        </div>
+
+        <div className="mt-4 border border-white/10 bg-black/35 p-4">
+          <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Busca rápida</p>
+          <div className="relative mt-3">
+            <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="min-h-12 w-full border border-zinc-800 bg-black py-3 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand"
+              placeholder="Nome, CPF, e-mail, telefone ou ID"
+            />
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <OperationFilterButton active={statusFilter === 'all'} label="Todos pagos" onClick={() => setStatusFilter('all')} />
+            <OperationFilterButton active={statusFilter === 'kit_pending'} label="Kit pendente" onClick={() => setStatusFilter('kit_pending')} />
+            <OperationFilterButton active={statusFilter === 'checkin_pending'} label="Check-in pendente" onClick={() => setStatusFilter('checkin_pending')} />
+            <OperationFilterButton active={statusFilter === 'completed'} label="Concluídos" onClick={() => setStatusFilter('completed')} />
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <OperationsPanel auditLogs={auditLogs} />
+        </div>
+      </Panel>
+
+      <Panel title="Fila de atendimento" eyebrow="Kit e check-in" action={`${filteredRegistrations.length} atletas`}>
+        <OperationalQueue registrations={filteredRegistrations} onOpenRegistration={onOpenRegistration} />
+      </Panel>
+    </section>
+  );
+}
+
+function OperationFilterButton({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`min-h-10 border px-3 text-left text-xs font-black uppercase tracking-widest transition-colors ${active ? 'border-brand bg-brand text-black' : 'border-white/10 bg-white/3 text-zinc-300 hover:border-brand hover:text-brand'
+        }`}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -711,9 +950,7 @@ function OperationalQueue({
   registrations: AdminRegistration[];
   onOpenRegistration: (registration: AdminRegistration) => void;
 }) {
-  const paidRegistrations = registrations.filter((registration) => registration.status === 'paid');
-
-  if (paidRegistrations.length === 0) {
+  if (registrations.length === 0) {
     return <EmptyState />;
   }
 
@@ -730,7 +967,7 @@ function OperationalQueue({
           </tr>
         </thead>
         <tbody>
-          {paidRegistrations.slice(0, 18).map((registration) => (
+          {registrations.map((registration) => (
             <tr key={registration.id} className="border-t border-white/10">
               <td className="p-3">
                 <p className="font-bold">{registration.fullName}</p>
@@ -761,6 +998,216 @@ function OperationalQueue({
 }
 
 function ReportsPanel({
+  summary,
+  dashboard,
+  registrations,
+  onExport,
+}: {
+  summary: AdminSummaryResponse | null;
+  dashboard: DashboardModel;
+  registrations: AdminRegistration[];
+  onExport: () => void;
+}) {
+  const paidRegistrations = registrations.filter((registration) => registration.status === 'paid');
+  const pendingRegistrations = registrations.filter((registration) => registration.status === 'pending_payment');
+  const confirmedPayments = registrations.filter((registration) => registration.paymentStatus === 'paid' || registration.status === 'paid');
+  const manualPayments = registrations.filter((registration) => registration.gatewayStatus === 'manual_reconciled_paid');
+  const confirmationEmailSent = paidRegistrations.filter((registration) => registration.confirmationEmailSentAt);
+  const confirmationEmailMissing = paidRegistrations.filter((registration) => !registration.confirmationEmailSentAt);
+  const confirmationEmailFailed = paidRegistrations.filter((registration) => registration.confirmationEmailError);
+  const kitDelivered = paidRegistrations.filter((registration) => registration.kitStatus === 'delivered');
+  const checkIns = paidRegistrations.filter((registration) => registration.checkInStatus === 'checked_in');
+  const shirtSizes = registrations.reduce<Record<string, number>>((accumulator, registration) => {
+    accumulator[registration.shirtSize] = (accumulator[registration.shirtSize] || 0) + 1;
+    return accumulator;
+  }, {});
+  const distanceRows = summary?.byDistance.map((distance) => ({
+    label: distance.name,
+    total: distance.total,
+    paid: distance.paid,
+    pending: registrations.filter((registration) => registration.distanceId === distance.id && registration.status === 'pending_payment').length,
+  })) || [];
+  const reportCards = [
+    { label: 'Inscritos pagos', value: paidRegistrations.length, detail: currencyFormatter.format(dashboard.revenueCents / 100), icon: BadgeCheck },
+    { label: 'Inscritos pendentes', value: pendingRegistrations.length, detail: 'Aguardando pagamento', icon: TimerReset },
+    { label: 'Pagamentos confirmados', value: confirmedPayments.length, detail: 'Banco + gateway', icon: CreditCard },
+    { label: 'Conciliados manualmente', value: manualPayments.length, detail: 'Ajustes auditados', icon: ShieldCheck },
+    { label: 'Emails enviados', value: confirmationEmailSent.length, detail: 'Confirmacao', icon: Mail },
+    { label: 'Emails pendentes/falhos', value: confirmationEmailMissing.length + confirmationEmailFailed.length, detail: 'Exigem conferencia', icon: Activity },
+    { label: 'Kits retirados', value: kitDelivered.length, detail: `${paidRegistrations.length - kitDelivered.length} pendentes`, icon: Shirt },
+    { label: 'Check-ins', value: checkIns.length, detail: `${paidRegistrations.length - checkIns.length} pendentes`, icon: ClipboardCheck },
+  ];
+  const alerts = [
+    confirmationEmailMissing.length > 0 ? `${confirmationEmailMissing.length} inscritos pagos sem email de confirmacao.` : '',
+    confirmationEmailFailed.length > 0 ? `${confirmationEmailFailed.length} emails de confirmacao com erro registrado.` : '',
+    pendingRegistrations.length > 0 ? `${pendingRegistrations.length} inscrições ainda pendentes de pagamento.` : '',
+  ].filter(Boolean);
+
+  return (
+    <section className="mt-4 space-y-4">
+      <Panel title="Central de relatorios" eyebrow="Exportacao e conferencia">
+        <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
+          <div>
+            <p className="text-sm leading-relaxed text-zinc-400">
+              Relatorios operacionais para conferir inscritos, pagamentos, camisetas, kit, check-in e emails de confirmacao.
+            </p>
+            <p className="mt-2 text-xs font-bold uppercase tracking-widest text-zinc-500">
+              O CSV exporta a base completa com campos de pagamento, gateway e email.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onExport}
+            className="flex min-h-12 items-center justify-center gap-2 bg-brand px-4 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white"
+          >
+            <Download className="h-4 w-4" /> Exportar CSV
+          </button>
+        </div>
+      </Panel>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {reportCards.map((card) => (
+          <ReportCard key={card.label} {...card} />
+        ))}
+      </div>
+
+      {alerts.length > 0 && (
+        <Panel title="Alertas de conferencia" eyebrow="Atenção">
+          <div className="grid gap-2">
+            {alerts.map((alert) => (
+              <div key={alert} className="border border-amber-400/20 bg-amber-400/10 p-3 text-sm font-bold text-amber-100">
+                {alert}
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Panel title="Lista por distancia" eyebrow="Inscrições">
+          <ReportTable
+            columns={['Distancia', 'Total', 'Pagos', 'Pendentes']}
+            rows={distanceRows.map((row) => [row.label, row.total, row.paid, row.pending])}
+          />
+        </Panel>
+
+        <Panel title="Lista por tamanho de camisa" eyebrow="Produção">
+          <ReportTable
+            columns={['Camisa', 'Quantidade']}
+            rows={Object.entries(shirtSizes)
+              .sort(([a], [b]) => shirtSizeOrder(a) - shirtSizeOrder(b))
+              .map(([size, total]) => [`Camisa ${size}`, total])}
+          />
+        </Panel>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-3">
+        <ReportList title="Retirada de kit" eyebrow="Operação" registrations={kitDelivered} emptyMessage="Nenhum kit entregue ainda." />
+        <ReportList title="Check-in" eyebrow="Operação" registrations={checkIns} emptyMessage="Nenhum check-in realizado ainda." />
+        <ReportList title="Emails pendentes/falhos" eyebrow="Confirmação" registrations={[...confirmationEmailMissing, ...confirmationEmailFailed]} emptyMessage="Todos os pagos tem email enviado." />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <ReportList title="Inscritos pagos" eyebrow="Pagamento" registrations={paidRegistrations} emptyMessage="Nenhuma inscrição paga." />
+        <ReportList title="Inscritos pendentes" eyebrow="Pagamento" registrations={pendingRegistrations} emptyMessage="Nenhuma inscrição pendente." />
+      </div>
+    </section>
+  );
+}
+
+function ReportCard({ label, value, detail, icon: Icon }: { label: string; value: string | number; detail: string; icon: LucideIcon }) {
+  return (
+    <div className="border border-white/10 bg-zinc-950/80 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-black uppercase tracking-widest text-zinc-500">{label}</p>
+          <p className="mt-3 font-mono text-2xl font-black">{value}</p>
+        </div>
+        <div className="flex h-10 w-10 items-center justify-center border border-white/10 bg-white/3">
+          <Icon className="h-5 w-5 text-brand" />
+        </div>
+      </div>
+      <p className="mt-4 text-xs font-bold uppercase tracking-widest text-zinc-500">{detail}</p>
+    </div>
+  );
+}
+
+function ReportTable({ columns, rows }: { columns: string[]; rows: Array<Array<string | number>> }) {
+  if (rows.length === 0) {
+    return <p className="text-sm text-zinc-500">Nenhum dado disponivel.</p>;
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-120 text-left">
+        <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
+          <tr>
+            {columns.map((column) => (
+              <th key={column} className="p-3">{column}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.join('-')} className="border-t border-white/10">
+              {row.map((cell, index) => (
+                <td key={`${row.join('-')}-${index}`} className="p-3 text-sm font-bold text-zinc-300">{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ReportList({
+  title,
+  eyebrow,
+  registrations,
+  emptyMessage,
+}: {
+  title: string;
+  eyebrow: string;
+  registrations: AdminRegistration[];
+  emptyMessage: string;
+}) {
+  const rows = registrations.slice(0, 8);
+
+  return (
+    <Panel title={title} eyebrow={eyebrow} action={`${registrations.length} registros`}>
+      {rows.length === 0 ? (
+        <p className="text-sm text-zinc-500">{emptyMessage}</p>
+      ) : (
+        <div className="space-y-3">
+          {rows.map((registration) => (
+            <div key={registration.id} className="border border-white/10 bg-black/35 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-zinc-100">{registration.fullName}</p>
+                  <p className="mt-1 truncate font-mono text-xs text-zinc-500">{registration.email}</p>
+                </div>
+                <span className="shrink-0 text-xs font-black uppercase tracking-widest text-brand">{registration.distance}</span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-black uppercase tracking-widest text-zinc-500">
+                <span>Camisa {registration.shirtSize}</span>
+                <span>{statusLabels[registration.status]}</span>
+                <span>{currencyFormatter.format(registration.amountCents / 100)}</span>
+              </div>
+            </div>
+          ))}
+          {registrations.length > rows.length && (
+            <p className="text-xs font-bold uppercase tracking-widest text-zinc-500">
+              Mais {registrations.length - rows.length} registros no CSV.
+            </p>
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function LegacyReportsPanel({
   summary,
   dashboard,
   registrations,
@@ -877,6 +1324,7 @@ function RegistrationsPanel({
   summary,
   registrations,
   filters,
+  pagination,
   loading,
   onFiltersChange,
   onSearch,
@@ -885,6 +1333,7 @@ function RegistrationsPanel({
   summary: AdminSummaryResponse | null;
   registrations: AdminRegistration[];
   filters: AdminFilters;
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
   loading: boolean;
   onFiltersChange: (filters: AdminFilters) => void;
   onSearch: (event: FormEvent) => void;
@@ -912,15 +1361,15 @@ function RegistrationsPanel({
             <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
             <input
               value={filters.q}
-              onChange={(event) => onFiltersChange({ ...filters, q: event.target.value })}
+              onChange={(event) => onFiltersChange({ ...filters, q: event.target.value, page: '1' })}
               className="min-h-12 w-full border border-zinc-800 bg-black py-3 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand"
               placeholder="Pesquisa inteligente: nome, email ou telefone"
             />
           </div>
-          <SelectFilter value={filters.status} onChange={(value) => onFiltersChange({ ...filters, status: value })} options={statusOptions} />
+          <SelectFilter value={filters.status} onChange={(value) => onFiltersChange({ ...filters, status: value, page: '1' })} options={statusOptions} />
           <SelectFilter
             value={filters.distanceId}
-            onChange={(value) => onFiltersChange({ ...filters, distanceId: value })}
+            onChange={(value) => onFiltersChange({ ...filters, distanceId: value, page: '1' })}
             options={[
               { value: '', label: 'Todas distancias' },
               ...(summary?.byDistance.map((distance) => ({ value: distance.id, label: distance.name })) || []),
@@ -928,13 +1377,17 @@ function RegistrationsPanel({
           />
           <SelectFilter
             value={filters.lotId}
-            onChange={(value) => onFiltersChange({ ...filters, lotId: value })}
+            onChange={(value) => onFiltersChange({ ...filters, lotId: value, page: '1' })}
             options={[
               { value: '', label: 'Todos lotes' },
               ...(summary?.lots.map((lot) => ({ value: lot.id, label: lot.name })) || []),
             ]}
           />
         </form>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-500">
+          <span>{pagination.total} resultado(s)</span>
+          <button type="button" onClick={() => onFiltersChange({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: filters.pageSize })} className="border border-white/10 px-3 py-2 font-black uppercase hover:border-brand hover:text-brand">Limpar filtros</button>
+        </div>
       </div>
 
       {loading && registrations.length === 0 ? (
@@ -1000,21 +1453,74 @@ function RegistrationsPanel({
           </table>
         </div>
       )}
+      {pagination.totalPages > 1 && <div className="flex items-center justify-between border-t border-white/10 p-4">
+        <button type="button" disabled={pagination.page <= 1 || loading} onClick={() => onFiltersChange({ ...filters, page: String(pagination.page - 1) })} className="border border-white/10 px-4 py-2 text-xs font-black uppercase disabled:opacity-30">Anterior</button>
+        <span className="font-mono text-xs text-zinc-400">Pagina {pagination.page} de {pagination.totalPages}</span>
+        <button type="button" disabled={pagination.page >= pagination.totalPages || loading} onClick={() => onFiltersChange({ ...filters, page: String(pagination.page + 1) })} className="border border-white/10 px-4 py-2 text-xs font-black uppercase disabled:opacity-30">Proxima</button>
+      </div>}
     </section>
   );
 }
 
+function RegistrationEditForm({ registration, loading, onSave }: { registration: AdminRegistration; loading: boolean; onSave: (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [form, setForm] = useState<AdminRegistrationEditable>(() => ({
+    fullName: registration.fullName, email: registration.email, phone: registration.phone, birthDate: registration.birthDate,
+    gender: registration.gender, shirtSize: registration.shirtSize, emergencyContactName: registration.emergencyContactName,
+    emergencyContactPhone: registration.emergencyContactPhone, city: registration.city, state: registration.state, team: registration.team,
+  }));
+  const update = (field: keyof AdminRegistrationEditable, value: string) => setForm((current) => ({ ...current, [field]: value }));
+  if (!open) return <button type="button" onClick={() => setOpen(true)} className="mt-5 w-full border border-white/10 px-4 py-3 text-xs font-black uppercase hover:border-brand hover:text-brand">Editar dados cadastrais</button>;
+  return <div className="mt-5 border border-white/10 bg-black/30 p-4">
+    <div className="mb-4 flex justify-between"><p className="text-xs font-black uppercase text-brand">Editar cadastro</p><button type="button" onClick={() => setOpen(false)}><X className="h-4 w-4" /></button></div>
+    <div className="grid gap-3 sm:grid-cols-2">
+      <EditInput label="Nome" value={form.fullName} onChange={(value) => update('fullName', value)} />
+      <EditInput label="Email" type="email" value={form.email} onChange={(value) => update('email', value)} />
+      <EditInput label="Telefone" value={form.phone} onChange={(value) => update('phone', value)} />
+      <EditInput label="Nascimento" type="date" value={form.birthDate} onChange={(value) => update('birthDate', value)} />
+      <EditInput label="Cidade" value={form.city || ''} onChange={(value) => update('city', value)} />
+      <EditInput label="UF" value={form.state || ''} maxLength={2} onChange={(value) => update('state', value.toUpperCase())} />
+      <EditInput label="Equipe" value={form.team || ''} onChange={(value) => update('team', value)} />
+      <EditInput label="Contato de emergencia" value={form.emergencyContactName} onChange={(value) => update('emergencyContactName', value)} />
+      <EditInput label="Telefone emergencia" value={form.emergencyContactPhone} onChange={(value) => update('emergencyContactPhone', value)} />
+      <label className="text-xs font-bold text-zinc-400">Sexo<select value={form.gender} onChange={(event) => update('gender', event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="female">Feminino</option><option value="male">Masculino</option></select></label>
+      <label className="text-xs font-bold text-zinc-400">Camisa<select value={form.shirtSize} onChange={(event) => update('shirtSize', event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white">{eventInfo.shirtSizes.map((size) => <option key={size}>{size}</option>)}</select></label>
+    </div>
+    <label className="mt-3 block text-xs font-bold text-zinc-400">Motivo da alteracao<textarea value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1 min-h-20 w-full border border-white/10 bg-black p-3 text-white" /></label>
+    <button type="button" disabled={loading || reason.trim().length < 5} onClick={() => void onSave(registration, form, reason).then(() => { setOpen(false); setReason(''); })} className="mt-3 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40">{loading ? 'Salvando...' : 'Salvar alteracoes'}</button>
+  </div>;
+}
+
+function EditInput({ label, value, onChange, type = 'text', maxLength }: { label: string; value: string; onChange: (value: string) => void; type?: string; maxLength?: number }) {
+  return <label className="text-xs font-bold text-zinc-400">{label}<input type={type} maxLength={maxLength} value={value} onChange={(event) => onChange(event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white" /></label>;
+}
+
+function OperationalQr({ registrationId }: { registrationId: string }) {
+  const [dataUrl, setDataUrl] = useState('');
+  useEffect(() => { void QRCode.toDataURL(`funpace:registration:${registrationId}`, { width: 320, margin: 2, color: { dark: '#000000', light: '#d7ff00' } }).then(setDataUrl); }, [registrationId]);
+  return <div className="flex aspect-square items-center justify-center border border-white/10 bg-brand p-3">{dataUrl ? <img src={dataUrl} alt={`QR Code da inscricao ${registrationId}`} className="h-full w-full" /> : <Loader2 className="h-8 w-8 animate-spin text-black" />}</div>;
+}
+
 function AthleteDrawer({
   registration,
+  details,
   actionLoading,
   onCheckIn,
   onKitDelivery,
+  onMaintenance,
+  onUpdate,
+  onAssignBib,
   onClose,
 }: {
   registration: AdminRegistration | null;
-  actionLoading: 'check-in' | 'kit' | '';
+  details: AdminRegistrationDetailsResponse | null;
+  actionLoading: string;
   onCheckIn: (registration: AdminRegistration) => void;
   onKitDelivery: (registration: AdminRegistration) => void;
+  onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit') => void;
+  onUpdate: (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => Promise<void>;
+  onAssignBib: (registration: AdminRegistration) => void;
   onClose: () => void;
 }) {
   if (!registration) {
@@ -1061,10 +1567,11 @@ function AthleteDrawer({
           <Detail label="Telefone emergencia" value={registration.emergencyContactPhone} />
         </div>
 
+        <RegistrationEditForm registration={registration} loading={actionLoading === 'edit'} onSave={onUpdate} />
+        <button type="button" disabled={actionLoading !== ''} onClick={() => onAssignBib(registration)} className="mt-3 w-full border border-brand/30 px-4 py-3 text-xs font-black uppercase text-brand">{registration.bibNumber ? 'Alterar numero de peito' : 'Atribuir numero de peito'}</button>
+
         <div className="mt-5 grid gap-4 sm:grid-cols-[160px_1fr]">
-          <div className="flex aspect-square items-center justify-center border border-white/10 bg-black">
-            <QrCode className="h-20 w-20 text-brand" />
-          </div>
+          <OperationalQr registrationId={registration.id} />
           <div className="border border-white/10 bg-white/3 p-4">
             <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Pagamento</p>
             <div className="mt-3">
@@ -1096,9 +1603,16 @@ function AthleteDrawer({
           </button>
         </div>
 
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {registration.status === 'paid' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'resend-email')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Reenviar email</button>}
+          {registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
+          {registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
+          {!['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscricao</button>}
+        </div>
+
         {!canOperate && (
           <p className="mt-3 border border-amber-400/20 bg-amber-400/10 p-3 text-xs font-bold uppercase tracking-wider text-amber-100">
-            Operacoes presenciais liberadas apenas para inscricoes pagas.
+            Operacoes presenciais liberadas apenas para inscrições pagas.
           </p>
         )}
 
@@ -1119,6 +1633,8 @@ function AthleteDrawer({
               detail={registration.checkInStatus === 'checked_in' ? `Realizado${registration.checkInAt ? ` em ${dateTimeFormatter.format(new Date(registration.checkInAt))}` : ''}` : 'Nao realizado'}
               muted={registration.checkInStatus !== 'checked_in'}
             />
+            {details?.auditLogs.map((log) => <TimelineItem key={log.id} icon={Activity} title={auditActionLabel(log.action)} detail={`${dateTimeFormatter.format(new Date(log.createdAt))} por ${log.actor}`} />)}
+            {details?.paymentEvents.map((event) => <TimelineItem key={event.id} icon={CreditCard} title={event.eventType} detail={dateTimeFormatter.format(new Date(event.receivedAt))} />)}
           </div>
         </div>
       </aside>
@@ -1348,9 +1864,9 @@ function EmptyState() {
   return (
     <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
       <Ticket className="h-10 w-10 text-zinc-600" />
-      <h3 className="mt-5 text-xl font-black">Nenhuma inscricao encontrada</h3>
+      <h3 className="mt-5 text-xl font-black">Nenhuma inscrição encontrada</h3>
       <p className="mt-2 max-w-md text-sm leading-relaxed text-zinc-500">
-        Ajuste os filtros ou aguarde novas inscricoes. Quando houver atletas, eles aparecerao nesta mesa operacional.
+        Ajuste os filtros ou aguarde novas inscrições. Quando houver atletas, eles aparecerao nesta mesa operacional.
       </p>
     </div>
   );
@@ -1478,6 +1994,20 @@ function getInitials(name: string) {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase())
     .join('');
+}
+
+function normalizeSearch(value: string | null | undefined) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}@.]+/gu, '');
+}
+
+function shirtSizeOrder(size: string) {
+  const order = ['PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG'];
+  const index = order.indexOf(size.toUpperCase());
+  return index === -1 ? order.length : index;
 }
 
 function genderLabel(gender: AdminRegistration['gender']) {

@@ -13,6 +13,9 @@ const initialRegistration: RegistrationFormData = {
   email: '',
   cpf: '',
   phone: '',
+  city: '',
+  state: '',
+  team: '',
   birthDate: '',
   gender: '',
   shirtSize: 'M',
@@ -187,6 +190,12 @@ export function RegistrationSection() {
                   ))}
                 </select>
               </Field>
+            </div>
+
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-3 md:gap-6">
+              <Field label="Cidade" error={errors.city}><input required value={formData.city} onChange={(event) => updateField('city', event.target.value)} className={inputClass} placeholder="Sua cidade" /></Field>
+              <Field label="UF" error={errors.state}><input required maxLength={2} value={formData.state} onChange={(event) => updateField('state', event.target.value.toUpperCase())} className={inputClass} placeholder="RO" /></Field>
+              <Field label="Equipe / Assessoria" error={errors.team}><input value={formData.team} onChange={(event) => updateField('team', event.target.value)} className={inputClass} placeholder="Opcional" /></Field>
             </div>
 
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
