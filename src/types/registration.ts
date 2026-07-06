@@ -48,10 +48,15 @@ export type CreateRegistrationResponse = {
 export type RegistrationStatusResponse = {
   registrationId: string;
   status: RegistrationStatus;
+  paymentStatus?: RegistrationStatus;
   amountCents: number;
   createdAt: string;
   updatedAt: string;
   expiresAt: string | null;
+  paidAt?: string | null;
+  confirmedAt?: string | null;
+  gatewayStatus?: string | null;
+  gatewayTransactionId?: string | null;
   pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
 };

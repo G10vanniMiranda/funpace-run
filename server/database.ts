@@ -51,10 +51,15 @@ export type RegistrationRecord = {
   createdAt: string;
   updatedAt: string;
   expiresAt?: string | null;
+  paidAt?: string | null;
+  confirmedAt?: string | null;
   pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
   pendingEmailLastAttemptAt?: string | null;
   confirmationEmailLastAttemptAt?: string | null;
+  confirmationEmailProvider?: string | null;
+  confirmationEmailId?: string | null;
+  confirmationEmailError?: string | null;
 };
 
 export type PaymentRecord = {
@@ -68,6 +73,10 @@ export type PaymentRecord = {
   createdAt: string;
   updatedAt: string;
   expiresAt?: string | null;
+  paidAt?: string | null;
+  gatewayStatus?: string | null;
+  gatewayTransactionId?: string | null;
+  gatewayPayload?: unknown;
 };
 
 export type PaymentEventRecord = {
@@ -332,10 +341,15 @@ async function ensurePostgresDatabase(client: Queryable) {
       created_at text not null,
       updated_at text not null,
       expires_at text,
+      paid_at text,
+      confirmed_at text,
       pending_email_sent_at text,
       confirmation_email_sent_at text,
       pending_email_last_attempt_at text,
-      confirmation_email_last_attempt_at text
+      confirmation_email_last_attempt_at text,
+      confirmation_email_provider text,
+      confirmation_email_id text,
+      confirmation_email_error text
     );
 
     create table if not exists ${table.payments} (
@@ -348,7 +362,11 @@ async function ensurePostgresDatabase(client: Queryable) {
       checkout_url text,
       created_at text not null,
       updated_at text not null,
-      expires_at text
+      expires_at text,
+      paid_at text,
+      gateway_status text,
+      gateway_transaction_id text,
+      gateway_payload jsonb
     );
 
     create table if not exists ${table.paymentEvents} (
@@ -412,11 +430,20 @@ async function ensurePostgresDatabase(client: Queryable) {
   `);
 
   await client.query(`alter table ${table.registrations} add column if not exists expires_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists paid_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists confirmed_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists pending_email_sent_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_sent_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists pending_email_last_attempt_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_last_attempt_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_provider text`);
+  await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_id text`);
+  await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_error text`);
   await client.query(`alter table ${table.payments} add column if not exists expires_at text`);
+  await client.query(`alter table ${table.payments} add column if not exists paid_at text`);
+  await client.query(`alter table ${table.payments} add column if not exists gateway_status text`);
+  await client.query(`alter table ${table.payments} add column if not exists gateway_transaction_id text`);
+  await client.query(`alter table ${table.payments} add column if not exists gateway_payload jsonb`);
 
   const existingEvents = await client.query(`select count(*)::int as count from ${table.events}`);
 
@@ -445,7 +472,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     distances: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
     lots: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
     registrations: ['all', 'availability', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
-    payments: ['all', 'checkout', 'admin-registrations'].includes(scope),
+    payments: ['all', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
     paymentEvents: ['all', 'checkout'].includes(scope),
     checkIns: ['all', 'admin-registrations'].includes(scope),
     kitDeliveries: ['all', 'admin-registrations'].includes(scope),
@@ -457,8 +484,8 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     include.events ? client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows,
     include.distances ? client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows,
     include.lots ? client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows,
-    include.registrations ? client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at from ${table.registrations}`) : emptyRows,
-    include.payments ? client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at from ${table.payments}`) : emptyRows,
+    include.registrations ? client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error from ${table.registrations}`) : emptyRows,
+    include.payments ? client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows,
     include.paymentEvents ? client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows,
     include.checkIns ? client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows,
     include.kitDeliveries ? client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows,
@@ -509,10 +536,15 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       expiresAt: row.expires_at,
+      paidAt: row.paid_at,
+      confirmedAt: row.confirmed_at,
       pendingEmailSentAt: row.pending_email_sent_at,
       confirmationEmailSentAt: row.confirmation_email_sent_at,
       pendingEmailLastAttemptAt: row.pending_email_last_attempt_at,
       confirmationEmailLastAttemptAt: row.confirmation_email_last_attempt_at,
+      confirmationEmailProvider: row.confirmation_email_provider,
+      confirmationEmailId: row.confirmation_email_id,
+      confirmationEmailError: row.confirmation_email_error,
     })),
     payments: payments.rows.map((row) => ({
       id: row.id,
@@ -525,6 +557,10 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       expiresAt: row.expires_at,
+      paidAt: row.paid_at,
+      gatewayStatus: row.gateway_status,
+      gatewayTransactionId: row.gateway_transaction_id,
+      gatewayPayload: row.gateway_payload,
     })),
     paymentEvents: paymentEvents.rows.map((row) => ({
       id: row.id,
@@ -625,8 +661,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -637,10 +673,15 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          payload = excluded.payload,
          updated_at = excluded.updated_at,
          expires_at = excluded.expires_at,
+         paid_at = excluded.paid_at,
+         confirmed_at = excluded.confirmed_at,
          pending_email_sent_at = excluded.pending_email_sent_at,
          confirmation_email_sent_at = excluded.confirmation_email_sent_at,
          pending_email_last_attempt_at = excluded.pending_email_last_attempt_at,
-         confirmation_email_last_attempt_at = excluded.confirmation_email_last_attempt_at`,
+         confirmation_email_last_attempt_at = excluded.confirmation_email_last_attempt_at,
+         confirmation_email_provider = excluded.confirmation_email_provider,
+         confirmation_email_id = excluded.confirmation_email_id,
+         confirmation_email_error = excluded.confirmation_email_error`,
       [
         item.id,
         item.eventId,
@@ -653,18 +694,23 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.createdAt,
         item.updatedAt,
         item.expiresAt || null,
+        item.paidAt || null,
+        item.confirmedAt || null,
         item.pendingEmailSentAt || null,
         item.confirmationEmailSentAt || null,
         item.pendingEmailLastAttemptAt || null,
         item.confirmationEmailLastAttemptAt || null,
+        item.confirmationEmailProvider || null,
+        item.confirmationEmailId || null,
+        item.confirmationEmailError || null,
       ],
     );
   }
 
   for (const item of database.payments) {
     await client.query(
-      `insert into ${table.payments} (id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `insert into ${table.payments} (id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        on conflict (id) do update set
          registration_id = excluded.registration_id,
          provider = excluded.provider,
@@ -673,8 +719,27 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          provider_payment_id = excluded.provider_payment_id,
          checkout_url = excluded.checkout_url,
          updated_at = excluded.updated_at,
-         expires_at = excluded.expires_at`,
-      [item.id, item.registrationId, item.provider, item.status, item.amountCents, item.providerPaymentId, item.checkoutUrl, item.createdAt, item.updatedAt, item.expiresAt || null],
+         expires_at = excluded.expires_at,
+         paid_at = excluded.paid_at,
+         gateway_status = excluded.gateway_status,
+         gateway_transaction_id = excluded.gateway_transaction_id,
+         gateway_payload = excluded.gateway_payload`,
+      [
+        item.id,
+        item.registrationId,
+        item.provider,
+        item.status,
+        item.amountCents,
+        item.providerPaymentId,
+        item.checkoutUrl,
+        item.createdAt,
+        item.updatedAt,
+        item.expiresAt || null,
+        item.paidAt || null,
+        item.gatewayStatus || null,
+        item.gatewayTransactionId || null,
+        item.gatewayPayload || null,
+      ],
     );
   }
 
@@ -886,13 +951,13 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     const amountCents = Number(lot.price_cents);
 
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null)`,
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null, null, null, null, null, null)`,
       [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now, input.expiresAt],
     );
     await client.query(
-      `insert into ${table.payments} (id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at)
-       values ($1, $2, $3, $4, $5, null, null, $6, $6, $7)`,
+      `insert into ${table.payments} (id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload)
+       values ($1, $2, $3, $4, $5, null, null, $6, $6, $7, null, null, null, null)`,
       [paymentId, registrationId, input.paymentProvider || 'not_configured', 'pending_payment', amountCents, now, input.expiresAt],
     );
     await client.query(

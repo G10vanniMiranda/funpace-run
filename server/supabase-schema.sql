@@ -43,10 +43,15 @@ create table if not exists "run-registrations" (
   created_at text not null,
   updated_at text not null,
   expires_at text,
+  paid_at text,
+  confirmed_at text,
   pending_email_sent_at text,
   confirmation_email_sent_at text,
   pending_email_last_attempt_at text,
-  confirmation_email_last_attempt_at text
+  confirmation_email_last_attempt_at text,
+  confirmation_email_provider text,
+  confirmation_email_id text,
+  confirmation_email_error text
 );
 
 create table if not exists "run-payments" (
@@ -59,7 +64,11 @@ create table if not exists "run-payments" (
   checkout_url text,
   created_at text not null,
   updated_at text not null,
-  expires_at text
+  expires_at text,
+  paid_at text,
+  gateway_status text,
+  gateway_transaction_id text,
+  gateway_payload jsonb
 );
 
 create table if not exists "run-payment-events" (
@@ -122,11 +131,20 @@ create index if not exists "run-partnership-leads_status_idx" on "run-partnershi
 create index if not exists "run-partnership-leads_created_at_idx" on "run-partnership-leads"(created_at);
 
 alter table "run-registrations" add column if not exists expires_at text;
+alter table "run-registrations" add column if not exists paid_at text;
+alter table "run-registrations" add column if not exists confirmed_at text;
 alter table "run-registrations" add column if not exists pending_email_sent_at text;
 alter table "run-registrations" add column if not exists confirmation_email_sent_at text;
 alter table "run-registrations" add column if not exists pending_email_last_attempt_at text;
 alter table "run-registrations" add column if not exists confirmation_email_last_attempt_at text;
+alter table "run-registrations" add column if not exists confirmation_email_provider text;
+alter table "run-registrations" add column if not exists confirmation_email_id text;
+alter table "run-registrations" add column if not exists confirmation_email_error text;
 alter table "run-payments" add column if not exists expires_at text;
+alter table "run-payments" add column if not exists paid_at text;
+alter table "run-payments" add column if not exists gateway_status text;
+alter table "run-payments" add column if not exists gateway_transaction_id text;
+alter table "run-payments" add column if not exists gateway_payload jsonb;
 
 insert into "run-events" (id, name, slug, status, date, start_time, location_name, city, state)
 values (

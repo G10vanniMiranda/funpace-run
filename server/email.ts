@@ -22,6 +22,7 @@ const resendApiKey = process.env.RESEND_API_KEY || '';
 const emailFrom = process.env.EMAIL_FROM || '';
 const emailReplyTo = process.env.EMAIL_REPLY_TO || emailFrom;
 const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || process.env.APP_URL || 'https://www.funpace.club').replace(/\/$/, '');
+const whatsappNumber = (process.env.VITE_WHATSAPP_NUMBER || '').replace(/\D/g, '');
 
 export function getEmailProvider() {
   return emailProvider || 'not_configured';
@@ -116,6 +117,9 @@ function buildRegistrationEmail(kind: RegistrationEmailKind, context: Registrati
     ['Horário', event.startTime],
     ['Local', getEventLocation(event)],
   ];
+  const whatsappUrl = whatsappNumber
+    ? `https://wa.me/55${whatsappNumber}?text=${encodeURIComponent(`Ola, preciso de suporte sobre minha inscricao ${registration.id} na FunPace Run.`)}`
+    : '';
 
   const rowsHtml = details.map(([label, value]) => `
     <tr>
@@ -164,6 +168,7 @@ function buildRegistrationEmail(kind: RegistrationEmailKind, context: Registrati
             <tr>
               <td style="padding:26px 28px;">
                 <a href="${siteUrl}/regulamento" style="display:inline-block;background:#d7ff00;color:#000000;text-decoration:none;font:900 13px Arial,sans-serif;text-transform:uppercase;letter-spacing:.12em;padding:16px 18px;">Ver regulamento</a>
+                ${whatsappUrl ? `<a href="${whatsappUrl}" style="display:inline-block;margin-left:8px;color:#ffffff;text-decoration:none;font:900 13px Arial,sans-serif;text-transform:uppercase;letter-spacing:.12em;padding:16px 0;">Suporte WhatsApp</a>` : ''}
               </td>
             </tr>
             <tr>
@@ -188,6 +193,7 @@ function buildRegistrationEmail(kind: RegistrationEmailKind, context: Registrati
     '',
     'A retirada do kit terá local, data e horário divulgados nos canais oficiais da FunPace.',
     `Regulamento: ${siteUrl}/regulamento`,
+    ...(whatsappUrl ? [`Suporte WhatsApp: ${whatsappUrl}`] : []),
     `Contato oficial: ${emailReplyTo}`,
     '',
     copy.closing,
@@ -258,4 +264,8 @@ export async function sendRegistrationEmail(kind: RegistrationEmailKind, context
     provider,
     providerMessageId: payload?.id || undefined,
   };
+}
+
+export function sendRegistrationConfirmationEmail(context: RegistrationEmailContext) {
+  return sendRegistrationEmail('confirmation', context);
 }

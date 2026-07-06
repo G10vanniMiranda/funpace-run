@@ -18,7 +18,7 @@ import {
   type PaymentRecord,
   type RegistrationRecord,
 } from './database.js';
-import { getEmailProvider, isEmailConfigured, sendRegistrationEmail, type RegistrationEmailContext, type RegistrationEmailKind } from './email.js';
+import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, sendRegistrationEmail, type RegistrationEmailContext, type RegistrationEmailKind } from './email.js';
 import { createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 
 const port = Number(process.env.API_PORT || 3001);
@@ -456,33 +456,181 @@ function expirePendingPayments(database: Database, now = new Date()) {
   return expiredCount;
 }
 
+function findFirstValue(payload: unknown, keys: string[], depth = 0): unknown {
+  if (!payload || typeof payload !== 'object' || depth > 4) {
+    return undefined;
+  }
+
+  const record = payload as Record<string, unknown>;
+
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null && record[key] !== '') {
+      return record[key];
+    }
+  }
+
+  for (const value of Object.values(record)) {
+    const found = findFirstValue(value, keys, depth + 1);
+
+    if (found !== undefined && found !== null && found !== '') {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+function toStringValue(value: unknown) {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    ? String(value).trim()
+    : '';
+}
+
+function toNumberValue(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number(value.replace(',', '.'));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function normalizeGatewayAmount(value: unknown) {
+  const parsed = toNumberValue(value);
+
+  if (parsed === null) {
+    return null;
+  }
+
+  return Number.isInteger(parsed) ? parsed : Math.round(parsed * 100);
+}
+
 function toPaymentProviderStatus(event: {
-  status?: RegistrationStatus;
+  status?: string;
   paid?: boolean;
-  amount?: number;
-  paid_amount?: number;
+  amount?: number | string;
+  paid_amount?: number | string;
 } | null): RegistrationStatus {
   if (!event) {
     return 'pending_payment';
   }
 
-  if (event.status === 'paid' || event.paid === true) {
+  const status = String(event.status || '').trim().toLowerCase();
+  const paidStatuses = new Set(['paid', 'approved', 'confirmed', 'completed', 'captured', 'settled', 'success', 'succeeded']);
+  const failedStatuses = new Set(['payment_failed', 'failed', 'declined', 'denied', 'refused', 'rejected']);
+  const cancelledStatuses = new Set(['cancelled', 'canceled', 'voided']);
+
+  if (paidStatuses.has(status) || event.paid === true) {
     return 'paid';
   }
 
-  if (typeof event.amount === 'number' && typeof event.paid_amount === 'number' && event.paid_amount >= event.amount) {
+  const amount = normalizeGatewayAmount(event.amount);
+  const paidAmount = normalizeGatewayAmount(event.paid_amount);
+
+  if (amount !== null && paidAmount !== null && paidAmount >= amount) {
     return 'paid';
   }
 
-  if (event.status === 'cancelled' || event.status === 'refunded' || event.status === 'expired') {
-    return event.status;
+  if (cancelledStatuses.has(status)) {
+    return 'cancelled';
   }
 
-  if (event.status === 'payment_failed') {
+  if (status === 'refunded') {
+    return 'refunded';
+  }
+
+  if (status === 'expired') {
+    return 'expired';
+  }
+
+  if (failedStatuses.has(status)) {
     return 'payment_failed';
   }
 
   return 'pending_payment';
+}
+
+type NormalizedPaymentWebhook = {
+  registrationId: string;
+  providerEventId: string;
+  providerTransactionId: string;
+  providerPaymentId: string;
+  eventType: string;
+  gatewayStatus: string;
+  amountCents: number | null;
+  paidAmountCents: number | null;
+  receiptUrl: string;
+  nextStatus: RegistrationStatus;
+};
+
+function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWebhook | null {
+  if (!rawEvent || typeof rawEvent !== 'object') {
+    return null;
+  }
+
+  const registrationId = toStringValue(findFirstValue(rawEvent, [
+    'registrationId',
+    'registration_id',
+    'order_nsu',
+    'orderNsu',
+    'order_id',
+    'orderId',
+    'external_id',
+    'externalId',
+    'reference_id',
+    'referenceId',
+  ]));
+  const providerTransactionId = toStringValue(findFirstValue(rawEvent, [
+    'transaction_nsu',
+    'transactionNsu',
+    'transaction_id',
+    'transactionId',
+    'transaction_uuid',
+    'payment_id',
+    'paymentId',
+  ]));
+  const providerPaymentId = toStringValue(findFirstValue(rawEvent, [
+    'invoice_slug',
+    'invoiceSlug',
+    'slug',
+    'checkout_slug',
+    'checkoutSlug',
+  ]));
+  const providerEventId = toStringValue(findFirstValue(rawEvent, [
+    'providerEventId',
+    'event_id',
+    'eventId',
+    'id',
+  ])) || providerTransactionId || providerPaymentId;
+  const eventType = toStringValue(findFirstValue(rawEvent, ['eventType', 'event_type', 'type'])) || 'infinitepay.payment_status_changed';
+  const gatewayStatus = toStringValue(findFirstValue(rawEvent, ['status', 'payment_status', 'paymentStatus']));
+  const amountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['amount', 'amount_cents', 'amountCents', 'total_amount']));
+  const paidAmountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['paid_amount', 'paidAmount', 'paid_amount_cents']));
+  const paidValue = findFirstValue(rawEvent, ['paid']);
+  const paid = paidValue === true || String(paidValue).toLowerCase() === 'true';
+  const nextStatus = toPaymentProviderStatus({
+    status: gatewayStatus,
+    paid,
+    amount: amountCents ?? undefined,
+    paid_amount: paidAmountCents ?? undefined,
+  });
+
+  return {
+    registrationId,
+    providerEventId,
+    providerTransactionId,
+    providerPaymentId,
+    eventType,
+    gatewayStatus,
+    amountCents,
+    paidAmountCents,
+    receiptUrl: toStringValue(findFirstValue(rawEvent, ['receipt_url', 'receiptUrl'])),
+    nextStatus,
+  };
 }
 
 type PendingCheckout = CreateRegistrationResponse & {
@@ -619,7 +767,9 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      result = await sendRegistrationEmail(kind, context);
+      result = kind === 'confirmation'
+        ? await sendRegistrationConfirmationEmail(context)
+        : await sendRegistrationEmail(kind, context);
     } catch (error) {
       result = {
         ok: false,
@@ -646,6 +796,12 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
 
     if (result.ok) {
       registration[sentField] = completedAt;
+    }
+
+    if (kind === 'confirmation') {
+      registration.confirmationEmailProvider = result.provider;
+      registration.confirmationEmailId = result.ok ? result.providerMessageId || null : registration.confirmationEmailId || null;
+      registration.confirmationEmailError = result.ok ? null : result.error || 'Email send failed';
     }
 
     database.auditLogs.push({
@@ -814,10 +970,15 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       createdAt: now,
       updatedAt: now,
       expiresAt,
+      paidAt: null,
+      confirmedAt: null,
       pendingEmailSentAt: null,
       confirmationEmailSentAt: null,
       pendingEmailLastAttemptAt: null,
       confirmationEmailLastAttemptAt: null,
+      confirmationEmailProvider: null,
+      confirmationEmailId: null,
+      confirmationEmailError: null,
     };
     const payment: PaymentRecord = {
       id: randomUUID(),
@@ -830,6 +991,10 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       createdAt: now,
       updatedAt: now,
       expiresAt,
+      paidAt: null,
+      gatewayStatus: null,
+      gatewayTransactionId: null,
+      gatewayPayload: null,
     };
 
     activeLot.soldCount += 1;
@@ -1025,51 +1190,73 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const event = parseJsonBody<{
-    registrationId?: string;
-    status?: RegistrationStatus;
-    providerEventId?: string;
-    eventType?: string;
-    order_nsu?: string;
-    transaction_nsu?: string;
-    invoice_slug?: string;
-    slug?: string;
-    amount?: number;
-    paid_amount?: number;
-    paid?: boolean;
-    capture_method?: string;
-    receipt_url?: string;
-  }>(rawBody);
+  const event = parseJsonBody<unknown>(rawBody);
+  const normalizedEvent = normalizePaymentWebhook(event);
 
-  const registrationId = event?.registrationId || event?.order_nsu || '';
-  const nextStatus = toPaymentProviderStatus(event);
+  console.log(JSON.stringify({
+    at: new Date().toISOString(),
+    message: 'payment_webhook_received',
+    provider: 'infinitepay',
+    path: url.pathname,
+    authorizedBy: url.searchParams.get('token') === webhookSecret ? 'token' : signature ? 'signature' : 'none',
+    normalized: normalizedEvent,
+  }));
 
-  if (!registrationId || !event) {
+  if (!normalizedEvent) {
     json(res, 422, { message: 'Webhook invalido.' });
     return;
   }
 
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
+  const result = await transaction<{ statusCode: number; payload: unknown; registrationId?: string; nextStatus?: RegistrationStatus }>((database) => {
     expirePendingPayments(database);
 
-    const registration = database.registrations.find((item) => item.id === registrationId);
+    const paymentByGatewayId = database.payments.find((item) => (
+      Boolean(normalizedEvent.providerPaymentId) && item.providerPaymentId === normalizedEvent.providerPaymentId
+    ) || (
+      Boolean(normalizedEvent.providerTransactionId)
+      && (item.gatewayTransactionId === normalizedEvent.providerTransactionId || item.providerPaymentId === normalizedEvent.providerTransactionId)
+    ));
+    const registration = database.registrations.find((item) => (
+      Boolean(normalizedEvent.registrationId) && item.id === normalizedEvent.registrationId
+    ) || (
+      paymentByGatewayId && item.id === paymentByGatewayId.registrationId
+    ));
 
     if (!registration) {
+      console.error(JSON.stringify({
+        at: new Date().toISOString(),
+        message: 'payment_webhook_registration_not_found',
+        provider: 'infinitepay',
+        registrationId: normalizedEvent.registrationId || null,
+        providerPaymentId: normalizedEvent.providerPaymentId || null,
+        providerTransactionId: normalizedEvent.providerTransactionId || null,
+      }));
+
       return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
     }
 
     const payment = database.payments.find((item) => item.registrationId === registration.id);
     const now = new Date().toISOString();
-    const providerEventId = event.providerEventId || event.transaction_nsu || event.invoice_slug || event.slug || '';
+    const providerEventId = normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId || '';
+    const nextStatus = normalizedEvent.nextStatus;
 
-    if (typeof event.amount === 'number' && event.amount !== registration.amountCents) {
+    if (normalizedEvent.amountCents !== null && normalizedEvent.amountCents !== registration.amountCents) {
       return { statusCode: 400, payload: { message: 'Valor do pagamento divergente.' } };
     }
 
     const isDuplicatedEvent = Boolean(providerEventId && database.paymentEvents.some((item) => item.providerEventId === providerEventId));
 
     if (isDuplicatedEvent && !(nextStatus === 'paid' && registration.status !== 'paid')) {
-      return { statusCode: 200, payload: { ok: true, duplicated: true } };
+      console.log(JSON.stringify({
+        at: now,
+        message: 'payment_webhook_duplicate',
+        provider: 'infinitepay',
+        registrationId: registration.id,
+        providerEventId,
+        status: registration.status,
+      }));
+
+      return { statusCode: 200, payload: { ok: true, duplicated: true }, registrationId: registration.id, nextStatus };
     }
 
     const previousStatus = registration.status;
@@ -1084,6 +1271,8 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
 
     if (nextStatus === 'paid') {
       registration.expiresAt = null;
+      registration.paidAt = registration.paidAt || now;
+      registration.confirmedAt = registration.confirmedAt || now;
 
       if (wasExpired) {
         claimRegistrationCapacity(database, registration);
@@ -1094,10 +1283,14 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
 
     if (payment) {
       payment.provider = 'infinitepay';
-      payment.providerPaymentId = event.transaction_nsu || event.invoice_slug || event.slug || payment.providerPaymentId;
+      payment.providerPaymentId = normalizedEvent.providerPaymentId || normalizedEvent.providerTransactionId || payment.providerPaymentId;
       payment.status = nextStatus;
       payment.updatedAt = now;
+      payment.paidAt = nextStatus === 'paid' ? payment.paidAt || now : payment.paidAt || null;
       payment.expiresAt = nextStatus === 'paid' ? null : payment.expiresAt;
+      payment.gatewayStatus = normalizedEvent.gatewayStatus || nextStatus;
+      payment.gatewayTransactionId = normalizedEvent.providerTransactionId || payment.gatewayTransactionId || null;
+      payment.gatewayPayload = event;
     }
 
     if (!isDuplicatedEvent) {
@@ -1105,20 +1298,50 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
         id: randomUUID(),
         paymentId: payment?.id || '',
         providerEventId: providerEventId || randomUUID(),
-        eventType: event.eventType || 'infinitepay.payment_status_changed',
+        eventType: normalizedEvent.eventType,
         payload: event,
         receivedAt: now,
       });
     }
 
-    return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined } };
+    database.auditLogs.push({
+      id: randomUUID(),
+      actor: 'system',
+      action: 'payment.webhook_processed',
+      entityType: 'registration',
+      entityId: registration.id,
+      payload: {
+        provider: 'infinitepay',
+        providerEventId: providerEventId || null,
+        providerPaymentId: normalizedEvent.providerPaymentId || null,
+        providerTransactionId: normalizedEvent.providerTransactionId || null,
+        previousStatus,
+        nextStatus,
+      },
+      createdAt: now,
+    });
+
+    console.log(JSON.stringify({
+      at: now,
+      message: 'payment_webhook_processed',
+      provider: 'infinitepay',
+      registrationId: registration.id,
+      paymentId: payment?.id || null,
+      providerEventId: providerEventId || null,
+      providerPaymentId: normalizedEvent.providerPaymentId || null,
+      providerTransactionId: normalizedEvent.providerTransactionId || null,
+      previousStatus,
+      nextStatus,
+    }));
+
+    return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined }, registrationId: registration.id, nextStatus };
   }, { scope: 'checkout' });
 
-  if (result.statusCode === 200 && nextStatus === 'paid') {
-    await processRegistrationEmail('confirmation', registrationId);
-  }
-
   json(res, result.statusCode, result.payload);
+
+  if (result.statusCode === 200 && result.nextStatus === 'paid' && result.registrationId) {
+    await processRegistrationEmail('confirmation', result.registrationId);
+  }
 }
 
 async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
@@ -1131,16 +1354,22 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     json(res, 404, { message: 'Inscricao nao encontrada.' });
     return;
   }
+  const payment = database.payments.find((item) => item.registrationId === registration.id);
 
   json(res, 200, {
     registrationId: registration.id,
     status: registration.status,
+    paymentStatus: payment?.status || registration.status,
     amountCents: registration.amountCents,
     distanceId: registration.distanceId,
     lotId: registration.lotId,
     createdAt: registration.createdAt,
     updatedAt: registration.updatedAt,
     expiresAt: registration.expiresAt || null,
+    paidAt: registration.paidAt || null,
+    confirmedAt: registration.confirmedAt || null,
+    gatewayStatus: payment?.gatewayStatus || null,
+    gatewayTransactionId: payment?.gatewayTransactionId || payment?.providerPaymentId || null,
     pendingEmailSentAt: registration.pendingEmailSentAt || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
   });
