@@ -192,6 +192,23 @@ export type PendingRegistrationResult = CreateRegistrationResponse & {
   description?: string;
 };
 
+export type RegistrationEmailDeliveryKind = 'pending' | 'confirmation';
+
+export type RegistrationEmailDeliveryContext = {
+  registration: RegistrationRecord;
+  event: EventRecord;
+  distanceName: string;
+  lot: LotRecord | null;
+  deliveryKey: string;
+};
+
+export type RegistrationEmailDeliveryResult = {
+  ok: boolean;
+  provider: string;
+  providerMessageId?: string;
+  error?: string;
+};
+
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
 type DatabaseReadScope =
   | 'all'
@@ -1250,6 +1267,176 @@ export async function markPaymentCreationFailedInPostgres(registrationId: string
       );
     }
 
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function claimRegistrationEmailInPostgres(
+  kind: RegistrationEmailDeliveryKind,
+  registrationId: string,
+  provider: string,
+  options: { force?: boolean } = {},
+): Promise<RegistrationEmailDeliveryContext | null> {
+  const client = await requirePool().connect();
+  const sentColumn = kind === 'pending' ? 'pending_email_sent_at' : 'confirmation_email_sent_at';
+  const attemptColumn = kind === 'pending' ? 'pending_email_last_attempt_at' : 'confirmation_email_last_attempt_at';
+
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+
+    const result = await client.query(
+      `select registration.*, event.name as event_name, event.slug as event_slug,
+              event.status as event_status, event.date as event_date, event.start_time,
+              event.location_name, event.city as event_city, event.state as event_state,
+              distance.name as distance_name,
+              lot.name as lot_name, lot.price_cents as lot_price_cents,
+              lot.capacity as lot_capacity, lot.sold_count as lot_sold_count,
+              lot.status as lot_status, lot.starts_at, lot.ends_at
+       from ${table.registrations} registration
+       join ${table.events} event on event.id = registration.event_id
+       join ${table.distances} distance on distance.id = registration.distance_id
+       left join ${table.lots} lot on lot.id = registration.lot_id
+       where registration.id = $1
+       for update of registration`,
+      [registrationId],
+    );
+    const row = result.rows[0];
+
+    if (!row || (kind === 'confirmation' && row.status !== 'paid')) {
+      await client.query('commit');
+      return null;
+    }
+
+    const recentAttempt = row[attemptColumn]
+      && Date.now() - new Date(row[attemptColumn]).getTime() < 5 * 60_000;
+
+    if (!options.force && (row[sentColumn] || recentAttempt)) {
+      await client.query('commit');
+      return null;
+    }
+
+    const attemptedAt = new Date().toISOString();
+    const deliveryKey = options.force
+      ? `${kind}/${registrationId}/${randomUUID()}`
+      : `${kind}/${registrationId}`;
+
+    await client.query(
+      `update ${table.registrations} set ${attemptColumn} = $1 where id = $2`,
+      [attemptedAt, registrationId],
+    );
+    await client.query(
+      `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7)`,
+      [randomUUID(), 'system', `email.${kind}.attempted`, 'registration', registrationId, {
+        provider,
+        email: row.payload.email,
+        deliveryKey,
+      }, attemptedAt],
+    );
+    await client.query('commit');
+
+    return {
+      registration: {
+        id: row.id,
+        eventId: row.event_id,
+        distanceId: row.distance_id,
+        lotId: row.lot_id,
+        cpfHash: row.cpf_hash,
+        status: row.status,
+        amountCents: row.amount_cents,
+        payload: row.payload,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        expiresAt: row.expires_at,
+        paidAt: row.paid_at,
+        confirmedAt: row.confirmed_at,
+        bibNumber: row.bib_number,
+        pendingEmailSentAt: row.pending_email_sent_at,
+        confirmationEmailSentAt: row.confirmation_email_sent_at,
+        pendingEmailLastAttemptAt: kind === 'pending' ? attemptedAt : row.pending_email_last_attempt_at,
+        confirmationEmailLastAttemptAt: kind === 'confirmation' ? attemptedAt : row.confirmation_email_last_attempt_at,
+        confirmationEmailProvider: row.confirmation_email_provider,
+        confirmationEmailId: row.confirmation_email_id,
+        confirmationEmailError: row.confirmation_email_error,
+      },
+      event: {
+        id: row.event_id,
+        name: row.event_name,
+        slug: row.event_slug,
+        status: row.event_status,
+        date: row.event_date,
+        startTime: row.start_time,
+        locationName: row.location_name,
+        city: row.event_city,
+        state: row.event_state,
+      },
+      distanceName: row.distance_name,
+      lot: row.lot_name ? {
+        id: row.lot_id,
+        eventId: row.event_id,
+        name: row.lot_name,
+        priceCents: row.lot_price_cents,
+        capacity: row.lot_capacity,
+        soldCount: row.lot_sold_count,
+        status: row.lot_status,
+        startsAt: row.starts_at,
+        endsAt: row.ends_at,
+      } : null,
+      deliveryKey,
+    };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function completeRegistrationEmailInPostgres(
+  kind: RegistrationEmailDeliveryKind,
+  registrationId: string,
+  result: RegistrationEmailDeliveryResult,
+) {
+  const client = await requirePool().connect();
+  const sentColumn = kind === 'pending' ? 'pending_email_sent_at' : 'confirmation_email_sent_at';
+  const completedAt = new Date().toISOString();
+
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    if (kind === 'confirmation') {
+      await client.query(
+        `update ${table.registrations}
+         set ${sentColumn} = case when $1 then $2 else ${sentColumn} end,
+             confirmation_email_provider = $3,
+             confirmation_email_id = case when $1 then $4 else confirmation_email_id end,
+             confirmation_email_error = case when $1 then null else $5 end
+         where id = $6`,
+        [result.ok, completedAt, result.provider, result.providerMessageId || null, result.error || 'Email send failed', registrationId],
+      );
+    } else {
+      await client.query(
+        `update ${table.registrations}
+         set ${sentColumn} = case when $1 then $2 else ${sentColumn} end
+         where id = $3`,
+        [result.ok, completedAt, registrationId],
+      );
+    }
+    await client.query(
+      `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7)`,
+      [randomUUID(), 'system', result.ok ? `email.${kind}.sent` : `email.${kind}.failed`, 'registration', registrationId, {
+        provider: result.provider,
+        providerMessageId: result.providerMessageId || null,
+        error: result.ok ? null : result.error || 'Email send failed',
+      }, completedAt],
+    );
     await client.query('commit');
   } catch (error) {
     await client.query('rollback').catch(() => undefined);

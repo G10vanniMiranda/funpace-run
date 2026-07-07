@@ -7,6 +7,7 @@ export type RegistrationEmailContext = {
   event: EventRecord;
   distanceName: string;
   lot: LotRecord | null;
+  deliveryKey?: string;
 };
 
 export type EmailSendResult = {
@@ -238,7 +239,9 @@ export async function sendRegistrationEmail(kind: RegistrationEmailKind, context
     headers: {
       Authorization: `Bearer ${resendApiKey}`,
       'Content-Type': 'application/json',
+      ...(context.deliveryKey ? { 'Idempotency-Key': context.deliveryKey } : {}),
     },
+    signal: AbortSignal.timeout(10_000),
     body: JSON.stringify({
       from: emailFrom,
       to,

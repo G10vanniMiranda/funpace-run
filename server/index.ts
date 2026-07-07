@@ -6,6 +6,8 @@ import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStat
 import { canUndoCheckIn, canUndoKit, getCheckInConflictMessage, getKitConflictMessage, validateBibAssignment } from './admin-guards.js';
 import {
   attachCheckoutToPaymentInPostgres,
+  claimRegistrationEmailInPostgres,
+  completeRegistrationEmailInPostgres,
   createPendingRegistrationInPostgres,
   getDatabaseConfigurationIssue,
   getDatabaseRuntimeConfig,
@@ -977,60 +979,65 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
     return;
   }
 
-  const context = await transaction<RegistrationEmailContext | null>((database) => {
-    const registration = database.registrations.find((item) => item.id === registrationId);
+  const context = usesPostgresDatabase()
+    ? await claimRegistrationEmailInPostgres(kind, registrationId, provider, options)
+    : await transaction<RegistrationEmailContext | null>((database) => {
+      const registration = database.registrations.find((item) => item.id === registrationId);
 
-    if (!registration) {
-      return null;
-    }
+      if (!registration) {
+        return null;
+      }
 
-    if (registration[sentField] && !options.force) {
-      return null;
-    }
+      if (registration[sentField] && !options.force) {
+        return null;
+      }
 
-    const event = database.events.find((item) => item.id === registration.eventId);
-    const distance = database.distances.find((item) => item.id === registration.distanceId);
-    const lot = database.lots.find((item) => item.id === registration.lotId) || null;
+      const event = database.events.find((item) => item.id === registration.eventId);
+      const distance = database.distances.find((item) => item.id === registration.distanceId);
+      const lot = database.lots.find((item) => item.id === registration.lotId) || null;
 
-    if (!event || !distance) {
+      if (!event || !distance) {
+        database.auditLogs.push({
+          id: randomUUID(),
+          actor: 'system',
+          action: `email.${kind}.failed`,
+          entityType: 'registration',
+          entityId: registration.id,
+          payload: {
+            provider,
+            email: registration.payload.email,
+            reason: 'registration email context missing',
+          },
+          createdAt: now,
+        });
+        return null;
+      }
+
+      registration[attemptField] = now;
+
       database.auditLogs.push({
         id: randomUUID(),
         actor: 'system',
-        action: `email.${kind}.failed`,
+        action: `email.${kind}.attempted`,
         entityType: 'registration',
         entityId: registration.id,
         payload: {
           provider,
           email: registration.payload.email,
-          reason: 'registration email context missing',
         },
         createdAt: now,
       });
-      return null;
-    }
 
-    registration[attemptField] = now;
-
-    database.auditLogs.push({
-      id: randomUUID(),
-      actor: 'system',
-      action: `email.${kind}.attempted`,
-      entityType: 'registration',
-      entityId: registration.id,
-      payload: {
-        provider,
-        email: registration.payload.email,
-      },
-      createdAt: now,
-    });
-
-    return {
-      registration: { ...registration, payload: { ...registration.payload } },
-      event: { ...event },
-      distanceName: distance.name,
-      lot: lot ? { ...lot } : null,
-    };
-  }, { scope: 'checkout' });
+      return {
+        registration: { ...registration, payload: { ...registration.payload } },
+        event: { ...event },
+        distanceName: distance.name,
+        lot: lot ? { ...lot } : null,
+        deliveryKey: options.force
+          ? `${kind}/${registration.id}/${randomUUID()}`
+          : `${kind}/${registration.id}`,
+      };
+    }, { scope: 'checkout' });
 
   if (!context) {
     return;
@@ -1061,22 +1068,25 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
 
   const completedAt = new Date().toISOString();
 
-  await transaction((database) => {
-    const registration = database.registrations.find((item) => item.id === registrationId);
+  if (usesPostgresDatabase()) {
+    await completeRegistrationEmailInPostgres(kind, registrationId, result);
+  } else {
+    await transaction((database) => {
+      const registration = database.registrations.find((item) => item.id === registrationId);
 
-    if (!registration) {
-      return;
-    }
+      if (!registration) {
+        return;
+      }
 
-    if (result.ok) {
-      registration[sentField] = completedAt;
-    }
+      if (result.ok) {
+        registration[sentField] = completedAt;
+      }
 
-    if (kind === 'confirmation') {
-      registration.confirmationEmailProvider = result.provider;
-      registration.confirmationEmailId = result.ok ? result.providerMessageId || null : registration.confirmationEmailId || null;
-      registration.confirmationEmailError = result.ok ? null : result.error || 'Email send failed';
-    }
+      if (kind === 'confirmation') {
+        registration.confirmationEmailProvider = result.provider;
+        registration.confirmationEmailId = result.ok ? result.providerMessageId || null : registration.confirmationEmailId || null;
+        registration.confirmationEmailError = result.ok ? null : result.error || 'Email send failed';
+      }
 
     database.auditLogs.push({
       id: randomUUID(),
@@ -1092,7 +1102,8 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
       },
       createdAt: completedAt,
     });
-  }, { scope: 'checkout' });
+    }, { scope: 'checkout' });
+  }
 
   console.log(JSON.stringify({
     at: completedAt,
