@@ -77,8 +77,6 @@ export function validateRegistration(data: RegistrationFormData) {
     errors.phone = 'Informe um WhatsApp valido com DDD.';
   }
 
-  if (!data.city.trim()) errors.city = 'Informe sua cidade.';
-  if (!/^[A-Za-z]{2}$/.test(data.state.trim())) errors.state = 'Informe uma UF valida.';
   if (!data.birthDate || Number.isNaN(birthDate.getTime()) || birthDate > today || birthDate.getFullYear() < today.getFullYear() - 100) errors.birthDate = 'Informe uma data de nascimento valida.';
   if (data.emergencyContactName.trim().split(/\s+/).filter(Boolean).length < 2) errors.emergencyContactName = 'Informe nome e sobrenome do contato.';
   if (emergencyPhoneDigits.length < 10) errors.emergencyContactPhone = 'Informe um telefone de emergencia valido.';
