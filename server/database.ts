@@ -190,6 +190,7 @@ export type PendingRegistrationResult = CreateRegistrationResponse & {
   statusCode: number;
   amountCents?: number;
   description?: string;
+  shouldCreateCheckout?: boolean;
 };
 
 export type RegistrationEmailDeliveryKind = 'pending' | 'confirmation';
@@ -1094,9 +1095,13 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     }
 
     const existingResult = await client.query(
-      `select registration.id, registration.status, registration.expires_at, payment.id as payment_id, payment.checkout_url
+      `select registration.id, registration.status, registration.expires_at,
+              registration.amount_cents, payment.id as payment_id, payment.checkout_url,
+              distance.name as distance_name, lot.name as lot_name
        from ${table.registrations} registration
        left join ${table.payments} payment on payment.registration_id = registration.id
+       join ${table.distances} distance on distance.id = registration.distance_id
+       join ${table.lots} lot on lot.id = registration.lot_id
        where registration.event_id = $1
          and registration.cpf_hash = $2
          and registration.status = any($3)
@@ -1107,6 +1112,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
 
     if (existing) {
       await client.query('commit');
+      const shouldCreateCheckout = existing.status === 'pending_payment' && !existing.checkout_url;
       return {
         statusCode: existing.status === 'paid' ? 409 : 200,
         success: existing.status !== 'paid',
@@ -1118,7 +1124,12 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         expiresAt: existing.expires_at || null,
         message: existing.status === 'paid'
           ? 'Ja existe uma inscricao paga para este CPF.'
-          : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
+          : shouldCreateCheckout
+            ? 'Inscricao recuperada. Preparando um novo acesso ao checkout.'
+            : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
+        amountCents: shouldCreateCheckout ? Number(existing.amount_cents) : undefined,
+        description: shouldCreateCheckout ? input.description(existing.distance_name, existing.lot_name) : undefined,
+        shouldCreateCheckout,
       };
     }
 
@@ -1182,6 +1193,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         : 'Inscricao pre-criada. Configure um adaptador de pagamento real para gerar checkout.',
       amountCents,
       description: input.description(distance.name, lot.name),
+      shouldCreateCheckout: true,
     };
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
@@ -1274,6 +1286,115 @@ export async function markPaymentCreationFailedInPostgres(registrationId: string
   } finally {
     client.release();
   }
+}
+
+export async function upsertAdminBootstrapInPostgres(email: string, passwordHash: string) {
+  const now = new Date().toISOString();
+  await ensurePostgresReady();
+  await requirePool().query(
+    `insert into ${table.adminUsers} (id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at)
+     values ($1, $2, $3, 'administrator', $4, $4, null, null)
+     on conflict (email) do update set
+       password_hash = excluded.password_hash,
+       role = 'administrator',
+       updated_at = excluded.updated_at,
+       disabled_at = null`,
+    [randomUUID(), email, passwordHash, now],
+  );
+}
+
+export async function findAdminUserInPostgres(email: string): Promise<AdminUserRecord | null> {
+  const result = await requirePool().query(
+    `select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at
+     from ${table.adminUsers}
+     where email = $1 and disabled_at is null
+     limit 1`,
+    [email],
+  );
+  const row = result.rows[0];
+  return row ? {
+    id: row.id,
+    email: row.email,
+    passwordHash: row.password_hash,
+    role: row.role,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastLoginAt: row.last_login_at,
+    disabledAt: row.disabled_at,
+  } : null;
+}
+
+export async function createAdminSessionInPostgres(
+  userId: string,
+  session: AdminSessionRecord,
+): Promise<AdminSessionRecord | null> {
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    const userResult = await client.query(
+      `update ${table.adminUsers}
+       set last_login_at = $1, updated_at = $1
+       where id = $2 and disabled_at is null
+       returning email, role`,
+      [session.createdAt, userId],
+    );
+    const user = userResult.rows[0];
+
+    if (!user) {
+      await client.query('rollback');
+      return null;
+    }
+
+    await client.query(
+      `insert into ${table.adminSessions} (id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent)
+       values ($1, $2, $3, $4, $5, null, $6, $7)`,
+      [session.id, user.email, user.role, session.createdAt, session.expiresAt, session.ipAddress, session.userAgent],
+    );
+    await client.query(
+      `delete from ${table.adminSessions}
+       where expires_at < $1 or (revoked_at is not null and revoked_at < $2)`,
+      [session.createdAt, new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString()],
+    );
+    await client.query('commit');
+
+    return { ...session, actor: user.email, role: user.role };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function findAdminSessionInPostgres(sessionId: string): Promise<AdminSessionRecord | null> {
+  const result = await requirePool().query(
+    `select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent
+     from ${table.adminSessions}
+     where id = $1
+     limit 1`,
+    [sessionId],
+  );
+  const row = result.rows[0];
+  return row ? {
+    id: row.id,
+    actor: row.actor,
+    role: row.role,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    revokedAt: row.revoked_at,
+    ipAddress: row.ip_address,
+    userAgent: row.user_agent,
+  } : null;
+}
+
+export async function revokeAdminSessionInPostgres(sessionId: string, revokedAt: string) {
+  await requirePool().query(
+    `update ${table.adminSessions}
+     set revoked_at = coalesce(revoked_at, $1)
+     where id = $2`,
+    [revokedAt, sessionId],
+  );
 }
 
 export async function claimRegistrationEmailInPostgres(

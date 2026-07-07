@@ -8,12 +8,17 @@ import {
   attachCheckoutToPaymentInPostgres,
   claimRegistrationEmailInPostgres,
   completeRegistrationEmailInPostgres,
+  createAdminSessionInPostgres,
   createPendingRegistrationInPostgres,
+  findAdminSessionInPostgres,
+  findAdminUserInPostgres,
   getDatabaseConfigurationIssue,
   getDatabaseRuntimeConfig,
   markPaymentCreationFailedInPostgres,
   pingDatabase,
+  revokeAdminSessionInPostgres,
   transaction,
+  upsertAdminBootstrapInPostgres,
   usesPostgresDatabase,
   type Database,
   type PartnershipLeadRecord,
@@ -151,7 +156,9 @@ async function ensureAdminBootstrap() {
   }
 
   if (!adminBootstrapPromise) {
-    adminBootstrapPromise = transaction((database) => {
+    adminBootstrapPromise = (usesPostgresDatabase()
+      ? upsertAdminBootstrapInPostgres(adminBootstrapEmail, hashAdminPassword(adminBootstrapPassword))
+      : transaction((database) => {
       const now = new Date().toISOString();
       const existingUser = database.adminUsers.find((item) => item.email === adminBootstrapEmail);
       const passwordHash = hashAdminPassword(adminBootstrapPassword);
@@ -174,7 +181,7 @@ async function ensureAdminBootstrap() {
         lastLoginAt: null,
         disabledAt: null,
       });
-    }, { scope: 'admin-auth' }).then(() => {
+    }, { scope: 'admin-auth' })).then(() => {
       console.log(`Admin bootstrap ensured for ${adminBootstrapEmail}`);
     });
   }
@@ -211,10 +218,12 @@ async function readAdminSession(req: IncomingMessage): Promise<AdminSession | nu
   const signedSession = readSignedAdminSession(req);
   if (!signedSession) return null;
 
-  const storedSession = await transaction(
-    (database) => database.adminSessions.find((item) => item.id === signedSession.id) || null,
-    { persist: false, scope: 'admin-auth' },
-  );
+  const storedSession = usesPostgresDatabase()
+    ? await findAdminSessionInPostgres(signedSession.id)
+    : await transaction(
+      (database) => database.adminSessions.find((item) => item.id === signedSession.id) || null,
+      { persist: false, scope: 'admin-auth' },
+    );
 
   if (!storedSession || storedSession.revokedAt) {
     return null;
@@ -273,13 +282,35 @@ async function handleAdminLogin(req: IncomingMessage, res: ServerResponse) {
   const suppliedEmail = compactText(body?.email || body?.actor, 120).toLowerCase();
   const suppliedPassword = String(body?.password || body?.key || '');
   if (isAdminLoginRateLimited(req, suppliedEmail)) { json(res, 429, { message: 'Muitas tentativas de login. Aguarde alguns minutos.' }); return; }
-  const adminUser = await transaction(
-    (database) => database.adminUsers.find((item) => item.email === suppliedEmail && !item.disabledAt) || null,
-    { persist: false, scope: 'admin-auth' },
-  );
+  const adminUser = usesPostgresDatabase()
+    ? await findAdminUserInPostgres(suppliedEmail)
+    : await transaction(
+      (database) => database.adminUsers.find((item) => item.email === suppliedEmail && !item.disabledAt) || null,
+      { persist: false, scope: 'admin-auth' },
+    );
   if (!adminUser || !verifyAdminPassword(suppliedPassword, adminUser.passwordHash)) { json(res, 401, { message: 'Credenciais administrativas invalidas.' }); return; }
   resetAdminLoginRateLimit(req, suppliedEmail);
-  const session = await transaction((database) => {
+  const session = usesPostgresDatabase()
+    ? await (() => {
+      const now = new Date().toISOString();
+      const nextSession: AdminSession = {
+        id: randomUUID(),
+        actor: adminUser.email,
+        role: adminUser.role,
+        expiresAt: Date.now() + adminSessionTtlSeconds * 1000,
+      };
+      return createAdminSessionInPostgres(adminUser.id, {
+        id: nextSession.id,
+        actor: nextSession.actor,
+        role: nextSession.role,
+        createdAt: now,
+        expiresAt: new Date(nextSession.expiresAt).toISOString(),
+        revokedAt: null,
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req),
+      }).then((storedSession) => storedSession ? nextSession : null);
+    })()
+    : await transaction((database) => {
     const storedUser = database.adminUsers.find((item) => item.id === adminUser.id && !item.disabledAt);
     if (!storedUser) {
       return null;
@@ -308,7 +339,7 @@ async function handleAdminLogin(req: IncomingMessage, res: ServerResponse) {
     });
 
     return nextSession;
-  }, { scope: 'admin-auth' });
+    }, { scope: 'admin-auth' });
   if (!session) { json(res, 401, { message: 'Credenciais administrativas invalidas.' }); return; }
   res.setHeader('Set-Cookie', buildAdminCookie(signAdminSession(session), adminSessionTtlSeconds));
   json(res, 200, { actor: session.actor, role: session.role, expiresAt: new Date(session.expiresAt).toISOString() });
@@ -318,12 +349,17 @@ async function handleAdminLogout(req: IncomingMessage, res: ServerResponse) {
   if (!requireAdminDatabase(res)) return;
   const session = await readAdminSession(req);
   if (session) {
-    await transaction((database) => {
-      const storedSession = database.adminSessions.find((item) => item.id === session.id);
-      if (storedSession && !storedSession.revokedAt) {
-        storedSession.revokedAt = new Date().toISOString();
-      }
-    });
+    const revokedAt = new Date().toISOString();
+    if (usesPostgresDatabase()) {
+      await revokeAdminSessionInPostgres(session.id, revokedAt);
+    } else {
+      await transaction((database) => {
+        const storedSession = database.adminSessions.find((item) => item.id === session.id);
+        if (storedSession && !storedSession.revokedAt) {
+          storedSession.revokedAt = revokedAt;
+        }
+      });
+    }
   }
   res.setHeader('Set-Cookie', buildAdminCookie('', 0));
   json(res, 200, { ok: true });
@@ -913,6 +949,7 @@ type PendingCheckout = CreateRegistrationResponse & {
   statusCode: number;
   amountCents?: number;
   description?: string;
+  shouldCreateCheckout?: boolean;
 };
 
 async function markPaymentCreationFailed(registrationId: string) {
@@ -1256,6 +1293,11 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       return {
         ...response,
         statusCode: existing.status === 'paid' ? 409 : 200,
+        amountCents: existing.status === 'pending_payment' && !payment?.checkoutUrl ? existing.amountCents : undefined,
+        description: existing.status === 'pending_payment' && !payment?.checkoutUrl
+          ? getRegistrationDescription(distance?.name || payload.distance, activeLot.name)
+          : undefined,
+        shouldCreateCheckout: existing.status === 'pending_payment' && !payment?.checkoutUrl,
       };
     }
 
@@ -1318,6 +1360,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         : 'Inscricao pre-criada. Configure um adaptador de pagamento real para gerar checkout.',
       amountCents: registration.amountCents,
       description: getRegistrationDescription(distance.name, activeLot.name),
+      shouldCreateCheckout: true,
     };
   }, { scope: 'checkout' });
   logStage('registration_persist_finished', {
@@ -1328,7 +1371,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   });
 
   if (
-    response.statusCode === 201
+    response.shouldCreateCheckout
     && paymentProvider === 'infinitepay'
     && response.amountCents
     && response.description
@@ -1416,7 +1459,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     }
   }
 
-  const { statusCode, amountCents: _amountCents, description: _description, ...payloadResponse } = response;
+  const { statusCode, amountCents: _amountCents, description: _description, shouldCreateCheckout: _shouldCreateCheckout, ...payloadResponse } = response;
 
   if (statusCode === 201 && response.registrationStatus === 'pending_payment' && response.registrationId) {
     processRegistrationEmail('pending', response.registrationId).catch((error) => {

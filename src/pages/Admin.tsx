@@ -355,6 +355,7 @@ export function AdminPage() {
         draftPassword={draftPassword}
         draftEmail={draftEmail}
         error={error}
+        loading={loading}
         onPasswordChange={setDraftPassword}
         onEmailChange={setDraftEmail}
         onSubmit={handleLogin}
@@ -584,6 +585,7 @@ function LoginScreen({
   draftPassword,
   draftEmail,
   error,
+  loading,
   onPasswordChange,
   onEmailChange,
   onSubmit,
@@ -591,6 +593,7 @@ function LoginScreen({
   draftPassword: string;
   draftEmail: string;
   error: string;
+  loading: boolean;
   onPasswordChange: (value: string) => void;
   onEmailChange: (value: string) => void;
   onSubmit: (event: FormEvent) => void;
@@ -598,7 +601,7 @@ function LoginScreen({
   return (
     <main className="flex min-h-screen items-center bg-black px-4 py-12 text-white sm:px-6 md:py-20">
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_center,rgba(215,255,0,0.14),transparent_28rem)]" />
-      <form onSubmit={onSubmit} className="relative mx-auto w-full max-w-xl border border-white/10 bg-zinc-950/95 p-5 shadow-2xl sm:p-8 md:p-12">
+      <form onSubmit={onSubmit} aria-busy={loading} className="relative mx-auto w-full max-w-xl border border-white/10 bg-zinc-950/95 p-5 shadow-2xl sm:p-8 md:p-12">
         <ShieldCheck className="mb-8 h-12 w-12 text-brand" />
         <p className="mb-3 text-xs font-black uppercase tracking-[0.28em] text-brand">Centro de comando</p>
         <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FunPace Run</h1>
@@ -609,6 +612,7 @@ function LoginScreen({
           <input
             type="email"
             required
+            disabled={loading}
             autoComplete="username"
             value={draftEmail}
             onChange={(event) => onEmailChange(event.target.value)}
@@ -617,12 +621,12 @@ function LoginScreen({
           />
           <div className="relative">
             <Lock className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
-            <input type="password" required autoComplete="current-password" value={draftPassword} onChange={(event) => onPasswordChange(event.target.value)} className="w-full border border-zinc-800 bg-black py-4 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand" placeholder="Senha administrativa" />
+            <input type="password" required disabled={loading} autoComplete="current-password" value={draftPassword} onChange={(event) => onPasswordChange(event.target.value)} className="w-full border border-zinc-800 bg-black py-4 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand disabled:cursor-wait disabled:opacity-70" placeholder="Senha administrativa" />
           </div>
         </div>
         {error && <p className="mt-4 text-sm font-bold uppercase tracking-wider text-brand">{error}</p>}
-        <button className="mt-6 flex min-h-14 w-full items-center justify-center gap-2 bg-brand p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-white">
-          Entrar no painel <ChevronRight className="h-4 w-4" />
+        <button disabled={loading} className="mt-6 flex min-h-14 w-full items-center justify-center gap-2 bg-brand p-4 text-sm font-black uppercase tracking-widest text-black transition-colors hover:bg-white disabled:cursor-wait disabled:opacity-70">
+          {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Entrando...</> : <>Entrar no painel <ChevronRight className="h-4 w-4" /></>}
         </button>
       </form>
     </main>
