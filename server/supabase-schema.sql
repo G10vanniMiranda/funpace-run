@@ -188,13 +188,22 @@ values (
   'FunPace Run 2026',
   'funpace-run-2026',
   'published',
-  '2026-09-12',
+  '2026-09-20',
   '06:00',
   'Complexo Madeira Mamore',
   'Porto Velho',
   'RO'
 )
 on conflict (id) do nothing;
+
+update "run-events"
+set
+  date = '2026-09-20',
+  start_time = '06:00',
+  location_name = 'Complexo Madeira Mamore',
+  city = 'Porto Velho',
+  state = 'RO'
+where id = 'funpace-run-2026';
 
 insert into "run-distances" (id, event_id, name, distance_km, capacity, status)
 values

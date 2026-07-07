@@ -26,6 +26,7 @@ const API_BASE_URL = import.meta.env.DEV
   ? configuredLocalApiUrl || 'http://localhost:3001'
   : configuredApiUrl;
 const REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || 15_000);
+const REGISTRATION_REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_REGISTRATION_TIMEOUT_MS || 120_000);
 const RETRY_DELAYS_MS = [500, 1000, 2000];
 const isDevelopment = import.meta.env.DEV;
 
@@ -270,6 +271,7 @@ export function createRegistration(data: RegistrationFormData) {
   return apiFetch<CreateRegistrationResponse>('/api/registrations', {
     method: 'POST',
     body: JSON.stringify(data),
+    timeoutMs: REGISTRATION_REQUEST_TIMEOUT_MS,
     retry: false,
   });
 }

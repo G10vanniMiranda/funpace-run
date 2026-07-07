@@ -39,6 +39,7 @@ export function RegistrationSection() {
   const [registrationId, setRegistrationId] = useState('');
   const [availability, setAvailability] = useState<AvailabilityResponse | null>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
+  const [showSlowCheckoutHint, setShowSlowCheckoutHint] = useState(false);
   const activeLot = availability?.lots.find((lot) => lot.status === 'active') || availability?.lots[0];
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
   const isSubmitting = status === 'submitting';
@@ -64,6 +65,21 @@ export function RegistrationSection() {
     };
   }, []);
 
+  useEffect(() => {
+    if (status !== 'submitting') {
+      setShowSlowCheckoutHint(false);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setShowSlowCheckoutHint(true);
+    }, 8000);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [status]);
+
   const updateField = <Field extends keyof RegistrationFormData>(
     field: Field,
     value: RegistrationFormData[Field],
@@ -82,6 +98,7 @@ export function RegistrationSection() {
     setSubmitAttempted(true);
     setApiMessage('');
     setRegistrationId('');
+    setShowSlowCheckoutHint(false);
 
     const validationErrors = validateRegistration(formData);
     setErrors(validationErrors);
@@ -238,11 +255,17 @@ export function RegistrationSection() {
                 {status !== 'submitting' && status !== 'checkout_pending' && 'CONTINUAR PARA CHECKOUT'}
               </span>
               {status === 'submitting' ? (
-                <span className="relative z-10 font-mono text-[10px] opacity-70">AGUARDE</span>
+                <span className="relative z-10 font-mono text-[10px] opacity-70">{showSlowCheckoutHint ? 'PODE DEMORAR' : 'AGUARDE'}</span>
               ) : (
                 <ArrowRight className="relative z-10 h-5 w-5 shrink-0 transition-transform group-hover:translate-x-2" />
               )}
             </button>
+
+            {status === 'submitting' && showSlowCheckoutHint && (
+              <AlertMessage tone="info" title="Checkout em preparo">
+                Seu checkout está sendo preparado. Isso pode levar alguns instantes a mais. Não feche esta tela.
+              </AlertMessage>
+            )}
 
             {status === 'submitting' && (
               <AlertMessage tone="info" title="Informação">

@@ -232,7 +232,7 @@ const initialDatabase: Database = {
       name: 'FunPace Run 2026',
       slug: 'funpace-run-2026',
       status: 'published',
-      date: '2026-09-12',
+      date: '2026-09-20',
       startTime: '06:00',
       locationName: 'Complexo Madeira Mamore',
       city: 'Porto Velho',

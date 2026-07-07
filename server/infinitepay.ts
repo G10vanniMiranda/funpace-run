@@ -98,6 +98,7 @@ export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput)
   };
 
   const timeout = createTimeoutSignal(requestTimeoutMs);
+  const startedAt = Date.now();
   let response: Response;
 
   try {
@@ -110,6 +111,14 @@ export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput)
       body: JSON.stringify(body),
       signal: timeout.signal,
     });
+    const headersAt = Date.now();
+    console.log(JSON.stringify({
+      at: new Date(headersAt).toISOString(),
+      message: 'infinitepay_checkout_headers_received',
+      orderNsu: input.orderNsu,
+      statusCode: response.status,
+      headersElapsedMs: headersAt - startedAt,
+    }));
   } catch (error) {
     const timedOut = error instanceof DOMException && error.name === 'AbortError';
 
@@ -123,7 +132,19 @@ export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput)
     timeout.clear();
   }
 
+  const payloadStartedAt = Date.now();
   const payload = await response.json().catch(() => null) as InfinitePayLinksResponse | null;
+  const payloadFinishedAt = Date.now();
+
+  console.log(JSON.stringify({
+    at: new Date(payloadFinishedAt).toISOString(),
+    message: 'infinitepay_checkout_payload_received',
+    orderNsu: input.orderNsu,
+    statusCode: response.status,
+    headersElapsedMs: payloadStartedAt - startedAt,
+    payloadElapsedMs: payloadFinishedAt - payloadStartedAt,
+    totalElapsedMs: payloadFinishedAt - startedAt,
+  }));
 
   if (!response.ok || !payload) {
     throw new InfinitePayError(

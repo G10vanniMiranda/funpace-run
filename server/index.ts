@@ -1107,6 +1107,21 @@ async function processRegistrationEmail(kind: RegistrationEmailKind, registratio
 }
 
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
+  const startedAt = Date.now();
+  const requestId = Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'] || null;
+  const logStage = (stage: string, extra: Record<string, unknown> = {}) => {
+    console.log(JSON.stringify({
+      at: new Date().toISOString(),
+      message: 'registration_checkout_stage',
+      requestId,
+      stage,
+      elapsedMs: Date.now() - startedAt,
+      ...extra,
+    }));
+  };
+
+  logStage('request_started');
+
   if (!requireJson(req, res)) {
     return;
   }
@@ -1127,6 +1142,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   }
 
   const rawBody = await readBody(req);
+  logStage('body_read', { bodyLength: rawBody.length });
   const parsedBody = parseJsonBody<RegistrationFormData>(rawBody);
 
   if (!parsedBody) {
@@ -1136,6 +1152,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
   const payload = sanitizeRegistration(parsedBody);
   const errors = validateRegistration(payload);
+  logStage('payload_validated', { valid: Object.keys(errors).length === 0 });
 
   if (Object.keys(errors).length > 0) {
     json(res, 422, { message: 'Dados de inscricao invalidos.', errors });
@@ -1144,6 +1161,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
   const hash = cpfHash(payload.cpf);
 
+  logStage('registration_persist_started', { databaseProvider: usesPostgresDatabase() ? 'postgres' : 'json' });
   const response = usesPostgresDatabase()
     ? await createPendingRegistrationInPostgres({
       payload,
@@ -1291,6 +1309,12 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       description: getRegistrationDescription(distance.name, activeLot.name),
     };
   }, { scope: 'checkout' });
+  logStage('registration_persist_finished', {
+    statusCode: response.statusCode,
+    registrationId: response.registrationId || null,
+    registrationStatus: response.registrationStatus,
+    checkoutStatus: response.checkoutStatus,
+  });
 
   if (
     response.statusCode === 201
@@ -1299,6 +1323,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     && response.description
   ) {
     if (!infinitePayHandle) {
+      logStage('checkout_skipped_missing_handle', { registrationId: response.registrationId });
       await markPaymentCreationFailed(response.registrationId);
       response.statusCode = 503;
       response.success = false;
@@ -1308,6 +1333,10 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       response.message = 'Gateway de pagamento indisponivel. Tente novamente em instantes.';
     } else {
       try {
+        logStage('checkout_create_started', {
+          registrationId: response.registrationId,
+          amountCents: response.amountCents,
+        });
         const checkout = await createInfinitePayCheckout({
           handle: infinitePayHandle,
           orderNsu: response.registrationId,
@@ -1317,8 +1346,14 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
           webhookUrl: getWebhookUrl(),
           customer: payload,
         });
+        logStage('checkout_create_finished', {
+          registrationId: response.registrationId,
+          checkoutUrlPresent: Boolean(checkout.checkoutUrl),
+          providerPaymentId: checkout.providerPaymentId || null,
+        });
 
         if (usesPostgresDatabase()) {
+          logStage('checkout_persist_started', { registrationId: response.registrationId, persistMode: 'postgres' });
           await attachCheckoutToPaymentInPostgres({
             registrationId: response.registrationId,
             providerPaymentId: checkout.providerPaymentId,
@@ -1326,6 +1361,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
             raw: checkout.raw,
           });
         } else {
+          logStage('checkout_persist_started', { registrationId: response.registrationId, persistMode: 'json' });
           await transaction((database) => {
             const payment = database.payments.find((item) => item.registrationId === response.registrationId);
 
@@ -1346,10 +1382,15 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
             });
           }, { scope: 'checkout' });
         }
+        logStage('checkout_persist_finished', { registrationId: response.registrationId });
 
         response.checkoutStatus = 'created';
         response.checkoutUrl = checkout.checkoutUrl;
       } catch (error) {
+        logStage('checkout_create_failed', {
+          registrationId: response.registrationId,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
         const errorId = logServerError(req, error);
         await markPaymentCreationFailed(response.registrationId);
         response.statusCode = 502;
@@ -1372,6 +1413,11 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     });
   }
 
+  logStage('response_ready', {
+    statusCode,
+    registrationId: response.registrationId || null,
+    checkoutStatus: response.checkoutStatus,
+  });
   logRequest(req, statusCode, response.registrationId ? 'registration_processed' : 'registration_rejected');
   json(res, statusCode, payloadResponse);
 }
