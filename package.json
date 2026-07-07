@@ -11,6 +11,7 @@
     "api": "tsx server/index.ts",
     "admin:bootstrap": "tsx scripts/bootstrap-admin.ts",
     "backup:db": "node scripts/backup-db.mjs",
+    "email:resend": "node --import tsx scripts/resend-registration-email.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

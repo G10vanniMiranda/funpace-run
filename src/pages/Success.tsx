@@ -27,8 +27,8 @@ export function SuccessPage() {
   const [message, setMessage] = useState('Consultando status da inscrição...');
   const supportUrl = getWhatsAppUrl(
     registrationId
-      ? `Ola, fiz o pagamento da FunPace Run e preciso confirmar minha inscricao ${registrationId}.`
-      : 'Ola, fiz o pagamento da FunPace Run e preciso confirmar minha inscricao.',
+      ? `Olá, fiz o pagamento da FunPace Run e preciso confirmar minha inscrição ${registrationId}.`
+      : 'Olá, fiz o pagamento da FunPace Run e preciso confirmar minha inscrição.',
   );
 
   useEffect(() => {
@@ -137,7 +137,7 @@ export function SuccessPage() {
             Falar com suporte
           </a>
           <a href="/" className="inline-flex min-h-12 items-center justify-center bg-brand px-5 py-3 text-sm font-black uppercase tracking-widest text-black sm:px-6 sm:py-4">
-            Voltar para a landing
+            Voltar para a home
           </a>
         </div>
       </section>

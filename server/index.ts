@@ -937,7 +937,7 @@ async function markPaymentCreationFailed(registrationId: string) {
   }, { scope: 'checkout' });
 }
 
-async function processRegistrationEmail(kind: RegistrationEmailKind, registrationId: string, options: { force?: boolean } = {}) {
+export async function processRegistrationEmail(kind: RegistrationEmailKind, registrationId: string, options: { force?: boolean } = {}) {
   const provider = getEmailProvider();
   const attemptField = kind === 'pending' ? 'pendingEmailLastAttemptAt' : 'confirmationEmailLastAttemptAt';
   const sentField = kind === 'pending' ? 'pendingEmailSentAt' : 'confirmationEmailSentAt';
@@ -1678,11 +1678,11 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined }, registrationId: registration.id, nextStatus };
   }, { scope: 'checkout' });
 
-  json(res, result.statusCode, result.payload);
-
   if (result.statusCode === 200 && result.nextStatus === 'paid' && result.registrationId) {
     await processRegistrationEmail('confirmation', result.registrationId);
   }
+
+  json(res, result.statusCode, result.payload);
 }
 
 async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
