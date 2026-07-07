@@ -1236,6 +1236,41 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       };
     }
 
+    const existing = database.registrations.find((item) => (
+      item.eventId === event.id && item.cpfHash === hash && ['pending_payment', 'paid'].includes(item.status)
+    ));
+
+    if (existing) {
+      const payment = database.payments.find((item) => item.registrationId === existing.id);
+      const existingDistance = database.distances.find((item) => item.id === existing.distanceId);
+      const existingLot = database.lots.find((item) => item.id === existing.lotId);
+      const shouldCreateCheckout = existing.status === 'pending_payment' && !payment?.checkoutUrl;
+      const response: CreateRegistrationResponse = {
+        success: existing.status !== 'paid',
+        registrationId: existing.id,
+        paymentId: payment?.id || null,
+        registrationStatus: existing.status,
+        checkoutStatus: payment?.checkoutUrl ? 'created' : 'not_configured',
+        checkoutUrl: payment?.checkoutUrl || null,
+        expiresAt: existing.expiresAt || null,
+        message: existing.status === 'paid'
+          ? 'Ja existe uma inscricao paga para este CPF.'
+          : shouldCreateCheckout
+            ? 'Inscricao recuperada. Preparando um novo acesso ao checkout.'
+            : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
+      };
+
+      return {
+        ...response,
+        statusCode: existing.status === 'paid' ? 409 : 200,
+        amountCents: shouldCreateCheckout ? existing.amountCents : undefined,
+        description: shouldCreateCheckout
+          ? getRegistrationDescription(existingDistance?.name || existing.payload.distance, existingLot?.name || existing.lotId)
+          : undefined,
+        shouldCreateCheckout,
+      };
+    }
+
     const distance = database.distances.find((item) => item.eventId === event.id && item.name === payload.distance && item.status === 'active');
     const activeLot = database.lots.find((item) => item.eventId === event.id && item.status === 'active');
 
@@ -1268,36 +1303,6 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         checkoutStatus: 'not_configured',
         checkoutUrl: null,
         message: 'Vagas esgotadas para este lote ou distancia.',
-      };
-    }
-
-    const existing = database.registrations.find((item) => (
-      item.eventId === event.id && item.cpfHash === hash && ['pending_payment', 'paid'].includes(item.status)
-    ));
-
-    if (existing) {
-      const payment = database.payments.find((item) => item.registrationId === existing.id);
-      const response: CreateRegistrationResponse = {
-        success: existing.status !== 'paid',
-        registrationId: existing.id,
-        paymentId: payment?.id || null,
-        registrationStatus: existing.status,
-        checkoutStatus: payment?.checkoutUrl ? 'created' : 'not_configured',
-        checkoutUrl: payment?.checkoutUrl || null,
-        expiresAt: existing.expiresAt || null,
-        message: existing.status === 'paid'
-          ? 'Ja existe uma inscricao paga para este CPF.'
-          : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
-      };
-
-      return {
-        ...response,
-        statusCode: existing.status === 'paid' ? 409 : 200,
-        amountCents: existing.status === 'pending_payment' && !payment?.checkoutUrl ? existing.amountCents : undefined,
-        description: existing.status === 'pending_payment' && !payment?.checkoutUrl
-          ? getRegistrationDescription(distance?.name || payload.distance, activeLot.name)
-          : undefined,
-        shouldCreateCheckout: existing.status === 'pending_payment' && !payment?.checkoutUrl,
       };
     }
 

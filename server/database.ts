@@ -1067,33 +1067,6 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       };
     }
 
-    const [distanceResult, lotResult] = await Promise.all([
-      client.query(
-        `select id, name, capacity from ${table.distances} where event_id = $1 and name = $2 and status = $3 limit 1`,
-        [event.id, input.payload.distance, 'active'],
-      ),
-      client.query(
-        `select id, name, price_cents, capacity, sold_count from ${table.lots} where event_id = $1 and status = $2 order by starts_at asc limit 1 for update`,
-        [event.id, 'active'],
-      ),
-    ]);
-    const distance = distanceResult.rows[0];
-    const lot = lotResult.rows[0];
-
-    if (!distance || !lot) {
-      await client.query('rollback');
-      return {
-        statusCode: 409,
-        success: false,
-        registrationId: '',
-        paymentId: null,
-        registrationStatus: 'cancelled',
-        checkoutStatus: 'not_configured',
-        checkoutUrl: null,
-        message: 'Distancia ou lote indisponivel.',
-      };
-    }
-
     const existingResult = await client.query(
       `select registration.id, registration.status, registration.expires_at,
               registration.amount_cents, payment.id as payment_id, payment.checkout_url,
@@ -1130,6 +1103,33 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         amountCents: shouldCreateCheckout ? Number(existing.amount_cents) : undefined,
         description: shouldCreateCheckout ? input.description(existing.distance_name, existing.lot_name) : undefined,
         shouldCreateCheckout,
+      };
+    }
+
+    const [distanceResult, lotResult] = await Promise.all([
+      client.query(
+        `select id, name, capacity from ${table.distances} where event_id = $1 and name = $2 and status = $3 limit 1`,
+        [event.id, input.payload.distance, 'active'],
+      ),
+      client.query(
+        `select id, name, price_cents, capacity, sold_count from ${table.lots} where event_id = $1 and status = $2 order by starts_at asc limit 1 for update`,
+        [event.id, 'active'],
+      ),
+    ]);
+    const distance = distanceResult.rows[0];
+    const lot = lotResult.rows[0];
+
+    if (!distance || !lot) {
+      await client.query('rollback');
+      return {
+        statusCode: 409,
+        success: false,
+        registrationId: '',
+        paymentId: null,
+        registrationStatus: 'cancelled',
+        checkoutStatus: 'not_configured',
+        checkoutUrl: null,
+        message: 'Distancia ou lote indisponivel.',
       };
     }
 
