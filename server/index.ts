@@ -770,18 +770,19 @@ function normalizeGatewayAmount(value: unknown) {
   return Number.isInteger(parsed) ? parsed : Math.round(parsed * 100);
 }
 
-function toPaymentProviderStatus(event: {
+export function toPaymentProviderStatus(event: {
   status?: string;
   paid?: boolean;
   amount?: number | string;
   paid_amount?: number | string;
+  settledAt?: string;
 } | null): RegistrationStatus {
   if (!event) {
     return 'pending_payment';
   }
 
   const status = String(event.status || '').trim().toLowerCase();
-  const paidStatuses = new Set(['paid', 'approved', 'confirmed', 'completed', 'captured', 'settled', 'success', 'succeeded']);
+  const paidStatuses = new Set(['paid', 'approved', 'confirmed', 'completed', 'captured', 'settled', 'success', 'succeeded', 'received', 'recebido']);
   const failedStatuses = new Set(['payment_failed', 'failed', 'declined', 'denied', 'refused', 'rejected']);
   const cancelledStatuses = new Set(['cancelled', 'canceled', 'voided']);
 
@@ -793,6 +794,10 @@ function toPaymentProviderStatus(event: {
   const paidAmount = normalizeGatewayAmount(event.paid_amount);
 
   if (amount !== null && paidAmount !== null && paidAmount >= amount) {
+    return 'paid';
+  }
+
+  if (String(event.settledAt || '').trim()) {
     return 'paid';
   }
 
@@ -829,7 +834,7 @@ type NormalizedPaymentWebhook = {
   nextStatus: RegistrationStatus;
 };
 
-function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWebhook | null {
+export function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWebhook | null {
   if (!rawEvent || typeof rawEvent !== 'object') {
     return null;
   }
@@ -861,6 +866,10 @@ function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWebhook | 
     'slug',
     'checkout_slug',
     'checkoutSlug',
+    'invoice_id',
+    'invoiceId',
+    'link_id',
+    'linkId',
   ]));
   const providerEventId = toStringValue(findFirstValue(rawEvent, [
     'providerEventId',
@@ -869,16 +878,18 @@ function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWebhook | 
     'id',
   ])) || providerTransactionId || providerPaymentId;
   const eventType = toStringValue(findFirstValue(rawEvent, ['eventType', 'event_type', 'type'])) || 'infinitepay.payment_status_changed';
-  const gatewayStatus = toStringValue(findFirstValue(rawEvent, ['status', 'payment_status', 'paymentStatus']));
-  const amountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['amount', 'amount_cents', 'amountCents', 'total_amount']));
-  const paidAmountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['paid_amount', 'paidAmount', 'paid_amount_cents']));
-  const paidValue = findFirstValue(rawEvent, ['paid']);
+  const gatewayStatus = toStringValue(findFirstValue(rawEvent, ['status', 'payment_status', 'paymentStatus', 'transaction_status', 'transactionStatus', 'invoice_status', 'invoiceStatus']));
+  const amountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['amount', 'amount_cents', 'amountCents', 'total_amount', 'totalAmount', 'value']));
+  const paidAmountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['paid_amount', 'paidAmount', 'paid_amount_cents', 'received_amount', 'receivedAmount']));
+  const paidValue = findFirstValue(rawEvent, ['paid', 'is_paid', 'isPaid']);
+  const settledAt = toStringValue(findFirstValue(rawEvent, ['paid_at', 'paidAt', 'received_at', 'receivedAt', 'settled_at', 'settledAt']));
   const paid = paidValue === true || String(paidValue).toLowerCase() === 'true';
   const nextStatus = toPaymentProviderStatus({
     status: gatewayStatus,
     paid,
     amount: amountCents ?? undefined,
     paid_amount: paidAmountCents ?? undefined,
+    settledAt,
   });
 
   return {
