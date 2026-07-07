@@ -58,7 +58,7 @@ export function validateRegistration(data: RegistrationFormData) {
   const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim());
   const phoneDigits = onlyDigits(data.phone);
   const emergencyPhoneDigits = onlyDigits(data.emergencyContactPhone);
-  const birthDate = new Date(`${data.birthDate}T00:00:00`);
+  const birthDate = data.birthDate ? new Date(`${data.birthDate}T00:00:00`) : null;
   const today = new Date();
 
   if (nameParts.length < 2) {
@@ -77,9 +77,9 @@ export function validateRegistration(data: RegistrationFormData) {
     errors.phone = 'Informe um WhatsApp valido com DDD.';
   }
 
-  if (!data.birthDate || Number.isNaN(birthDate.getTime()) || birthDate > today || birthDate.getFullYear() < today.getFullYear() - 100) errors.birthDate = 'Informe uma data de nascimento valida.';
-  if (data.emergencyContactName.trim().split(/\s+/).filter(Boolean).length < 2) errors.emergencyContactName = 'Informe nome e sobrenome do contato.';
-  if (emergencyPhoneDigits.length < 10) errors.emergencyContactPhone = 'Informe um telefone de emergencia valido.';
+  if (birthDate && (Number.isNaN(birthDate.getTime()) || birthDate > today || birthDate.getFullYear() < today.getFullYear() - 100)) errors.birthDate = 'Informe uma data de nascimento valida.';
+  if (data.emergencyContactName.trim() && data.emergencyContactName.trim().split(/\s+/).filter(Boolean).length < 2) errors.emergencyContactName = 'Informe nome e sobrenome do contato.';
+  if (emergencyPhoneDigits.length > 0 && emergencyPhoneDigits.length < 10) errors.emergencyContactPhone = 'Informe um telefone de emergencia valido.';
 
   if (!data.gender || !allowedGenders.has(data.gender)) {
     errors.gender = 'Selecione feminino ou masculino.';

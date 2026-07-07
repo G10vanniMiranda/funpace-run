@@ -2208,10 +2208,11 @@ async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerRe
     }
     if (!String(registration.payload.fullName).trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registration.payload.email)) return { statusCode: 400, payload: { message: 'Nome e email valido sao obrigatorios.' } };
     if (!['female', 'male'].includes(registration.payload.gender) || !['P', 'M', 'G', 'GG'].includes(registration.payload.shirtSize)) return { statusCode: 400, payload: { message: 'Sexo ou tamanho de camisa invalido.' } };
-    const birthDate = new Date(`${registration.payload.birthDate}T00:00:00`);
-    if (onlyDigits(registration.payload.phone).length < 10 || onlyDigits(registration.payload.emergencyContactPhone).length < 10) return { statusCode: 400, payload: { message: 'Telefones devem conter DDD e numero validos.' } };
+    const birthDate = registration.payload.birthDate ? new Date(`${registration.payload.birthDate}T00:00:00`) : null;
+    const emergencyPhoneDigits = onlyDigits(registration.payload.emergencyContactPhone);
+    if (onlyDigits(registration.payload.phone).length < 10 || (emergencyPhoneDigits.length > 0 && emergencyPhoneDigits.length < 10)) return { statusCode: 400, payload: { message: 'Telefones devem conter DDD e numero validos.' } };
     if (registration.payload.state && !/^[A-Z]{2}$/.test(registration.payload.state)) return { statusCode: 400, payload: { message: 'UF invalida.' } };
-    if (Number.isNaN(birthDate.getTime()) || birthDate > new Date() || birthDate.getFullYear() < new Date().getFullYear() - 100) return { statusCode: 400, payload: { message: 'Data de nascimento invalida.' } };
+    if (birthDate && (Number.isNaN(birthDate.getTime()) || birthDate > new Date() || birthDate.getFullYear() < new Date().getFullYear() - 100)) return { statusCode: 400, payload: { message: 'Data de nascimento invalida.' } };
     if (!Object.keys(after).length) return { statusCode: 400, payload: { message: 'Nenhuma alteracao foi informada.' } };
     const now = new Date().toISOString(); registration.updatedAt = now;
     database.auditLogs.push(createAuditLog(req, adminSession, { action: 'registration.updated', entityType: 'registration', entityId: registrationId, payload: { reason, before, after }, createdAt: now }));
