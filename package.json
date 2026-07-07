@@ -9,11 +9,13 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "api": "tsx server/index.ts",
+    "admin:bootstrap": "tsx scripts/bootstrap-admin.ts",
     "backup:db": "node scripts/backup-db.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:admin": "node --import tsx --test tests/admin-guards.test.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",

@@ -50,6 +50,7 @@ import {
   getAdminPaymentsCsvUrl,
   linkAdminOrphanPayment,
   getAdminEventConfig,
+  runAdminSystemCheck,
   updateAdminEventConfig,
   updateAdminDistance,
   updateAdminLot,
@@ -147,8 +148,8 @@ const statusStyles: Record<RegistrationStatus, string> = {
 
 export function AdminPage() {
   const [adminKey, setAdminKey] = useState('');
-  const [draftKey, setDraftKey] = useState('');
-  const [draftActor, setDraftActor] = useState('');
+  const [draftPassword, setDraftPassword] = useState('');
+  const [draftEmail, setDraftEmail] = useState('');
   const [adminActor, setAdminActor] = useState('');
   const [adminRole, setAdminRole] = useState<AdminRole | null>(null);
   const [authChecking, setAuthChecking] = useState(true);
@@ -156,6 +157,7 @@ export function AdminPage() {
   const [registrations, setRegistrations] = useState<AdminRegistration[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
   const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: '25', city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc' });
+  const [reportFilters, setReportFilters] = useState({ dateFrom: '', dateTo: '' });
   const [registrationPagination, setRegistrationPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -224,7 +226,7 @@ export function AdminPage() {
   const handleLogin = async (event: FormEvent) => {
     event.preventDefault();
     setLoading(true); setError('');
-    try { const session = await loginAdmin(draftKey, draftActor); setAdminActor(`${session.actor} · ${session.role}`); setAdminRole(session.role); setAdminKey('session'); setDraftKey(''); await loadAdminData('session'); }
+    try { const session = await loginAdmin(draftEmail, draftPassword); setAdminActor(`${session.actor} · ${session.role}`); setAdminRole(session.role); setAdminKey('session'); setDraftPassword(''); await loadAdminData('session'); }
     catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel entrar.'); }
     finally { setLoading(false); }
   };
@@ -350,11 +352,11 @@ export function AdminPage() {
   if (!adminKey || error === 'Acesso administrativo não autorizado.') {
     return (
       <LoginScreen
-        draftKey={draftKey}
-        draftActor={draftActor}
+        draftPassword={draftPassword}
+        draftEmail={draftEmail}
         error={error}
-        onChange={setDraftKey}
-        onActorChange={setDraftActor}
+        onPasswordChange={setDraftPassword}
+        onEmailChange={setDraftEmail}
         onSubmit={handleLogin}
       />
     );
@@ -413,6 +415,8 @@ export function AdminPage() {
               registrationPagination={registrationPagination}
               loading={loading}
               onFiltersChange={setFilters}
+              reportFilters={reportFilters}
+              onReportFiltersChange={setReportFilters}
               onSearch={handleSearch}
               onRefreshAdminData={() => void loadAdminData()}
               onOpenRegistration={(registration) => void openRegistration(registration)}
@@ -487,6 +491,8 @@ function AdminSection({
   registrationPagination,
   loading,
   onFiltersChange,
+  reportFilters,
+  onReportFiltersChange,
   onSearch,
   onRefreshAdminData,
   onOpenRegistration,
@@ -504,6 +510,8 @@ function AdminSection({
   registrationPagination: { page: number; pageSize: number; total: number; totalPages: number };
   loading: boolean;
   onFiltersChange: (filters: AdminFilters) => void;
+  reportFilters: { dateFrom: string; dateTo: string };
+  onReportFiltersChange: (filters: { dateFrom: string; dateTo: string }) => void;
   onSearch: (event: FormEvent) => void;
   onRefreshAdminData: () => void;
   onOpenRegistration: (registration: AdminRegistration) => void;
@@ -540,7 +548,7 @@ function AdminSection({
     return (
       <>
         <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
-        <ReportsPanel summary={summary} dashboard={dashboard} registrations={registrations} onExport={onExport} />
+        <ReportsPanel summary={summary} dashboard={dashboard} registrations={registrations} reportFilters={reportFilters} onReportFiltersChange={onReportFiltersChange} onExport={onExport} />
       </>
     );
   }
@@ -573,18 +581,18 @@ function AdminSection({
 }
 
 function LoginScreen({
-  draftKey,
-  draftActor,
+  draftPassword,
+  draftEmail,
   error,
-  onChange,
-  onActorChange,
+  onPasswordChange,
+  onEmailChange,
   onSubmit,
 }: {
-  draftKey: string;
-  draftActor: string;
+  draftPassword: string;
+  draftEmail: string;
   error: string;
-  onChange: (value: string) => void;
-  onActorChange: (value: string) => void;
+  onPasswordChange: (value: string) => void;
+  onEmailChange: (value: string) => void;
   onSubmit: (event: FormEvent) => void;
 }) {
   return (
@@ -595,19 +603,21 @@ function LoginScreen({
         <p className="mb-3 text-xs font-black uppercase tracking-[0.28em] text-brand">Centro de comando</p>
         <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FunPace Run</h1>
         <p className="mb-8 font-mono text-sm leading-relaxed text-zinc-400">
-          Acesse vendas, inscrições, lotes, pagamentos e operação do evento com a chave administrativa.
+          Acesse vendas, inscricoes, lotes, pagamentos e operacao do evento com email e senha administrativa.
         </p>
         <div>
           <input
+            type="email"
             required
-            value={draftActor}
-            onChange={(event) => onActorChange(event.target.value)}
+            autoComplete="username"
+            value={draftEmail}
+            onChange={(event) => onEmailChange(event.target.value)}
             className="mb-3 w-full border border-zinc-800 bg-black px-4 py-4 text-white outline-none transition-colors focus:border-brand"
-            placeholder="Seu nome para auditoria"
+            placeholder="Email administrativo"
           />
           <div className="relative">
             <Lock className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
-            <input type="password" required value={draftKey} onChange={(event) => onChange(event.target.value)} className="w-full border border-zinc-800 bg-black py-4 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand" placeholder="Chave de acesso" />
+            <input type="password" required autoComplete="current-password" value={draftPassword} onChange={(event) => onPasswordChange(event.target.value)} className="w-full border border-zinc-800 bg-black py-4 pl-11 pr-4 text-white outline-none transition-colors focus:border-brand" placeholder="Senha administrativa" />
           </div>
         </div>
         {error && <p className="mt-4 text-sm font-bold uppercase tracking-wider text-brand">{error}</p>}
@@ -1271,13 +1281,18 @@ function ReportsPanel({
   summary,
   dashboard,
   registrations,
+  reportFilters,
+  onReportFiltersChange,
   onExport,
 }: {
   summary: AdminSummaryResponse | null;
   dashboard: DashboardModel;
   registrations: AdminRegistration[];
+  reportFilters: { dateFrom: string; dateTo: string };
+  onReportFiltersChange: (filters: { dateFrom: string; dateTo: string }) => void;
   onExport: () => void;
 }) {
+  const [exportError, setExportError] = useState('');
   const paidRegistrations = registrations.filter((registration) => registration.status === 'paid');
   const pendingRegistrations = registrations.filter((registration) => registration.status === 'pending_payment');
   const confirmationEmailMissing = paidRegistrations.filter((registration) => !registration.confirmationEmailSentAt);
@@ -1305,11 +1320,36 @@ function ReportsPanel({
     (summary?.totals.confirmationEmailsFailed ?? 0) > 0 ? `${summary?.totals.confirmationEmailsFailed ?? 0} emails de confirmacao com erro registrado.` : '',
     dashboard.pendingPayments > 0 ? `${dashboard.pendingPayments} inscricoes ainda pendentes de pagamento.` : '',
   ].filter(Boolean);
+  const exportReport = async (url: string, filename: string) => {
+    setExportError('');
+    try {
+      const response = await fetch(url, { credentials: 'include' });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { message?: string } | null;
+        throw new Error(payload?.message || 'Nao foi possivel exportar o relatorio.');
+      }
+      const blob = await response.blob();
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(downloadUrl);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'Nao foi possivel exportar o relatorio.');
+    }
+  };
+  const registrationReportUrl = getAdminCsvUrl({ ...reportFilters });
+  const paidReportUrl = getAdminCsvUrl({ ...reportFilters, reportType: 'paid' });
+  const kitReportUrl = getAdminCsvUrl({ ...reportFilters, reportType: 'kits' });
+  const checkInReportUrl = getAdminCsvUrl({ ...reportFilters, reportType: 'checkins' });
+  const paymentsReportUrl = getAdminPaymentsCsvUrl({ ...reportFilters });
 
   return (
     <section className="mt-4 space-y-4">
       <Panel title="Central de relatorios" eyebrow="Exportacao e conferencia">
-        <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
+        <div className="grid gap-3">
+          {exportError && <p className="border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">{exportError}</p>}
           <div>
             <p className="text-sm leading-relaxed text-zinc-400">
               Relatorios operacionais para conferir inscritos, pagamentos, camisetas, kit, check-in e emails de confirmacao.
@@ -1318,13 +1358,17 @@ function ReportsPanel({
               O CSV exporta a base completa com campos de pagamento, gateway e email.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onExport}
-            className="flex min-h-12 items-center justify-center gap-2 bg-brand px-4 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white"
-          >
-            <Download className="h-4 w-4" /> Exportar CSV
-          </button>
+          <div className="grid gap-3 lg:grid-cols-[180px_180px_1fr] lg:items-end">
+            <label className="text-xs font-bold text-zinc-400">Periodo inicial<input type="date" value={reportFilters.dateFrom} onChange={(event) => onReportFiltersChange({ ...reportFilters, dateFrom: event.target.value })} className="mt-1 min-h-11 w-full border border-white/10 bg-black px-3 text-white" /></label>
+            <label className="text-xs font-bold text-zinc-400">Periodo final<input type="date" value={reportFilters.dateTo} onChange={(event) => onReportFiltersChange({ ...reportFilters, dateTo: event.target.value })} className="mt-1 min-h-11 w-full border border-white/10 bg-black px-3 text-white" /></label>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={onExport} className="flex min-h-11 items-center justify-center gap-2 bg-brand px-4 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white"><Download className="h-4 w-4" /> Base completa</button>
+              <button type="button" onClick={() => void exportReport(registrationReportUrl, 'funpace-run-inscricoes.csv')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Inscricoes</button>
+              <button type="button" onClick={() => void exportReport(paymentsReportUrl, 'funpace-run-pagamentos.csv')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Pagamentos</button>
+              <button type="button" onClick={() => void exportReport(kitReportUrl, 'funpace-run-kits.csv')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Kits</button>
+              <button type="button" onClick={() => void exportReport(checkInReportUrl, 'funpace-run-checkins.csv')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Check-ins</button>
+            </div>
+          </div>
         </div>
       </Panel>
 
@@ -1499,9 +1543,9 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
     <section className="mt-4 border border-white/10 bg-zinc-950/80">
       <div className="border-b border-white/10 p-4 md:p-5">
         <p className="text-xs font-black uppercase tracking-widest text-brand">Auditoria</p>
-        <h2 className="mt-2 text-2xl font-black tracking-tight">Histórico administrativo</h2>
+        <h2 className="mt-2 text-2xl font-black tracking-tight">Historico administrativo</h2>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-          Registro das ações críticas feitas no admin e por automações do sistema.
+          Registro das acoes criticas feitas no admin e por automacoes do sistema.
         </p>
       </div>
 
@@ -1524,7 +1568,7 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
           <table className="w-full min-w-215 text-left">
             <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
               <tr>
-                <th className="p-4">Ação</th>
+                <th className="p-4">Acao</th>
                 <th className="p-4">Entidade</th>
                 <th className="p-4">Ator</th>
                 <th className="p-4">Origem</th>
@@ -1551,7 +1595,7 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
         </div>
       )}
       <div className="flex items-center justify-between border-t border-white/10 p-4 text-xs text-zinc-400"><button disabled={pagination.page <= 1} onClick={() => setFilters({ ...filters, page: String(pagination.page - 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Anterior</button><span>{pagination.total} logs · pagina {pagination.page}/{pagination.totalPages}</span><button disabled={pagination.page >= pagination.totalPages} onClick={() => setFilters({ ...filters, page: String(pagination.page + 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Proxima</button></div>
-      {selectedLog && <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4"><div className="w-full max-w-2xl border border-white/10 bg-zinc-950 p-5"><div className="flex justify-between"><h3 className="text-xl font-black">{auditActionLabel(selectedLog.action)}</h3><button onClick={() => setSelectedLog(null)}><X /></button></div><p className="mt-2 font-mono text-xs text-zinc-500">{selectedLog.actor} · {dateTimeFormatter.format(new Date(selectedLog.createdAt))}</p><pre className="mt-4 max-h-[60vh] overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(selectedLog.payload, null, 2)}</pre></div></div>}
+      {selectedLog && <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4"><div className="w-full max-w-3xl border border-white/10 bg-zinc-950 p-5"><div className="flex items-start justify-between gap-3"><div><h3 className="text-xl font-black">{auditActionLabel(selectedLog.action)}</h3><p className="mt-1 text-sm text-zinc-400">{summarizeAuditPayload(selectedLog.payload)}</p></div><button onClick={() => setSelectedLog(null)}><X /></button></div><div className="mt-4 grid gap-3 border border-white/10 bg-black/30 p-4 text-xs text-zinc-400 sm:grid-cols-2"><div><p className="font-bold uppercase tracking-widest text-zinc-500">Ator</p><p className="mt-1 text-sm text-zinc-200">{selectedLog.actor}</p><p className="mt-1 uppercase tracking-widest text-zinc-500">{selectedLog.actorRole || 'sistema'}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Data</p><p className="mt-1 font-mono text-sm text-zinc-200">{dateTimeFormatter.format(new Date(selectedLog.createdAt))}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Entidade</p><p className="mt-1 text-sm text-zinc-200">{auditEntityLabel(selectedLog.entityType)}</p><p className="mt-1 font-mono text-[11px] text-zinc-500">{selectedLog.entityId}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Origem</p><p className="mt-1 font-mono text-sm text-zinc-200">{selectedLog.ipAddress || 'IP n/a'}</p><p className="mt-1 font-mono text-[11px] text-zinc-500">{selectedLog.sessionId || 'sessao n/a'}</p></div></div>{selectedLog.entityType === 'registration' && <div className="mt-4 flex justify-end"><button type="button" onClick={() => void openRegistrationFromLog(selectedLog)} className="border border-brand/30 px-3 py-2 text-xs font-black uppercase text-brand">{openingRegistrationId === selectedLog.entityId ? 'Abrindo inscricao...' : 'Abrir inscricao relacionada'}</button></div>}<pre className="mt-4 max-h-[60vh] overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(selectedLog.payload, null, 2)}</pre></div></div>}
     </section>
   );
 }
@@ -1560,9 +1604,27 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
   const [config, setConfig] = useState<AdminEventConfig | null>(null);
   const [message, setMessage] = useState('');
   const [saveDraft, setSaveDraft] = useState<{ kind: 'event' | 'distance' | 'lot'; id?: string; reason: string } | null>(null);
+  const [checkLoading, setCheckLoading] = useState<'email' | 'gateway' | ''>('');
+  const [checkResult, setCheckResult] = useState<{ target: 'email' | 'gateway'; summary: string; ok: boolean; checks: Array<{ label: string; ok: boolean; detail: string }> } | null>(null);
   const load = () => getAdminEventConfig(adminKey).then(setConfig).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Nao foi possivel carregar o evento.'));
   useEffect(() => { void load(); }, [adminKey]);
   if (!config) return <section className="mt-4 border border-white/10 bg-zinc-950 p-6 text-zinc-400">{message || 'Carregando configuracao...'}</section>;
+  const availabilityLabel = {
+    available: 'Inscricoes disponiveis',
+    scheduled: 'Aguardando abertura',
+    closed: 'Inscricoes indisponiveis',
+  }[config.health.sales.registrationAvailability];
+  const now = Date.now();
+  const eventAlerts = [
+    config.event.status === 'published' && !config.health.database.ok ? { key: 'database', tone: 'warning' as const, title: 'Banco indisponivel', detail: config.health.database.issue || 'Sem conexao valida com o banco principal.' } : null,
+    config.event.status === 'published' && !config.health.email.configured ? { key: 'email', tone: 'warning' as const, title: 'Email pendente', detail: 'O evento esta publicado, mas o email transacional nao esta configurado.' } : null,
+    config.event.status === 'published' && !config.health.gateway.configured ? { key: 'gateway', tone: 'warning' as const, title: 'Gateway pendente', detail: 'O evento esta publicado, mas o gateway nao esta pronto para gerar vendas.' } : null,
+    config.event.status === 'published' && !config.health.sales.activeLotId ? { key: 'active-lot', tone: 'warning' as const, title: 'Sem lote ativo', detail: 'Nao existe lote ativo para um evento publicado.' } : null,
+    config.event.status === 'published' && config.health.sales.activeDistances === 0 ? { key: 'distances', tone: 'warning' as const, title: 'Sem distancias ativas', detail: 'Ative pelo menos uma distancia para liberar inscricoes.' } : null,
+    config.lots.some((lot) => lot.status === 'active' && new Date(lot.endsAt).getTime() < now) ? { key: 'expired-lot', tone: 'warning' as const, title: 'Lote ativo vencido', detail: 'Existe lote ativo com encerramento no passado.' } : null,
+    config.lots.some((lot) => new Date(lot.startsAt).getTime() >= new Date(lot.endsAt).getTime()) ? { key: 'invalid-window', tone: 'warning' as const, title: 'Janela de venda invalida', detail: 'Um ou mais lotes possuem inicio maior ou igual ao fim.' } : null,
+    config.event.status === 'draft' && config.health.sales.registrationAvailability === 'available' ? { key: 'draft-open', tone: 'warning' as const, title: 'Evento em rascunho com vendas prontas', detail: 'Ha lote e distancias ativas, mas o evento ainda esta como rascunho.' } : null,
+  ].filter(Boolean) as Array<{ key: string; tone: 'warning'; title: string; detail: string }>;
   const updateEvent = (field: keyof AdminEventConfig['event'], value: string) => setConfig({ ...config, event: { ...config.event, [field]: value } });
   const submitSave = async () => {
     if (!saveDraft || saveDraft.reason.trim().length < 5) return;
@@ -1587,8 +1649,55 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
       setMessage(error instanceof ApiError ? error.message : 'Falha ao atualizar.');
     }
   };
+  const runCheck = async (target: 'email' | 'gateway') => {
+    setCheckLoading(target);
+    setMessage('');
+    try {
+      const result = await runAdminSystemCheck(adminKey, target);
+      setCheckResult(result);
+      setMessage(result.summary);
+      await load();
+    } catch (error) {
+      setMessage(error instanceof ApiError ? error.message : 'Falha ao executar diagnostico.');
+    } finally {
+      setCheckLoading('');
+    }
+  };
   return <section className="mt-4 space-y-4">
     {message && <p className="border border-brand/20 bg-brand/10 p-3 text-sm text-brand">{message}</p>}
+    {eventAlerts.length > 0 && <Panel title="Alertas automaticos" eyebrow="Prioridade"><div className="grid gap-3 lg:grid-cols-2">{eventAlerts.map((alert) => <div key={alert.key} className="border border-amber-400/20 bg-amber-400/10 p-4"><p className="text-xs font-black uppercase tracking-widest text-amber-300">{alert.title}</p><p className="mt-2 text-sm text-amber-50">{alert.detail}</p></div>)}</div></Panel>}
+    <Panel title="Saude do sistema" eyebrow="Operacao">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <MetricBox label="Banco" value={config.health.database.ok ? 'Online' : 'Falha'} detail={config.health.database.provider} tone={config.health.database.ok ? 'default' : 'warning'} />
+        <MetricBox label="Email" value={config.health.email.configured ? 'Configurado' : 'Pendente'} detail={config.health.email.provider} tone={config.health.email.configured ? 'default' : 'warning'} />
+        <MetricBox label="Gateway" value={config.health.gateway.configured ? 'Configurado' : 'Pendente'} detail={config.health.gateway.provider} tone={config.health.gateway.configured ? 'default' : 'warning'} />
+        <MetricBox label="Inscricoes" value={availabilityLabel} detail={config.health.sales.activeLotName || 'Sem lote ativo'} tone={config.health.sales.registrationAvailability === 'available' ? 'default' : 'warning'} />
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        <div className="border border-white/10 bg-black/30 p-4 text-sm text-zinc-300">
+          <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Disponibilidade</p>
+          <div className="mt-3 space-y-2">
+            <p>Status do evento: <span className="font-bold">{config.health.sales.eventStatus}</span></p>
+            <p>Lote ativo: <span className="font-bold">{config.health.sales.activeLotName || 'Nenhum'}</span></p>
+            <p>Distancias ativas: <span className="font-bold">{config.health.sales.activeDistances}</span> de {config.health.sales.availableDistances}</p>
+          </div>
+        </div>
+        <div className="border border-white/10 bg-black/30 p-4 text-sm text-zinc-300">
+          <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Diagnostico</p>
+          <div className="mt-3 space-y-2">
+            {!config.health.database.ok && <p className="text-amber-300">Banco indisponivel: {config.health.database.issue || 'sem detalhes'}</p>}
+            {!config.health.email.configured && <p className="text-amber-300">Email transacional nao configurado.</p>}
+            {!config.health.gateway.configured && <p className="text-amber-300">Gateway sem provider ou handle configurado.</p>}
+            {config.health.database.ok && config.health.email.configured && config.health.gateway.configured && <p className="text-brand">Servicos principais configurados para operacao.</p>}
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button type="button" onClick={() => void runCheck('email')} disabled={checkLoading !== ''} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand disabled:opacity-50">{checkLoading === 'email' ? 'Validando email...' : 'Validar email'}</button>
+            <button type="button" onClick={() => void runCheck('gateway')} disabled={checkLoading !== ''} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand disabled:opacity-50">{checkLoading === 'gateway' ? 'Validando gateway...' : 'Validar gateway'}</button>
+          </div>
+        </div>
+      </div>
+      {checkResult && <div className="mt-4 border border-white/10 bg-black/30 p-4 text-sm text-zinc-300"><p className="text-xs font-black uppercase tracking-widest text-zinc-500">Ultimo diagnostico: {checkResult.target}</p><p className={`mt-3 font-bold ${checkResult.ok ? 'text-brand' : 'text-amber-300'}`}>{checkResult.summary}</p><div className="mt-3 space-y-2">{checkResult.checks.map((item) => <div key={`${checkResult.target}-${item.label}`} className="flex items-start justify-between gap-3 border-t border-white/10 pt-2 first:border-t-0 first:pt-0"><div><p className="font-bold">{item.label}</p><p className="text-xs text-zinc-500">{item.detail}</p></div><span className={item.ok ? 'text-brand' : 'text-amber-300'}>{item.ok ? 'OK' : 'Pendente'}</span></div>)}</div></div>}
+    </Panel>
     <Panel title="Dados do evento" eyebrow="Configuracao">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <EditInput label="Nome" value={config.event.name} onChange={(value) => updateEvent('name', value)} />

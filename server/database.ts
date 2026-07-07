@@ -137,6 +137,17 @@ export type AdminSessionRecord = {
   userAgent: string | null;
 };
 
+export type AdminUserRecord = {
+  id: string;
+  email: string;
+  passwordHash: string;
+  role: 'administrator' | 'finance' | 'operation';
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt: string | null;
+  disabledAt: string | null;
+};
+
 export type PartnershipLeadStatus = 'new' | 'contacted' | 'negotiating' | 'approved' | 'rejected';
 
 export type PartnershipLeadRecord = {
@@ -163,6 +174,7 @@ export type Database = {
   kitDeliveries: KitDeliveryRecord[];
   auditLogs: AuditLogRecord[];
   adminSessions: AdminSessionRecord[];
+  adminUsers: AdminUserRecord[];
   partnershipLeads: PartnershipLeadRecord[];
 };
 
@@ -209,6 +221,7 @@ const table = {
   kitDeliveries: '"run-kit-deliveries"',
   auditLogs: '"run-audit-logs"',
   adminSessions: '"run-admin-sessions"',
+  adminUsers: '"run-admin-users"',
   partnershipLeads: '"run-partnership-leads"',
 } as const;
 
@@ -264,6 +277,7 @@ const initialDatabase: Database = {
   kitDeliveries: [],
   auditLogs: [],
   adminSessions: [],
+  adminUsers: [],
   partnershipLeads: [],
 };
 
@@ -303,6 +317,7 @@ function normalizeDatabase(database: Partial<Database>): Database {
     kitDeliveries: database.kitDeliveries || [],
     auditLogs: database.auditLogs || [],
     adminSessions: database.adminSessions || [],
+    adminUsers: database.adminUsers || [],
     partnershipLeads: database.partnershipLeads || [],
   };
 }
@@ -448,6 +463,17 @@ async function ensurePostgresDatabase(client: Queryable) {
       user_agent text
     );
 
+    create table if not exists ${table.adminUsers} (
+      id text primary key,
+      email text not null unique,
+      password_hash text not null,
+      role text not null check (role in ('administrator', 'finance', 'operation')),
+      created_at text not null,
+      updated_at text not null,
+      last_login_at text,
+      disabled_at text
+    );
+
     create table if not exists ${table.partnershipLeads} (
       id text primary key,
       company_name text not null,
@@ -469,6 +495,7 @@ async function ensurePostgresDatabase(client: Queryable) {
     create index if not exists "run-audit-logs_entity_idx" on ${table.auditLogs}(entity_type, entity_id);
     create index if not exists "run-admin-sessions_actor_idx" on ${table.adminSessions}(actor);
     create index if not exists "run-admin-sessions_expires_at_idx" on ${table.adminSessions}(expires_at);
+    create unique index if not exists "run-admin-users_email_idx" on ${table.adminUsers}(email);
     create index if not exists "run-partnership-leads_status_idx" on ${table.partnershipLeads}(status);
     create index if not exists "run-partnership-leads_created_at_idx" on ${table.partnershipLeads}(created_at);
   `);
@@ -515,6 +542,44 @@ async function ensurePostgresReady() {
 }
 
 async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope = 'all'): Promise<Database> {
+  if (scope === 'admin-auth') {
+    const adminSessions = await client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`);
+    const adminUsers = await client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`);
+
+    return {
+      events: [],
+      distances: [],
+      lots: [],
+      registrations: [],
+      payments: [],
+      paymentEvents: [],
+      checkIns: [],
+      kitDeliveries: [],
+      auditLogs: [],
+      adminSessions: adminSessions.rows.map((row) => ({
+        id: row.id,
+        actor: row.actor,
+        role: row.role,
+        createdAt: row.created_at,
+        expiresAt: row.expires_at,
+        revokedAt: row.revoked_at,
+        ipAddress: row.ip_address,
+        userAgent: row.user_agent,
+      })),
+      adminUsers: adminUsers.rows.map((row) => ({
+        id: row.id,
+        email: row.email,
+        passwordHash: row.password_hash,
+        role: row.role,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        lastLoginAt: row.last_login_at,
+        disabledAt: row.disabled_at,
+      })),
+      partnershipLeads: [],
+    };
+  }
+
   const include = {
     events: ['all', 'availability', 'checkout'].includes(scope),
     distances: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
@@ -526,10 +591,11 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     kitDeliveries: ['all', 'admin-registrations'].includes(scope),
     auditLogs: ['all', 'audit', 'checkout', 'admin-registrations'].includes(scope),
     adminSessions: ['all', 'admin-auth'].includes(scope),
+    adminUsers: ['all'].includes(scope),
     partnershipLeads: ['all', 'partnerships'].includes(scope),
   };
   const emptyRows = Promise.resolve({ rows: [] });
-  const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs, adminSessions, partnershipLeads] = await Promise.all([
+  const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs, adminSessions, adminUsers, partnershipLeads] = await Promise.all([
     include.events ? client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows,
     include.distances ? client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows,
     include.lots ? client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows,
@@ -540,6 +606,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     include.kitDeliveries ? client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows,
     include.auditLogs ? client.query(`select id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at from ${table.auditLogs}`) : emptyRows,
     include.adminSessions ? client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`) : emptyRows,
+    include.adminUsers ? client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`) : emptyRows,
     include.partnershipLeads ? client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`) : emptyRows,
   ]);
 
@@ -659,6 +726,16 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       revokedAt: row.revoked_at,
       ipAddress: row.ip_address,
       userAgent: row.user_agent,
+    })),
+    adminUsers: adminUsers.rows.map((row) => ({
+      id: row.id,
+      email: row.email,
+      passwordHash: row.password_hash,
+      role: row.role,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      lastLoginAt: row.last_login_at,
+      disabledAt: row.disabled_at,
     })),
     partnershipLeads: partnershipLeads.rows.map((row) => ({
       id: row.id,
@@ -882,6 +959,22 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          ip_address = excluded.ip_address,
          user_agent = excluded.user_agent`,
       [item.id, item.actor, item.role, item.createdAt, item.expiresAt, item.revokedAt, item.ipAddress, item.userAgent],
+    );
+  }
+
+  for (const item of database.adminUsers) {
+    await client.query(
+      `insert into ${table.adminUsers} (id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (id) do update set
+         email = excluded.email,
+         password_hash = excluded.password_hash,
+         role = excluded.role,
+         created_at = excluded.created_at,
+         updated_at = excluded.updated_at,
+         last_login_at = excluded.last_login_at,
+         disabled_at = excluded.disabled_at`,
+      [item.id, item.email, item.passwordHash, item.role, item.createdAt, item.updatedAt, item.lastLoginAt, item.disabledAt],
     );
   }
 

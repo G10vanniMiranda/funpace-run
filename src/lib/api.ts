@@ -5,6 +5,7 @@ import type {
   AdminRegistrationsResponse,
   AdminOperationResponse,
   AdminEventConfig,
+  AdminSystemCheckResponse,
   AdminRegistrationActionResponse,
   AdminRegistrationEditable,
   AdminRegistrationDetailsResponse,
@@ -319,8 +320,8 @@ async function adminFetch<ResponsePayload>(path: string, adminKey: string, init:
 
 export type AdminSession = { actor: string; role: 'administrator' | 'finance' | 'operation'; expiresAt: string };
 
-export function loginAdmin(key: string, actor: string) {
-  return apiFetch<AdminSession>('/api/admin/session', { method: 'POST', body: JSON.stringify({ key, actor }), sensitive: true, retry: false });
+export function loginAdmin(email: string, password: string) {
+  return apiFetch<AdminSession>('/api/admin/session', { method: 'POST', body: JSON.stringify({ email, password }), sensitive: true, retry: false });
 }
 
 export function getAdminSession() {
@@ -401,6 +402,7 @@ export function getAdminEventConfig(adminKey: string) { return adminFetch<AdminE
 export function updateAdminEventConfig(adminKey: string, changes: Record<string, unknown>, reason: string) { return adminFetch<{ event: AdminEventConfig['event'] }>('/api/admin/event-config', adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes, reason }) }); }
 export function updateAdminDistance(adminKey: string, distanceId: string, changes: { capacity: number; status: string; reason: string }) { return adminFetch<{ distance: AdminEventConfig['distances'][number] }>(`/api/admin/distances/${encodeURIComponent(distanceId)}`, adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) }); }
 export function updateAdminLot(adminKey: string, lotId: string, changes: { name: string; capacity: number; priceCents: number; status: string; startsAt: string; endsAt: string; reason: string }) { return adminFetch<{ lot: AdminEventConfig['lots'][number] }>(`/api/admin/lots/${encodeURIComponent(lotId)}`, adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) }); }
+export function runAdminSystemCheck(adminKey: string, target: 'email' | 'gateway') { return adminFetch<AdminSystemCheckResponse>(`/api/admin/system-checks/${target}`, adminKey, { method: 'POST' }); }
 
 export function maintainAdminRegistration(adminKey: string, registrationId: string, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit', reason = '') {
   return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`, adminKey, {

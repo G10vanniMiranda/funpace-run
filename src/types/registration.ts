@@ -185,6 +185,26 @@ export type AdminEventConfig = {
   event: { id: string; name: string; slug: string; status: string; date: string; startTime: string; locationName: string; city: string; state: string };
   distances: Array<{ id: string; eventId: string; name: string; distanceKm: number; capacity: number; status: string }>;
   lots: Array<{ id: string; eventId: string; name: string; priceCents: number; capacity: number; soldCount: number; status: string; startsAt: string; endsAt: string }>;
+  health: {
+    database: { ok: boolean; provider: string; issue?: string };
+    email: { configured: boolean; enabled: boolean; provider: string };
+    gateway: { configured: boolean; provider: string; handle: string | null };
+    sales: {
+      eventStatus: string;
+      registrationAvailability: 'available' | 'scheduled' | 'closed';
+      activeLotId: string | null;
+      activeLotName: string | null;
+      activeDistances: number;
+      availableDistances: number;
+    };
+  };
+};
+
+export type AdminSystemCheckResponse = {
+  ok: boolean;
+  target: 'email' | 'gateway';
+  summary: string;
+  checks: Array<{ label: string; ok: boolean; detail: string }>;
 };
 
 export type AdminRegistrationActionResponse = {

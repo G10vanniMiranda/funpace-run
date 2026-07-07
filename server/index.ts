@@ -1,8 +1,9 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation.js';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
+import { canUndoCheckIn, canUndoKit, getCheckInConflictMessage, getKitConflictMessage, validateBibAssignment } from './admin-guards.js';
 import {
   attachCheckoutToPaymentInPostgres,
   createPendingRegistrationInPostgres,
@@ -41,22 +42,13 @@ const infinitePayHandle = process.env.INFINITEPAY_HANDLE || process.env.INFINITI
 const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
 const partnershipWebhookUrl = process.env.PARTNERSHIP_WEBHOOK_URL || '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
+const adminBootstrapEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+const adminBootstrapPassword = String(process.env.ADMIN_PASSWORD || '');
 const adminSessionSecret = process.env.ADMIN_SESSION_SECRET || adminApiKey;
 const adminSessionSecretConfigured = adminSessionSecret.length >= 32 && adminSessionSecret !== adminApiKey;
 const adminSessionTtlSeconds = Math.max(Number(process.env.ADMIN_SESSION_TTL_SECONDS || 28_800), 900);
 const adminCookieName = 'funpace_admin_session';
 type AdminRole = 'administrator' | 'finance' | 'operation';
-type AdminCredential = { username: string; key: string; role: AdminRole };
-const configuredAdminUsers = (() => {
-  try {
-    const parsed = JSON.parse(process.env.ADMIN_USERS_JSON || '[]') as AdminCredential[];
-    return parsed.filter((item) => item.username && item.key && ['administrator', 'finance', 'operation'].includes(item.role));
-  } catch { return []; }
-})();
-const adminUsers: AdminCredential[] = configuredAdminUsers.length
-  ? configuredAdminUsers
-  : [{ username: process.env.ADMIN_USERNAME || 'Administrador', key: adminApiKey, role: 'administrator' }];
-const adminCredentialsConfigured = adminUsers.some((item) => item.key && item.key !== 'change-me');
 const isProduction = process.env.NODE_ENV === 'production';
 const pendingPaymentTtlMinutesInput = Number(process.env.PENDING_PAYMENT_TTL_MINUTES || 30);
 const pendingPaymentTtlMinutes = Number.isFinite(pendingPaymentTtlMinutesInput)
@@ -133,6 +125,61 @@ function csv(res: ServerResponse, filename: string, content: string) {
 
 type AdminSession = { id: string; actor: string; role: AdminRole; expiresAt: number };
 
+function hashAdminPassword(password: string, salt = randomBytes(16).toString('hex')) {
+  const derivedKey = scryptSync(password, salt, 64).toString('hex');
+  return `scrypt$${salt}$${derivedKey}`;
+}
+
+function verifyAdminPassword(password: string, passwordHash: string) {
+  const [algorithm, salt, storedKey] = String(passwordHash || '').split('$');
+  if (algorithm !== 'scrypt' || !salt || !storedKey) {
+    return false;
+  }
+
+  const derivedBuffer = Buffer.from(scryptSync(password, salt, 64).toString('hex'));
+  const storedBuffer = Buffer.from(storedKey);
+  return derivedBuffer.length === storedBuffer.length && timingSafeEqual(derivedBuffer, storedBuffer);
+}
+
+let adminBootstrapPromise: Promise<void> | null = null;
+
+async function ensureAdminBootstrap() {
+  if (!adminBootstrapEmail || !adminBootstrapPassword) {
+    return;
+  }
+
+  if (!adminBootstrapPromise) {
+    adminBootstrapPromise = transaction((database) => {
+      const now = new Date().toISOString();
+      const existingUser = database.adminUsers.find((item) => item.email === adminBootstrapEmail);
+      const passwordHash = hashAdminPassword(adminBootstrapPassword);
+
+      if (existingUser) {
+        existingUser.passwordHash = passwordHash;
+        existingUser.role = 'administrator';
+        existingUser.updatedAt = now;
+        existingUser.disabledAt = null;
+        return;
+      }
+
+      database.adminUsers.push({
+        id: randomUUID(),
+        email: adminBootstrapEmail,
+        passwordHash,
+        role: 'administrator',
+        createdAt: now,
+        updatedAt: now,
+        lastLoginAt: null,
+        disabledAt: null,
+      });
+    }, { scope: 'admin-auth' }).then(() => {
+      console.log(`Admin bootstrap ensured for ${adminBootstrapEmail}`);
+    });
+  }
+
+  await adminBootstrapPromise;
+}
+
 function signAdminSession(session: AdminSession) {
   const payload = Buffer.from(JSON.stringify(session)).toString('base64url');
   const signature = createHmac('sha256', adminSessionSecret).update(payload).digest('base64url');
@@ -184,10 +231,6 @@ async function readAdminSession(req: IncomingMessage): Promise<AdminSession | nu
 }
 
 async function requireAdmin(req: IncomingMessage, res: ServerResponse, roles?: AdminRole[]) {
-  if (isProduction && !adminCredentialsConfigured) {
-    json(res, 503, { message: 'Painel administrativo indisponivel. Configure ADMIN_USERS_JSON ou ADMIN_API_KEY.' });
-    return null;
-  }
   if (isProduction && !adminSessionSecretConfigured) { json(res, 503, { message: 'Configure ADMIN_SESSION_SECRET com pelo menos 32 caracteres.' }); return null; }
 
   const session = await readAdminSession(req);
@@ -223,27 +266,48 @@ async function handleAdminLogin(req: IncomingMessage, res: ServerResponse) {
   if (!requireJson(req, res)) return;
   if (!requireAdminDatabase(res)) return;
   if (isProduction && !adminSessionSecretConfigured) { json(res, 503, { message: 'Configure ADMIN_SESSION_SECRET com pelo menos 32 caracteres.' }); return; }
-  const body = parseJsonBody<{ key?: string; actor?: string }>(await readBody(req));
-  const supplied = String(body?.key || '');
-  const username = compactText(body?.actor, 80);
-  if (isAdminLoginRateLimited(req, username)) { json(res, 429, { message: 'Muitas tentativas de login. Aguarde alguns minutos.' }); return; }
-  const credential = adminUsers.find((item) => item.username.toLowerCase() === username.toLowerCase());
-  const suppliedBuffer = Buffer.from(supplied); const expectedBuffer = Buffer.from(credential?.key || adminSessionSecret);
-  if (!credential || suppliedBuffer.length !== expectedBuffer.length || !timingSafeEqual(suppliedBuffer, expectedBuffer)) { json(res, 401, { message: 'Credenciais administrativas invalidas.' }); return; }
-  resetAdminLoginRateLimit(req, username);
-  const session: AdminSession = { id: randomUUID(), actor: credential.username, role: credential.role, expiresAt: Date.now() + adminSessionTtlSeconds * 1000 };
-  await transaction((database) => {
+  await ensureAdminBootstrap();
+  const body = parseJsonBody<{ email?: string; password?: string; actor?: string; key?: string }>(await readBody(req));
+  const suppliedEmail = compactText(body?.email || body?.actor, 120).toLowerCase();
+  const suppliedPassword = String(body?.password || body?.key || '');
+  if (isAdminLoginRateLimited(req, suppliedEmail)) { json(res, 429, { message: 'Muitas tentativas de login. Aguarde alguns minutos.' }); return; }
+  const adminUser = await transaction(
+    (database) => database.adminUsers.find((item) => item.email === suppliedEmail && !item.disabledAt) || null,
+    { persist: false, scope: 'admin-auth' },
+  );
+  if (!adminUser || !verifyAdminPassword(suppliedPassword, adminUser.passwordHash)) { json(res, 401, { message: 'Credenciais administrativas invalidas.' }); return; }
+  resetAdminLoginRateLimit(req, suppliedEmail);
+  const session = await transaction((database) => {
+    const storedUser = database.adminUsers.find((item) => item.id === adminUser.id && !item.disabledAt);
+    if (!storedUser) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    storedUser.lastLoginAt = now;
+    storedUser.updatedAt = now;
+
+    const nextSession: AdminSession = {
+      id: randomUUID(),
+      actor: storedUser.email,
+      role: storedUser.role,
+      expiresAt: Date.now() + adminSessionTtlSeconds * 1000,
+    };
+
     database.adminSessions.push({
-      id: session.id,
-      actor: session.actor,
-      role: session.role,
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(session.expiresAt).toISOString(),
+      id: nextSession.id,
+      actor: nextSession.actor,
+      role: nextSession.role,
+      createdAt: now,
+      expiresAt: new Date(nextSession.expiresAt).toISOString(),
       revokedAt: null,
       ipAddress: getClientIp(req),
       userAgent: getUserAgent(req),
     });
-  });
+
+    return nextSession;
+  }, { scope: 'admin-auth' });
+  if (!session) { json(res, 401, { message: 'Credenciais administrativas invalidas.' }); return; }
   res.setHeader('Set-Cookie', buildAdminCookie(signAdminSession(session), adminSessionTtlSeconds));
   json(res, 200, { actor: session.actor, role: session.role, expiresAt: new Date(session.expiresAt).toISOString() });
 }
@@ -1685,6 +1749,9 @@ async function getAdminRows(url: URL) {
   const lotId = url.searchParams.get('lotId') || '';
   const distanceId = url.searchParams.get('distanceId') || '';
   const status = url.searchParams.get('status') || '';
+  const reportType = url.searchParams.get('reportType') || '';
+  const dateFrom = url.searchParams.get('dateFrom') || '';
+  const dateTo = url.searchParams.get('dateTo') || '';
   const city = (url.searchParams.get('city') || '').trim().toLowerCase();
   const team = (url.searchParams.get('team') || '').trim().toLowerCase();
   const shirtSize = (url.searchParams.get('shirtSize') || '').trim().toUpperCase();
@@ -1719,6 +1786,21 @@ async function getAdminRows(url: URL) {
       );
     })
     .map((registration) => toAdminRow(database, registration))
+    .filter((row) => {
+      if (reportType === 'kits' && row.kitStatus !== 'delivered') return false;
+      if (reportType === 'checkins' && row.checkInStatus !== 'checked_in') return false;
+      if (reportType === 'paid' && row.status !== 'paid') return false;
+      if (reportType === 'pending' && row.status !== 'pending_payment') return false;
+      const referenceDate = reportType === 'kits'
+        ? (row.kitDeliveredAt || '')
+        : reportType === 'checkins'
+          ? (row.checkInAt || '')
+          : row.createdAt;
+      const day = referenceDate ? referenceDate.slice(0, 10) : '';
+      if (dateFrom && (!day || day < dateFrom)) return false;
+      if (dateTo && (!day || day > dateTo)) return false;
+      return true;
+    })
     .sort((a, b) => {
       const allowedSorts: Record<string, keyof typeof a> = { createdAt: 'createdAt', fullName: 'fullName', status: 'status', amountCents: 'amountCents', bibNumber: 'bibNumber' };
       const field = allowedSorts[sortBy] || 'createdAt';
@@ -1970,7 +2052,46 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
 async function handleAdminEventConfig(req: IncomingMessage, res: ServerResponse) {
   if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
   const database = await transaction((current) => current, { persist: false });
-  json(res, 200, { event: database.events[0] || null, distances: database.distances, lots: database.lots });
+  const event = database.events[0] || null;
+  const now = Date.now();
+  const activeLot = database.lots.find((item) => item.status === 'active');
+  const scheduledLot = database.lots.find((item) => item.status === 'scheduled' && new Date(item.startsAt).getTime() > now);
+  const activeDistances = database.distances.filter((item) => item.status === 'active').length;
+  const availableDistances = database.distances.filter((item) => item.status !== 'inactive').length;
+  const salesAvailability: 'available' | 'scheduled' | 'closed' = event?.status !== 'published'
+    ? 'closed'
+    : activeLot && activeDistances > 0
+      ? 'available'
+      : scheduledLot
+        ? 'scheduled'
+        : 'closed';
+  const databaseHealth = await pingDatabase();
+  json(res, 200, {
+    event,
+    distances: database.distances,
+    lots: database.lots,
+    health: {
+      database: databaseHealth,
+      email: {
+        configured: isEmailConfigured(),
+        enabled: isEmailConfigured(),
+        provider: getEmailProvider(),
+      },
+      gateway: {
+        configured: Boolean(paymentProvider && infinitePayHandle),
+        provider: paymentProvider || 'not_configured',
+        handle: infinitePayHandle || null,
+      },
+      sales: {
+        eventStatus: event?.status || 'draft',
+        registrationAvailability: salesAvailability,
+        activeLotId: activeLot?.id || null,
+        activeLotName: activeLot?.name || null,
+        activeDistances,
+        availableDistances,
+      },
+    },
+  });
 }
 
 async function handleAdminEventUpdate(req: IncomingMessage, res: ServerResponse) {
@@ -2025,6 +2146,36 @@ async function handleAdminLotUpdate(req: IncomingMessage, res: ServerResponse, l
   }); json(res, result.statusCode, result.payload);
 }
 
+async function handleAdminSystemCheck(req: IncomingMessage, res: ServerResponse, target: 'email' | 'gateway') {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+
+  const database = await transaction((current) => current, { persist: false });
+  const event = database.events[0] || null;
+  const activeLot = database.lots.find((item) => item.status === 'active') || null;
+  const activeDistances = database.distances.filter((item) => item.status === 'active');
+
+  if (target === 'email') {
+    const checks = [
+      { label: 'Provider', ok: getEmailProvider() !== 'not_configured', detail: getEmailProvider() },
+      { label: 'Configuracao', ok: isEmailConfigured(), detail: isEmailConfigured() ? 'Email pronto para uso.' : 'Faltam credenciais ou remetente.' },
+      { label: 'Evento base', ok: Boolean(event?.name && event?.date), detail: event ? `${event.name} em ${event.date}` : 'Evento nao encontrado.' },
+    ];
+    const ok = checks.every((item) => item.ok);
+    json(res, 200, { ok, target, summary: ok ? 'Email configurado para operacao.' : 'Email com pendencias de configuracao.', checks });
+    return;
+  }
+
+  const checks = [
+    { label: 'Provider', ok: Boolean(paymentProvider), detail: paymentProvider || 'Nao configurado' },
+    { label: 'Handle', ok: Boolean(infinitePayHandle), detail: infinitePayHandle || 'Nao configurado' },
+    { label: 'Evento publicado', ok: event?.status === 'published', detail: event?.status || 'Evento ausente' },
+    { label: 'Lote ativo', ok: Boolean(activeLot), detail: activeLot?.name || 'Nenhum lote ativo' },
+    { label: 'Distancias ativas', ok: activeDistances.length > 0, detail: `${activeDistances.length} ativa(s)` },
+  ];
+  const ok = checks.every((item) => item.ok);
+  json(res, 200, { ok, target, summary: ok ? 'Gateway pronto para gerar vendas.' : 'Gateway com pendencias operacionais.', checks });
+}
+
 type AdminActionRequest = {
   notes?: string;
 };
@@ -2062,7 +2213,13 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
     const existing = database.checkIns.find((item) => item.registrationId === registration.id);
 
     if (existing) {
-      return { statusCode: 200, payload: { registration: toAdminRow(database, registration), duplicated: true } };
+      return {
+        statusCode: 409,
+        payload: {
+          message: getCheckInConflictMessage({ actor: existing.checkedInBy || null, at: existing.checkedInAt || null }),
+          registration: toAdminRow(database, registration),
+        },
+      };
     } else {
       database.checkIns.push({
         id: randomUUID(),
@@ -2122,7 +2279,13 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
     const existing = database.kitDeliveries.find((item) => item.registrationId === registration.id);
 
     if (existing) {
-      return { statusCode: 200, payload: { registration: toAdminRow(database, registration), duplicated: true } };
+      return {
+        statusCode: 409,
+        payload: {
+          message: getKitConflictMessage({ actor: existing.deliveredBy || null, at: existing.deliveredAt || null }),
+          registration: toAdminRow(database, registration),
+        },
+      };
     } else {
       database.kitDeliveries.push({
         id: randomUUID(),
@@ -2174,8 +2337,16 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
       registration.status = 'cancelled'; registration.updatedAt = now;
       const payment = database.payments.find((item) => item.registrationId === registrationId); if (payment) { payment.status = 'cancelled'; payment.updatedAt = now; }
     } else if (action === 'undo-check-in') {
+      const undoCheckInMessage = canUndoCheckIn(database.checkIns.some((item) => item.registrationId === registrationId));
+      if (undoCheckInMessage) {
+        return { statusCode: 409, payload: { message: undoCheckInMessage } };
+      }
       database.checkIns = database.checkIns.filter((item) => item.registrationId !== registrationId);
     } else if (action === 'undo-kit') {
+      const undoKitMessage = canUndoKit(database.kitDeliveries.some((item) => item.registrationId === registrationId));
+      if (undoKitMessage) {
+        return { statusCode: 409, payload: { message: undoKitMessage } };
+      }
       database.kitDeliveries = database.kitDeliveries.filter((item) => item.registrationId !== registrationId);
     }
     database.auditLogs.push(createAuditLog(req, adminSession, { actor, action: `registration.${action}`, entityType: 'registration', entityId: registrationId, payload: { reason }, createdAt: now }));
@@ -2243,7 +2414,17 @@ async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, r
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
     const registration = database.registrations.find((item) => item.id === registrationId);
     if (!registration) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
-    if (database.registrations.some((item) => item.eventId === registration.eventId && item.id !== registrationId && item.bibNumber === bibNumber)) return { statusCode: 409, payload: { message: 'Numero de peito ja utilizado neste evento.' } };
+    const event = database.events.find((item) => item.id === registration.eventId);
+    const lot = database.lots.find((item) => item.id === registration.lotId);
+    const bibAssignmentError = validateBibAssignment({
+      registrationStatus: registration.status,
+      eventStatus: event?.status || null,
+      lotStatus: lot?.status || null,
+      currentBibNumber: registration.bibNumber || null,
+      nextBibNumber: bibNumber,
+      isBibTaken: database.registrations.some((item) => item.eventId === registration.eventId && item.id !== registrationId && item.bibNumber === bibNumber),
+    });
+    if (bibAssignmentError) return { statusCode: 409, payload: { message: bibAssignmentError } };
     const previous = registration.bibNumber || null; const now = new Date().toISOString(); registration.bibNumber = bibNumber; registration.updatedAt = now;
     database.auditLogs.push(createAuditLog(req, adminSession, { action: 'registration.bib_assigned', entityType: 'registration', entityId: registrationId, payload: { reason, previous, bibNumber }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
@@ -2585,6 +2766,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/event-config') { await handleAdminEventConfig(req, res); return; }
     if (req.method === 'PATCH' && url.pathname === '/api/admin/event-config') { await handleAdminEventUpdate(req, res); return; }
+    if (req.method === 'POST' && url.pathname === '/api/admin/system-checks/email') { await handleAdminSystemCheck(req, res, 'email'); return; }
+    if (req.method === 'POST' && url.pathname === '/api/admin/system-checks/gateway') { await handleAdminSystemCheck(req, res, 'gateway'); return; }
     const adminDistanceUpdate = url.pathname.match(/^\/api\/admin\/distances\/([^/]+)$/);
     if (req.method === 'PATCH' && adminDistanceUpdate) { await handleAdminDistanceUpdate(req, res, decodeURIComponent(adminDistanceUpdate[1])); return; }
     const adminLotUpdate = url.pathname.match(/^\/api\/admin\/lots\/([^/]+)$/);
@@ -2677,5 +2860,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   createServer(handleApiRequest).listen(port, () => {
     console.log(`FunPace Run API listening on http://localhost:${port}`);
+    void ensureAdminBootstrap().catch((error) => {
+      console.error('Failed to ensure admin bootstrap user.', error);
+    });
   });
 }

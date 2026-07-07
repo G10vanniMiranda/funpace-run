@@ -124,6 +124,17 @@ create table if not exists "run-admin-sessions" (
   user_agent text
 );
 
+create table if not exists "run-admin-users" (
+  id text primary key,
+  email text not null unique,
+  password_hash text not null,
+  role text not null check (role in ('administrator', 'finance', 'operation')),
+  created_at text not null,
+  updated_at text not null,
+  last_login_at text,
+  disabled_at text
+);
+
 create table if not exists "run-partnership-leads" (
   id text primary key,
   company_name text not null,
@@ -145,6 +156,7 @@ create unique index if not exists "run-kit-deliveries_registration_id_idx" on "r
 create index if not exists "run-audit-logs_entity_idx" on "run-audit-logs"(entity_type, entity_id);
 create index if not exists "run-admin-sessions_actor_idx" on "run-admin-sessions"(actor);
 create index if not exists "run-admin-sessions_expires_at_idx" on "run-admin-sessions"(expires_at);
+create unique index if not exists "run-admin-users_email_idx" on "run-admin-users"(email);
 create index if not exists "run-partnership-leads_status_idx" on "run-partnership-leads"(status);
 create index if not exists "run-partnership-leads_created_at_idx" on "run-partnership-leads"(created_at);
 
