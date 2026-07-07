@@ -6,6 +6,7 @@ import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStat
 import { canUndoCheckIn, canUndoKit, getCheckInConflictMessage, getKitConflictMessage, validateBibAssignment } from './admin-guards.js';
 import {
   attachCheckoutToPaymentInPostgres,
+  cancelRegistrationInPostgres,
   claimRegistrationEmailInPostgres,
   completeRegistrationEmailInPostgres,
   createAdminSessionInPostgres,
@@ -1013,7 +1014,7 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
       registrationId,
       reason: 'email provider not configured',
     }));
-    return;
+    return { ok: false, skipped: true, provider, error: 'Email provider not configured.' };
   }
 
   const context = usesPostgresDatabase()
@@ -1077,7 +1078,7 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
     }, { scope: 'checkout' });
 
   if (!context) {
-    return;
+    return null;
   }
 
   let result;
@@ -1152,6 +1153,8 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
     providerMessageId: result.providerMessageId,
     error: result.ok ? undefined : result.error,
   }));
+
+  return result;
 }
 
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
@@ -2439,9 +2442,34 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
     const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
     const registration = database.registrations.find((item) => item.id === registrationId);
     if (!registration || registration.status !== 'paid') { json(res, 409, { message: 'Reenvio permitido apenas para inscricoes pagas.' }); return; }
-    await processRegistrationEmail('confirmation', registrationId, { force: true });
+    const emailResult = await processRegistrationEmail('confirmation', registrationId, { force: true });
     const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
-    json(res, 200, { registration: toAdminRow(refreshed, refreshed.registrations.find((item) => item.id === registrationId)!) }); return;
+    const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId)!;
+    if (!emailResult?.ok) {
+      json(res, 502, {
+        message: `Nao foi possivel reenviar o email: ${emailResult?.error || refreshedRegistration.confirmationEmailError || 'falha desconhecida'}`,
+        registration: toAdminRow(refreshed, refreshedRegistration),
+      });
+      return;
+    }
+    json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration), message: 'Email de confirmacao reenviado com sucesso.' }); return;
+  }
+  if (action === 'cancel' && usesPostgresDatabase()) {
+    const cancelResult = await cancelRegistrationInPostgres({
+      registrationId,
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      reason,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+    });
+    if (cancelResult.status === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+    if (cancelResult.status === 'already_closed') { json(res, 409, { message: 'Inscricao ja encerrada.' }); return; }
+    const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+    const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId)!;
+    json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration), message: 'Inscricao cancelada com sucesso.' });
+    return;
   }
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
     const registration = database.registrations.find((item) => item.id === registrationId);

@@ -160,6 +160,7 @@ export function AdminPage() {
   const [reportFilters, setReportFilters] = useState({ dateFrom: '', dateTo: '' });
   const [registrationPagination, setRegistrationPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
   const [error, setError] = useState('');
+  const [actionMessage, setActionMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [activeNav, setActiveNav] = useState<AdminNavKey>('registrations');
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -303,6 +304,7 @@ export function AdminPage() {
   };
 
   const handleMaintenance = async (registration: AdminRegistration, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit') => {
+    setActionMessage('');
     setMaintenanceDraft({ registration, action, reason: '' });
   };
 
@@ -311,7 +313,7 @@ export function AdminPage() {
     const needsReason = maintenanceDraft.action !== 'resend-email';
     if (needsReason && maintenanceDraft.reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
     setActionLoading(maintenanceDraft.action); setError('');
-    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setMaintenanceDraft(null); }
+    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setActionMessage(response.message || (maintenanceDraft.action === 'cancel' ? 'Inscricao cancelada com sucesso.' : maintenanceDraft.action === 'resend-email' ? 'Email de confirmacao reenviado com sucesso.' : 'Acao concluida com sucesso.')); setMaintenanceDraft(null); }
     catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel concluir a acao.'); }
     finally { setActionLoading(''); }
   };
@@ -403,6 +405,7 @@ export function AdminPage() {
             {error && error !== 'Acesso administrativo não autorizado.' && (
               <StatusMessage tone="error" message={error} />
             )}
+            {actionMessage && <StatusMessage tone="success" message={actionMessage} />}
 
             <AdminSection
               adminKey={adminKey}
@@ -443,18 +446,23 @@ export function AdminPage() {
 
       {maintenanceDraft && (
         <ActionModal
-          title="Confirmar acao administrativa"
-          description={`Voce esta prestes a executar ${maintenanceDraft.action} para ${maintenanceDraft.registration.fullName}.`}
-          confirmLabel="Confirmar"
+          title={maintenanceDraft.action === 'cancel' ? 'Cancelar inscricao' : maintenanceDraft.action === 'resend-email' ? 'Reenviar email' : 'Confirmar acao administrativa'}
+          description={maintenanceDraft.action === 'cancel'
+            ? `A inscricao de ${maintenanceDraft.registration.fullName} sera cancelada e a vaga sera liberada.`
+            : maintenanceDraft.action === 'resend-email'
+              ? `A confirmacao sera reenviada para ${maintenanceDraft.registration.email}.`
+              : `Confirme a acao para ${maintenanceDraft.registration.fullName}.`}
+          confirmLabel={actionLoading ? 'Processando...' : maintenanceDraft.action === 'cancel' ? 'Cancelar inscricao' : maintenanceDraft.action === 'resend-email' ? 'Reenviar email' : 'Confirmar'}
           confirmTone={maintenanceDraft.action === 'cancel' ? 'danger' : 'brand'}
-          confirmDisabled={maintenanceDraft.action !== 'resend-email' && maintenanceDraft.reason.trim().length < 5}
+          confirmDisabled={actionLoading !== '' || (maintenanceDraft.action !== 'resend-email' && maintenanceDraft.reason.trim().length < 5)}
           onConfirm={() => void submitMaintenance()}
           onClose={() => setMaintenanceDraft(null)}
         >
           {maintenanceDraft.action !== 'resend-email' && (
             <label className="block text-xs font-bold text-zinc-400">
-              Motivo da acao
+              Motivo da acao <span className="font-normal text-zinc-500">(minimo de 5 caracteres)</span>
               <textarea value={maintenanceDraft.reason} onChange={(event) => setMaintenanceDraft({ ...maintenanceDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
+              <span className="mt-1 block text-right font-mono text-[10px] text-zinc-500">{maintenanceDraft.reason.trim().length}/5</span>
             </label>
           )}
         </ActionModal>
@@ -2108,7 +2116,9 @@ function AthleteDrawer({
         </div>
 
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {canResendEmail && registration.status === 'paid' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'resend-email')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Reenviar email</button>}
+          {canResendEmail && (registration.status === 'paid'
+            ? <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'resend-email')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Reenviar email</button>
+            : <button type="button" disabled title="Disponivel somente apos a confirmacao do pagamento" className="cursor-not-allowed border border-white/10 px-3 py-2 text-xs font-black uppercase text-zinc-600">Email disponivel apos pagamento</button>)}
           {canHandleOperation && registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
           {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
           {canCancelRegistration && !['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscricao</button>}
@@ -2364,9 +2374,9 @@ function SkeletonBlock() {
   );
 }
 
-function StatusMessage({ tone, message }: { tone: 'error'; message: string }) {
+function StatusMessage({ tone, message }: { tone: 'error' | 'success'; message: string }) {
   return (
-    <div className={`mb-4 border p-4 text-sm font-bold uppercase tracking-wider ${tone === 'error' ? 'border-red-400/30 bg-red-400/10 text-red-100' : ''}`}>
+    <div className={`mb-4 border p-4 text-sm font-bold uppercase tracking-wider ${tone === 'error' ? 'border-red-400/30 bg-red-400/10 text-red-100' : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100'}`} role={tone === 'error' ? 'alert' : 'status'}>
       {message}
     </div>
   );

@@ -209,6 +209,7 @@ export type AdminSystemCheckResponse = {
 
 export type AdminRegistrationActionResponse = {
   registration: AdminRegistration;
+  message?: string;
 };
 
 export type AdminRegistrationEditable = Pick<AdminRegistration, 'fullName' | 'email' | 'phone' | 'birthDate' | 'gender' | 'shirtSize' | 'emergencyContactName' | 'emergencyContactPhone' | 'city' | 'state' | 'team'>;

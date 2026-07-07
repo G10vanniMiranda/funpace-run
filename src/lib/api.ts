@@ -309,13 +309,13 @@ function toQueryString(filters: Record<string, string>) {
   return query ? `?${query}` : '';
 }
 
-async function adminFetch<ResponsePayload>(path: string, adminKey: string, init: RequestInit = {}) {
+async function adminFetch<ResponsePayload>(path: string, adminKey: string, init: ApiRequestOptions = {}) {
   const headers = new Headers(init.headers);
 
   return apiFetch<ResponsePayload>(path, {
     ...init,
     headers,
-    retry: true,
+    retry: init.retry ?? true,
     sensitive: true,
   });
 }
@@ -408,7 +408,7 @@ export function runAdminSystemCheck(adminKey: string, target: 'email' | 'gateway
 
 export function maintainAdminRegistration(adminKey: string, registrationId: string, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit', reason = '') {
   return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`, adminKey, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false,
   });
 }
 

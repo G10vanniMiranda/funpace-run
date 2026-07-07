@@ -1397,6 +1397,82 @@ export async function revokeAdminSessionInPostgres(sessionId: string, revokedAt:
   );
 }
 
+export type CancelRegistrationResult =
+  | { status: 'cancelled'; previousStatus: RegistrationStatus }
+  | { status: 'not_found' | 'already_closed' };
+
+export async function cancelRegistrationInPostgres(input: {
+  registrationId: string;
+  actor: string;
+  actorRole: string;
+  reason: string;
+  sessionId: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+}): Promise<CancelRegistrationResult> {
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    const registrationResult = await client.query(
+      `select status, lot_id from ${table.registrations} where id = $1 for update`,
+      [input.registrationId],
+    );
+    const registration = registrationResult.rows[0];
+
+    if (!registration) {
+      await client.query('rollback');
+      return { status: 'not_found' };
+    }
+
+    if (['cancelled', 'refunded'].includes(registration.status)) {
+      await client.query('rollback');
+      return { status: 'already_closed' };
+    }
+
+    const now = new Date().toISOString();
+    await client.query(
+      `update ${table.registrations}
+       set status = 'cancelled', updated_at = $1, expires_at = null
+       where id = $2`,
+      [now, input.registrationId],
+    );
+    await client.query(
+      `update ${table.payments}
+       set status = 'cancelled', updated_at = $1, expires_at = null
+       where registration_id = $2`,
+      [now, input.registrationId],
+    );
+
+    if (['pending_payment', 'paid'].includes(registration.status)) {
+      await client.query(
+        `update ${table.lots}
+         set sold_count = greatest(sold_count - 1, 0),
+             status = case when status = 'sold_out' then 'active' else status end
+         where id = $1`,
+        [registration.lot_id],
+      );
+    }
+
+    await client.query(
+      `insert into ${table.auditLogs}
+       (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [randomUUID(), input.actor, input.actorRole, 'registration.cancel', 'registration', input.registrationId, {
+        reason: input.reason,
+        previousStatus: registration.status,
+      }, input.sessionId, input.ipAddress, input.userAgent, now],
+    );
+    await client.query('commit');
+    return { status: 'cancelled', previousStatus: registration.status };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function claimRegistrationEmailInPostgres(
   kind: RegistrationEmailDeliveryKind,
   registrationId: string,
