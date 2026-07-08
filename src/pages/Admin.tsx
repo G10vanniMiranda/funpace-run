@@ -999,7 +999,7 @@ function PaymentControlPanel({
                     <p>{registration.gatewayStatus || 'Gateway nao informado'}</p>
                     <p className="mt-1 uppercase">{registration.paymentMethod || 'Metodo nao informado'}</p>
                     {registration.paidAt && <p className="mt-1 font-mono">Pago: {dateTimeFormatter.format(new Date(registration.paidAt))}</p>}
-                    {registration.hasPaymentDivergence && <p className="mt-1 font-black text-red-300">VALOR DIVERGENTE</p>}
+                    {registration.hasPaymentDivergence && <p className="mt-1 font-black text-red-300">Inconsistência detectada entre pagamento e inscrição.</p>}
                     <button type="button" onClick={() => void openDetails(registration)} className="mt-2 inline-flex items-center gap-1 border border-white/10 px-2 py-1 hover:border-brand hover:text-brand"><Eye className="h-3 w-3" /> Detalhes</button>
                   </td>
                 </tr>

@@ -28,7 +28,7 @@ import {
   type RegistrationRecord,
 } from './database.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, sendRegistrationEmail, type RegistrationEmailContext, type RegistrationEmailKind } from './email.js';
-import { createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
+import { checkInfinitePayPayment, createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 
 const port = Number(process.env.API_PORT || 3001);
 const defaultAllowedOrigins = [
@@ -726,6 +726,23 @@ function expirePendingPayments(database: Database, now = new Date()) {
   let expiredCount = 0;
 
   for (const registration of database.registrations) {
+    const payment = database.payments.find((item) => item.registrationId === registration.id);
+
+    // Payment confirmation is monotonic. A stale registration must never expire
+    // when any persisted payment evidence already proves settlement.
+    if (payment?.status === 'paid' || payment?.paidAt || registration.paidAt || registration.confirmedAt) {
+      registration.status = 'paid';
+      registration.expiresAt = null;
+      registration.paidAt ||= payment?.paidAt || now.toISOString();
+      registration.confirmedAt ||= registration.paidAt;
+      registration.updatedAt = now.toISOString();
+      if (payment) {
+        payment.status = 'paid';
+        payment.expiresAt = null;
+      }
+      continue;
+    }
+
     if (registration.status !== 'pending_payment') {
       continue;
     }
@@ -741,8 +758,6 @@ function expirePendingPayments(database: Database, now = new Date()) {
     registration.status = 'expired';
     registration.updatedAt = now.toISOString();
     expiredCount += 1;
-
-    const payment = database.payments.find((item) => item.registrationId === registration.id);
 
     if (payment) {
       payment.status = 'expired';
@@ -857,6 +872,10 @@ export function toPaymentProviderStatus(event: {
   }
 
   return 'pending_payment';
+}
+
+export function resolvePaymentTransition(current: RegistrationStatus, incoming: RegistrationStatus): RegistrationStatus {
+  return current === 'paid' && incoming !== 'paid' ? 'paid' : incoming;
 }
 
 type NormalizedPaymentWebhook = {
@@ -1625,7 +1644,8 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     const payment = database.payments.find((item) => item.registrationId === registration.id);
     const now = new Date().toISOString();
     const providerEventId = normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId || '';
-    const nextStatus = normalizedEvent.nextStatus;
+    // Never downgrade a confirmed payment because of a delayed/stale event.
+    const nextStatus = resolvePaymentTransition(registration.status, normalizedEvent.nextStatus);
 
     if (normalizedEvent.amountCents !== null && normalizedEvent.amountCents !== registration.amountCents) {
       if (payment) {
@@ -1740,11 +1760,13 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined }, registrationId: registration.id, nextStatus };
   }, { scope: 'checkout' });
 
+  json(res, result.statusCode, result.payload);
+
+  // Acknowledge the gateway before external e-mail I/O. InfinitePay recommends
+  // responding in under one second and retries failed webhook responses.
   if (result.statusCode === 200 && result.nextStatus === 'paid' && result.registrationId) {
     await processRegistrationEmail('confirmation', result.registrationId);
   }
-
-  json(res, result.statusCode, result.payload);
 }
 
 async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
@@ -1758,10 +1780,11 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     return;
   }
   const payment = database.payments.find((item) => item.registrationId === registration.id);
+  const paymentProvesPaid = payment?.status === 'paid' || Boolean(payment?.paidAt);
 
   json(res, 200, {
     registrationId: registration.id,
-    status: registration.status,
+    status: paymentProvesPaid ? 'paid' : registration.status,
     paymentStatus: payment?.status || registration.status,
     amountCents: registration.amountCents,
     distanceId: registration.distanceId,
@@ -1769,8 +1792,8 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     createdAt: registration.createdAt,
     updatedAt: registration.updatedAt,
     expiresAt: registration.expiresAt || null,
-    paidAt: registration.paidAt || null,
-    confirmedAt: registration.confirmedAt || null,
+    paidAt: registration.paidAt || payment?.paidAt || null,
+    confirmedAt: registration.confirmedAt || (paymentProvesPaid ? payment?.paidAt || null : null),
     gatewayStatus: payment?.gatewayStatus || null,
     gatewayTransactionId: payment?.gatewayTransactionId || payment?.providerPaymentId || null,
     pendingEmailSentAt: registration.pendingEmailSentAt || null,
@@ -1936,7 +1959,10 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
   const kitDelivery = database.kitDeliveries.find((item) => item.registrationId === registration.id);
   const paymentEvents = payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id) : [];
   const paymentMethod = toStringValue(findFirstValue(payment?.gatewayPayload, ['payment_method', 'paymentMethod', 'method', 'payment_type', 'paymentType']));
-  const hasPaymentDivergence = paymentEvents.some((item) => item.eventType === 'infinitepay.amount_mismatch');
+  const paymentProvesPaid = payment?.status === 'paid' || Boolean(payment?.paidAt);
+  const statusMismatch = paymentProvesPaid && registration.status !== 'paid';
+  const hasPaymentDivergence = statusMismatch || paymentEvents.some((item) => item.eventType === 'infinitepay.amount_mismatch');
+  const effectiveStatus = paymentProvesPaid ? 'paid' : registration.status;
 
   return {
     id: registration.id,
@@ -1964,7 +1990,7 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     lot: lot?.name || registration.lotId,
     lotId: registration.lotId,
     shirtSize: registration.payload.shirtSize,
-    status: registration.status,
+    status: effectiveStatus,
     paymentStatus: payment?.status || registration.status,
     paymentProvider: payment?.provider || null,
     providerPaymentId: payment?.providerPaymentId || null,
@@ -2068,6 +2094,33 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
   const body = parseJsonBody<{ reason?: string }>(rawBody);
   const reason = body?.reason?.trim() || '';
   if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
+  const snapshot = await transaction((database) => {
+    const registration = database.registrations.find((item) => item.id === registrationId);
+    const payment = database.payments.find((item) => item.registrationId === registrationId);
+    return registration && payment ? { registration, payment } : null;
+  }, { persist: false, scope: 'checkout' });
+  if (!snapshot) { json(res, 404, { message: 'Pagamento nao encontrado.' }); return; }
+  if (!snapshot.payment.gatewayTransactionId || !snapshot.payment.providerPaymentId) {
+    json(res, 409, { message: 'Pagamento sem transaction_nsu ou invoice_slug. Vincule o evento do gateway antes de reconciliar.' }); return;
+  }
+
+  let gatewayCheck;
+  try {
+    gatewayCheck = await checkInfinitePayPayment({
+      handle: infinitePayHandle,
+      orderNsu: registrationId,
+      transactionNsu: snapshot.payment.gatewayTransactionId,
+      slug: snapshot.payment.providerPaymentId,
+    });
+  } catch (error) {
+    const status = error instanceof InfinitePayError ? error.statusCode || 502 : 502;
+    json(res, status, { message: error instanceof Error ? error.message : 'Falha ao consultar a InfinitePay.' }); return;
+  }
+  if (!gatewayCheck.paid) { json(res, 409, { message: 'A InfinitePay ainda nao confirmou este pagamento.' }); return; }
+  if (gatewayCheck.amountCents !== null && gatewayCheck.amountCents !== snapshot.registration.amountCents) {
+    json(res, 409, { message: 'O valor confirmado pela InfinitePay diverge da inscricao.' }); return;
+  }
+
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
     const registration = database.registrations.find((item) => item.id === registrationId);
     const payment = database.payments.find((item) => item.registrationId === registrationId);
@@ -2076,12 +2129,40 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
     const previousStatus = registration.status;
     if (['payment_failed', 'expired', 'cancelled', 'refunded'].includes(registration.status)) claimRegistrationCapacity(database, registration);
     registration.status = 'paid'; registration.updatedAt = now; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null;
-    payment.status = 'paid'; payment.gatewayStatus = 'manual_reconciled_paid'; payment.paidAt ||= now; payment.updatedAt = now; payment.expiresAt = null;
-    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'payment.manual_reconciled', entityType: 'registration', entityId: registrationId, payload: { reason, previousStatus }, createdAt: now }));
+    payment.status = 'paid'; payment.gatewayStatus = 'verified_paid'; payment.paidAt ||= now; payment.updatedAt = now; payment.expiresAt = null; payment.gatewayPayload = gatewayCheck.raw;
+    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'payment.gateway_reconciled', entityType: 'registration', entityId: registrationId, payload: { reason, previousStatus, transactionNsu: payment.gatewayTransactionId, invoiceSlug: payment.providerPaymentId }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   }, { scope: 'checkout' });
   json(res, result.statusCode, result.payload);
   if (result.statusCode === 200) await processRegistrationEmail('confirmation', registrationId);
+}
+
+async function handlePaymentConfirmation(req: IncomingMessage, res: ServerResponse) {
+  if (!requireJson(req, res)) return;
+  const body = parseJsonBody<{ orderNsu?: string; transactionNsu?: string; slug?: string }>(await readBody(req));
+  const orderNsu = compactText(body?.orderNsu, 100);
+  const transactionNsu = compactText(body?.transactionNsu, 160);
+  const slug = compactText(body?.slug, 160);
+  if (!orderNsu || !transactionNsu || !slug) { json(res, 400, { message: 'Dados do retorno da InfinitePay incompletos.' }); return; }
+
+  const check = await checkInfinitePayPayment({ handle: infinitePayHandle, orderNsu, transactionNsu, slug });
+  if (!check.paid) { json(res, 202, { status: 'pending_payment' }); return; }
+
+  const result = await transaction<{ statusCode: number; status?: RegistrationStatus; registrationId?: string; payload: unknown }>((database) => {
+    const registration = database.registrations.find((item) => item.id === orderNsu);
+    const payment = database.payments.find((item) => item.registrationId === orderNsu);
+    if (!registration || !payment) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
+    if (check.amountCents !== null && check.amountCents !== registration.amountCents) return { statusCode: 409, payload: { message: 'Valor do pagamento divergente.' } };
+    const now = new Date().toISOString();
+    const previousStatus = registration.status;
+    if (['payment_failed', 'expired', 'cancelled', 'refunded'].includes(previousStatus)) claimRegistrationCapacity(database, registration);
+    registration.status = 'paid'; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null; registration.updatedAt = now;
+    payment.status = 'paid'; payment.provider = 'infinitepay'; payment.providerPaymentId = slug; payment.gatewayTransactionId = transactionNsu; payment.gatewayStatus = 'verified_paid'; payment.gatewayPayload = check.raw; payment.paidAt ||= now; payment.expiresAt = null; payment.updatedAt = now;
+    database.auditLogs.push({ id: randomUUID(), actor: 'system', action: 'payment.redirect_reconciled', entityType: 'registration', entityId: orderNsu, payload: { previousStatus, transactionNsu, invoiceSlug: slug }, createdAt: now });
+    return { statusCode: 200, status: 'paid', registrationId: orderNsu, payload: { status: 'paid' } };
+  }, { scope: 'checkout' });
+  json(res, result.statusCode, result.payload);
+  if (result.statusCode === 200 && result.registrationId) await processRegistrationEmail('confirmation', result.registrationId);
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -2988,6 +3069,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     if (req.method === 'POST' && url.pathname === '/api/webhooks/payment') {
       await handlePaymentWebhook(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/payments/confirm') {
+      await handlePaymentConfirmation(req, res);
       return;
     }
 

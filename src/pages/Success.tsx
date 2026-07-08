@@ -1,7 +1,7 @@
 import { AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { getWhatsAppUrl } from '../config/whatsapp';
-import { ApiError, getRegistrationStatus } from '../lib/api';
+import { ApiError, confirmInfinitePayReturn, getRegistrationStatus } from '../lib/api';
 import type { RegistrationStatus } from '../types/registration';
 
 const statusLabels: Record<RegistrationStatus, string> = {
@@ -22,6 +22,7 @@ export function SuccessPage() {
   const receiptUrl = params.get('receipt_url');
   const captureMethod = params.get('capture_method');
   const transactionNsu = params.get('transaction_nsu');
+  const slug = params.get('slug');
   const [status, setStatus] = useState<RegistrationStatus | null>(null);
   const [isPolling, setIsPolling] = useState(false);
   const [message, setMessage] = useState('Consultando status da inscrição...');
@@ -41,6 +42,14 @@ export function SuccessPage() {
 
     async function pollRegistrationStatus() {
       setIsPolling(true);
+
+      if (transactionNsu && slug) {
+        try {
+          await confirmInfinitePayReturn(registrationId, transactionNsu, slug);
+        } catch {
+          // Polling remains the fallback when the redirect-side reconciliation fails.
+        }
+      }
 
       for (const delayMs of pollingDelaysMs) {
         if (delayMs > 0) {

@@ -17,6 +17,7 @@ import type {
   PartnershipLeadRequest,
   PartnershipLeadResponse,
   RegistrationFormData,
+  RegistrationStatus,
   RegistrationStatusResponse,
 } from '../types/registration';
 
@@ -285,6 +286,14 @@ export function getAvailability() {
 export function getRegistrationStatus(registrationId: string) {
   return apiFetch<RegistrationStatusResponse>(`/api/registrations/${encodeURIComponent(registrationId)}`, {
     retry: true,
+  });
+}
+
+export function confirmInfinitePayReturn(orderNsu: string, transactionNsu: string, slug: string) {
+  return apiFetch<{ status: RegistrationStatus }>('/api/payments/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ orderNsu, transactionNsu, slug }),
+    retry: false,
   });
 }
 

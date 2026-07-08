@@ -1,6 +1,7 @@
 import type { RegistrationFormData } from '../src/types/registration';
 
 const linksEndpoint = 'https://api.checkout.infinitepay.io/links';
+const paymentCheckEndpoint = 'https://api.checkout.infinitepay.io/payment_check';
 const requestTimeoutMs = Number(process.env.INFINITEPAY_TIMEOUT_MS || 10_000);
 
 export type InfinitePayCheckoutInput = {
@@ -16,6 +17,20 @@ export type InfinitePayCheckoutInput = {
 export type InfinitePayCheckout = {
   checkoutUrl: string;
   providerPaymentId: string | null;
+  raw: unknown;
+};
+
+export type InfinitePayPaymentCheckInput = {
+  handle: string;
+  orderNsu: string;
+  transactionNsu: string;
+  slug: string;
+};
+
+export type InfinitePayPaymentCheck = {
+  paid: boolean;
+  amountCents: number | null;
+  paidAmountCents: number | null;
   raw: unknown;
 };
 
@@ -68,6 +83,51 @@ function createTimeoutSignal(timeoutMs: number) {
   return {
     signal: controller.signal,
     clear: () => clearTimeout(timeout),
+  };
+}
+
+function toCents(value: unknown) {
+  const amount = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(amount) ? Math.round(amount) : null;
+}
+
+export async function checkInfinitePayPayment(input: InfinitePayPaymentCheckInput): Promise<InfinitePayPaymentCheck> {
+  if (!input.handle || !input.orderNsu || !input.transactionNsu || !input.slug) {
+    throw new InfinitePayError('Dados insuficientes para consultar o pagamento na InfinitePay.', 400);
+  }
+
+  const timeout = createTimeoutSignal(requestTimeoutMs);
+  let response: Response;
+
+  try {
+    response = await fetch(paymentCheckEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        handle: input.handle,
+        order_nsu: input.orderNsu,
+        transaction_nsu: input.transactionNsu,
+        slug: input.slug,
+      }),
+      signal: timeout.signal,
+    });
+  } catch (error) {
+    const timedOut = error instanceof DOMException && error.name === 'AbortError';
+    throw new InfinitePayError(timedOut ? 'A consulta a InfinitePay expirou.' : 'Nao foi possivel consultar a InfinitePay.', timedOut ? 504 : 502);
+  } finally {
+    timeout.clear();
+  }
+
+  const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (!response.ok || !payload) {
+    throw new InfinitePayError('InfinitePay nao confirmou o pagamento.', response.status, payload);
+  }
+
+  return {
+    paid: payload.paid === true || String(payload.paid).toLowerCase() === 'true',
+    amountCents: toCents(payload.amount),
+    paidAmountCents: toCents(payload.paid_amount),
+    raw: payload,
   };
 }
 
