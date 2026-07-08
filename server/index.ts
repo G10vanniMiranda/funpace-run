@@ -9,6 +9,7 @@ import {
   cancelRegistrationInPostgres,
   claimRegistrationEmailInPostgres,
   completeRegistrationEmailInPostgres,
+  confirmPaymentInPostgres,
   createAdminSessionInPostgres,
   createPendingRegistrationInPostgres,
   findAdminSessionInPostgres,
@@ -1608,6 +1609,27 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  if (usesPostgresDatabase() && normalizedEvent.nextStatus === 'paid') {
+    const result = await confirmPaymentInPostgres({
+      registrationId: normalizedEvent.registrationId,
+      providerEventId: normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId,
+      providerPaymentId: normalizedEvent.providerPaymentId,
+      providerTransactionId: normalizedEvent.providerTransactionId,
+      eventType: normalizedEvent.eventType,
+      gatewayStatus: normalizedEvent.gatewayStatus || 'paid',
+      amountCents: normalizedEvent.amountCents,
+      payload: event,
+      auditAction: 'payment.webhook_processed',
+    });
+    if (result.error === 'not_found') { json(res, 400, { success: false, message: 'Pedido nao encontrado.' }); return; }
+    if (result.error === 'amount_mismatch') { json(res, 400, { success: false, message: 'Valor do pagamento divergente.' }); return; }
+    json(res, 200, { success: true, message: null, duplicated: result.duplicated || undefined });
+    if (result.registrationId) {
+      processRegistrationEmail('confirmation', result.registrationId).catch((error) => logServerError(req, error));
+    }
+    return;
+  }
+
   const result = await transaction<{ statusCode: number; payload: unknown; registrationId?: string; nextStatus?: RegistrationStatus }>((database) => {
     expirePendingPayments(database);
 
@@ -2121,20 +2143,23 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
     json(res, 409, { message: 'O valor confirmado pela InfinitePay diverge da inscricao.' }); return;
   }
 
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const registration = database.registrations.find((item) => item.id === registrationId);
-    const payment = database.payments.find((item) => item.registrationId === registrationId);
-    if (!registration || !payment) return { statusCode: 404, payload: { message: 'Pagamento nao encontrado.' } };
-    const now = new Date().toISOString();
-    const previousStatus = registration.status;
-    if (['payment_failed', 'expired', 'cancelled', 'refunded'].includes(registration.status)) claimRegistrationCapacity(database, registration);
-    registration.status = 'paid'; registration.updatedAt = now; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null;
-    payment.status = 'paid'; payment.gatewayStatus = 'verified_paid'; payment.paidAt ||= now; payment.updatedAt = now; payment.expiresAt = null; payment.gatewayPayload = gatewayCheck.raw;
-    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'payment.gateway_reconciled', entityType: 'registration', entityId: registrationId, payload: { reason, previousStatus, transactionNsu: payment.gatewayTransactionId, invoiceSlug: payment.providerPaymentId }, createdAt: now }));
-    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
-  }, { scope: 'checkout' });
-  json(res, result.statusCode, result.payload);
-  if (result.statusCode === 200) await processRegistrationEmail('confirmation', registrationId);
+  const confirmed = await confirmPaymentInPostgres({
+    registrationId,
+    providerEventId: snapshot.payment.gatewayTransactionId,
+    providerPaymentId: snapshot.payment.providerPaymentId,
+    providerTransactionId: snapshot.payment.gatewayTransactionId,
+    eventType: 'infinitepay.admin_verified',
+    gatewayStatus: 'verified_paid',
+    amountCents: gatewayCheck.amountCents,
+    payload: gatewayCheck.raw,
+    auditAction: 'payment.gateway_reconciled',
+    actor: adminSession.actor,
+  });
+  if (confirmed.error) { json(res, confirmed.statusCode, { message: confirmed.error === 'not_found' ? 'Pagamento nao encontrado.' : 'Valor divergente.' }); return; }
+  const refreshed = await transaction((database) => database, { persist: false, scope: 'admin-registrations' });
+  const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId)!;
+  json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration) });
+  processRegistrationEmail('confirmation', registrationId).catch((error) => logServerError(req, error));
 }
 
 async function handlePaymentConfirmation(req: IncomingMessage, res: ServerResponse) {
@@ -2147,6 +2172,25 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
 
   const check = await checkInfinitePayPayment({ handle: infinitePayHandle, orderNsu, transactionNsu, slug });
   if (!check.paid) { json(res, 202, { status: 'pending_payment' }); return; }
+
+  if (usesPostgresDatabase()) {
+    const confirmed = await confirmPaymentInPostgres({
+      registrationId: orderNsu,
+      providerEventId: transactionNsu,
+      providerPaymentId: slug,
+      providerTransactionId: transactionNsu,
+      eventType: 'infinitepay.redirect_verified',
+      gatewayStatus: 'verified_paid',
+      amountCents: check.amountCents,
+      payload: check.raw,
+      auditAction: 'payment.redirect_reconciled',
+    });
+    if (confirmed.error === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+    if (confirmed.error === 'amount_mismatch') { json(res, 409, { message: 'Valor do pagamento divergente.' }); return; }
+    json(res, 200, { status: 'paid' });
+    if (confirmed.registrationId) processRegistrationEmail('confirmation', confirmed.registrationId).catch((error) => logServerError(req, error));
+    return;
+  }
 
   const result = await transaction<{ statusCode: number; status?: RegistrationStatus; registrationId?: string; payload: unknown }>((database) => {
     const registration = database.registrations.find((item) => item.id === orderNsu);

@@ -210,6 +210,27 @@ export type RegistrationEmailDeliveryResult = {
   error?: string;
 };
 
+export type PaymentConfirmationInput = {
+  registrationId: string;
+  providerEventId: string;
+  providerPaymentId: string;
+  providerTransactionId: string;
+  eventType: string;
+  gatewayStatus: string;
+  amountCents: number | null;
+  payload: unknown;
+  auditAction: string;
+  actor?: string;
+};
+
+export type PaymentConfirmationResult = {
+  statusCode: number;
+  registrationId?: string;
+  previousStatus?: RegistrationStatus;
+  duplicated?: boolean;
+  error?: 'not_found' | 'amount_mismatch';
+};
+
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
 type DatabaseReadScope =
   | 'all'
@@ -612,21 +633,21 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     adminUsers: ['all'].includes(scope),
     partnershipLeads: ['all', 'partnerships'].includes(scope),
   };
-  const emptyRows = Promise.resolve({ rows: [] });
-  const [events, distances, lots, registrations, payments, paymentEvents, checkIns, kitDeliveries, auditLogs, adminSessions, adminUsers, partnershipLeads] = await Promise.all([
-    include.events ? client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows,
-    include.distances ? client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows,
-    include.lots ? client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows,
-    include.registrations ? client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number from ${table.registrations}`) : emptyRows,
-    include.payments ? client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows,
-    include.paymentEvents ? client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows,
-    include.checkIns ? client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows,
-    include.kitDeliveries ? client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows,
-    include.auditLogs ? client.query(`select id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at from ${table.auditLogs}`) : emptyRows,
-    include.adminSessions ? client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`) : emptyRows,
-    include.adminUsers ? client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`) : emptyRows,
-    include.partnershipLeads ? client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`) : emptyRows,
-  ]);
+  const emptyRows = { rows: [] };
+  // node-postgres serializes a client; issuing Promise.all on one client is
+  // deprecated and can leave request completion detached from query completion.
+  const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
+  const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
+  const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows;
+  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number from ${table.registrations}`) : emptyRows;
+  const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
+  const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
+  const checkIns = include.checkIns ? await client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows;
+  const kitDeliveries = include.kitDeliveries ? await client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows;
+  const auditLogs = include.auditLogs ? await client.query(`select id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at from ${table.auditLogs}`) : emptyRows;
+  const adminSessions = include.adminSessions ? await client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`) : emptyRows;
+  const adminUsers = include.adminUsers ? await client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`) : emptyRows;
+  const partnershipLeads = include.partnershipLeads ? await client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`) : emptyRows;
 
   return {
     events: events.rows.map((row) => ({
@@ -1106,16 +1127,14 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       };
     }
 
-    const [distanceResult, lotResult] = await Promise.all([
-      client.query(
-        `select id, name, capacity from ${table.distances} where event_id = $1 and name = $2 and status = $3 limit 1`,
-        [event.id, input.payload.distance, 'active'],
-      ),
-      client.query(
-        `select id, name, price_cents, capacity, sold_count from ${table.lots} where event_id = $1 and status = $2 order by starts_at asc limit 1 for update`,
-        [event.id, 'active'],
-      ),
-    ]);
+    const distanceResult = await client.query(
+      `select id, name, capacity from ${table.distances} where event_id = $1 and name = $2 and status = $3 limit 1`,
+      [event.id, input.payload.distance, 'active'],
+    );
+    const lotResult = await client.query(
+      `select id, name, price_cents, capacity, sold_count from ${table.lots} where event_id = $1 and status = $2 order by starts_at asc limit 1 for update`,
+      [event.id, 'active'],
+    );
     const distance = distanceResult.rows[0];
     const lot = lotResult.rows[0];
 
@@ -1239,6 +1258,103 @@ export async function attachCheckoutToPaymentInPostgres(input: {
       ],
     );
     await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function confirmPaymentInPostgres(input: PaymentConfirmationInput): Promise<PaymentConfirmationResult> {
+  const client = await requirePool().connect();
+  const now = new Date().toISOString();
+
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '15s'");
+
+    const result = await client.query(
+      `select registration.id, registration.status, registration.amount_cents, registration.lot_id,
+              payment.id as payment_id, payment.status as payment_status
+       from ${table.registrations} registration
+       join ${table.payments} payment on payment.registration_id = registration.id
+       where registration.id = $1
+          or ($2 <> '' and payment.provider_payment_id = $2)
+          or ($3 <> '' and (payment.gateway_transaction_id = $3 or payment.provider_payment_id = $3))
+       limit 1
+       for update of registration, payment`,
+      [input.registrationId, input.providerPaymentId, input.providerTransactionId],
+    );
+    const row = result.rows[0];
+
+    if (!row) {
+      await client.query('rollback');
+      return { statusCode: 404, error: 'not_found' };
+    }
+
+    if (input.amountCents !== null && Number(row.amount_cents) !== input.amountCents) {
+      await client.query(
+        `update ${table.payments}
+         set gateway_status = 'amount_mismatch', gateway_transaction_id = coalesce(nullif($1, ''), gateway_transaction_id),
+             gateway_payload = $2, updated_at = $3
+         where id = $4`,
+        [input.providerTransactionId, input.payload, now, row.payment_id],
+      );
+      await client.query('commit');
+      return { statusCode: 409, registrationId: row.id, previousStatus: row.status, error: 'amount_mismatch' };
+    }
+
+    const duplicate = input.providerEventId
+      ? await client.query(`select 1 from ${table.paymentEvents} where provider_event_id = $1 limit 1`, [input.providerEventId])
+      : { rowCount: 0 };
+    const wasClosed = ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(row.status);
+
+    await client.query(
+      `update ${table.registrations}
+       set status = 'paid', updated_at = $1, expires_at = null,
+           paid_at = coalesce(paid_at, $1), confirmed_at = coalesce(confirmed_at, $1)
+       where id = $2`,
+      [now, row.id],
+    );
+    await client.query(
+      `update ${table.payments}
+       set provider = 'infinitepay', status = 'paid', updated_at = $1, expires_at = null,
+           paid_at = coalesce(paid_at, $1), provider_payment_id = coalesce(nullif($2, ''), provider_payment_id),
+           gateway_transaction_id = coalesce(nullif($3, ''), gateway_transaction_id),
+           gateway_status = $4, gateway_payload = $5
+       where id = $6`,
+      [now, input.providerPaymentId, input.providerTransactionId, input.gatewayStatus || 'paid', input.payload, row.payment_id],
+    );
+    if (wasClosed) {
+      await client.query(
+        `update ${table.lots} set sold_count = sold_count + 1,
+           status = case when sold_count + 1 >= capacity then 'sold_out' else status end where id = $1`,
+        [row.lot_id],
+      );
+    }
+    if (!duplicate.rowCount) {
+      await client.query(
+        `insert into ${table.paymentEvents} (id, payment_id, provider_event_id, event_type, payload, received_at)
+         values ($1, $2, $3, $4, $5, $6) on conflict (provider_event_id) do nothing`,
+        [randomUUID(), row.payment_id, input.providerEventId || randomUUID(), input.eventType, input.payload, now],
+      );
+    }
+    await client.query(
+      `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+       values ($1, $2, $3, 'registration', $4, $5, $6)`,
+      [randomUUID(), input.actor || 'system', input.auditAction, row.id, {
+        previousStatus: row.status,
+        nextStatus: 'paid',
+        providerEventId: input.providerEventId || null,
+        providerPaymentId: input.providerPaymentId || null,
+        providerTransactionId: input.providerTransactionId || null,
+      }, now],
+    );
+    await client.query('commit');
+    return { statusCode: 200, registrationId: row.id, previousStatus: row.status, duplicated: Boolean(duplicate.rowCount) };
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;
