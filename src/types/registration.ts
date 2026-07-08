@@ -169,6 +169,8 @@ export type AdminRegistration = {
   gatewayTransactionId: string | null;
   paymentMethod: string | null;
   hasPaymentDivergence: boolean;
+  googleSheetsStatus: 'not_queued' | 'pending' | 'processing' | 'synchronized' | 'failed';
+  googleSheetsSynchronizedAt: string | null;
   pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
   confirmationEmailProvider?: string | null;
@@ -180,6 +182,7 @@ export type AdminRegistrationsResponse = {
   registrations: AdminRegistration[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
+export type AdminGoogleSheetsStatus = { enabled: boolean; configured: boolean; configurationIssue: string | null; counts: { pending: number; processing: number; synchronized: number; failed: number }; lastSynchronizedAt: string | null };
 export type AdminOperationResponse = { registrations: AdminRegistration[]; pagination: { page: number; pageSize: number; total: number; totalPages: number }; totals: { paid: number; kitPending: number; checkInPending: number; completed: number } };
 export type AdminEventConfig = {
   event: { id: string; name: string; slug: string; status: string; date: string; startTime: string; locationName: string; city: string; state: string };

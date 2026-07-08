@@ -94,6 +94,24 @@ export type PaymentEventRecord = {
   receivedAt: string;
 };
 
+export type GoogleSheetSyncRecord = {
+  id: string;
+  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary';
+  entityId: string;
+  sheetName: 'registrations' | 'payments' | 'shirts' | 'check_in';
+  operation: 'upsert' | 'replace';
+  status: 'pending' | 'processing' | 'synchronized' | 'failed';
+  rowNumber: number | null;
+  attempts: number;
+  lastAttemptAt: string | null;
+  synchronizedAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GoogleSheetSyncInput = Pick<GoogleSheetSyncRecord, 'entityType' | 'entityId' | 'sheetName' | 'operation'>;
+
 export type CheckInRecord = {
   id: string;
   registrationId: string;
@@ -170,6 +188,7 @@ export type Database = {
   registrations: RegistrationRecord[];
   payments: PaymentRecord[];
   paymentEvents: PaymentEventRecord[];
+  googleSheetSyncs: GoogleSheetSyncRecord[];
   checkIns: CheckInRecord[];
   kitDeliveries: KitDeliveryRecord[];
   auditLogs: AuditLogRecord[];
@@ -226,12 +245,31 @@ export type PaymentConfirmationInput = {
 export type PaymentConfirmationResult = {
   statusCode: number;
   registrationId?: string;
+  paymentId?: string;
   previousStatus?: RegistrationStatus;
   duplicated?: boolean;
   error?: 'not_found' | 'amount_mismatch';
 };
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
+
+function mapGoogleSheetSyncRow(row: Record<string, unknown>): GoogleSheetSyncRecord {
+  return {
+    id: String(row.id),
+    entityType: row.entity_type as GoogleSheetSyncRecord['entityType'],
+    entityId: String(row.entity_id),
+    sheetName: row.sheet_name as GoogleSheetSyncRecord['sheetName'],
+    operation: row.operation as GoogleSheetSyncRecord['operation'],
+    status: row.status as GoogleSheetSyncRecord['status'],
+    rowNumber: row.row_number === null ? null : Number(row.row_number),
+    attempts: Number(row.attempts),
+    lastAttemptAt: row.last_attempt_at ? String(row.last_attempt_at) : null,
+    synchronizedAt: row.synchronized_at ? String(row.synchronized_at) : null,
+    lastError: row.last_error ? String(row.last_error) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
 type DatabaseReadScope =
   | 'all'
   | 'availability'
@@ -256,6 +294,7 @@ const table = {
   registrations: '"run-registrations"',
   payments: '"run-payments"',
   paymentEvents: '"run-payment-events"',
+  googleSheetSyncs: '"run-google-sheet-sync"',
   checkIns: '"run-check-ins"',
   kitDeliveries: '"run-kit-deliveries"',
   auditLogs: '"run-audit-logs"',
@@ -312,6 +351,7 @@ const initialDatabase: Database = {
   registrations: [],
   payments: [],
   paymentEvents: [],
+  googleSheetSyncs: [],
   checkIns: [],
   kitDeliveries: [],
   auditLogs: [],
@@ -352,6 +392,7 @@ function normalizeDatabase(database: Partial<Database>): Database {
     registrations: database.registrations || [],
     payments: database.payments || [],
     paymentEvents: database.paymentEvents || [],
+    googleSheetSyncs: database.googleSheetSyncs || [],
     checkIns: database.checkIns || [],
     kitDeliveries: database.kitDeliveries || [],
     auditLogs: database.auditLogs || [],
@@ -459,6 +500,23 @@ async function ensurePostgresDatabase(client: Queryable) {
       received_at text not null
     );
 
+    create table if not exists ${table.googleSheetSyncs} (
+      id text primary key,
+      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary')),
+      entity_id text not null,
+      sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in')),
+      operation text not null check (operation in ('upsert', 'replace')),
+      status text not null check (status in ('pending', 'processing', 'synchronized', 'failed')),
+      row_number integer,
+      attempts integer not null default 0,
+      last_attempt_at text,
+      synchronized_at text,
+      last_error text,
+      created_at text not null,
+      updated_at text not null,
+      unique (entity_type, entity_id, sheet_name)
+    );
+
     create table if not exists ${table.checkIns} (
       id text primary key,
       registration_id text not null references ${table.registrations}(id),
@@ -529,6 +587,9 @@ async function ensurePostgresDatabase(client: Queryable) {
     create index if not exists "run-registrations_cpf_hash_idx" on ${table.registrations}(cpf_hash);
     create index if not exists "run-registrations_status_idx" on ${table.registrations}(status);
     create index if not exists "run-payments_registration_id_idx" on ${table.payments}(registration_id);
+    create index if not exists "run-google-sheet-sync_status_idx" on ${table.googleSheetSyncs}(status);
+    create index if not exists "run-google-sheet-sync_entity_idx" on ${table.googleSheetSyncs}(entity_type, entity_id);
+    create index if not exists "run-google-sheet-sync_updated_at_idx" on ${table.googleSheetSyncs}(updated_at);
     create unique index if not exists "run-check-ins_registration_id_idx" on ${table.checkIns}(registration_id);
     create unique index if not exists "run-kit-deliveries_registration_id_idx" on ${table.kitDeliveries}(registration_id);
     create index if not exists "run-audit-logs_entity_idx" on ${table.auditLogs}(entity_type, entity_id);
@@ -592,6 +653,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       registrations: [],
       payments: [],
       paymentEvents: [],
+      googleSheetSyncs: [],
       checkIns: [],
       kitDeliveries: [],
       auditLogs: [],
@@ -626,6 +688,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     registrations: ['all', 'availability', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
     payments: ['all', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
     paymentEvents: ['all', 'checkout', 'admin-registrations'].includes(scope),
+    googleSheetSyncs: ['all', 'admin-registrations'].includes(scope),
     checkIns: ['all', 'admin-registrations'].includes(scope),
     kitDeliveries: ['all', 'admin-registrations'].includes(scope),
     auditLogs: ['all', 'audit', 'checkout', 'admin-registrations'].includes(scope),
@@ -642,6 +705,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
+  const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
   const checkIns = include.checkIns ? await client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows;
   const kitDeliveries = include.kitDeliveries ? await client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows;
   const auditLogs = include.auditLogs ? await client.query(`select id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at from ${table.auditLogs}`) : emptyRows;
@@ -727,6 +791,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       payload: row.payload,
       receivedAt: row.received_at,
     })),
+    googleSheetSyncs: googleSheetSyncs.rows.map(mapGoogleSheetSyncRow),
     checkIns: checkIns.rows.map((row) => ({
       id: row.id,
       registrationId: row.registration_id,
@@ -937,6 +1002,37 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          payload = excluded.payload,
          received_at = excluded.received_at`,
       [item.id, item.paymentId, item.providerEventId, item.eventType, item.payload, item.receivedAt],
+    );
+  }
+
+  for (const item of database.googleSheetSyncs) {
+    await client.query(
+      `insert into ${table.googleSheetSyncs} (id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       on conflict (entity_type, entity_id, sheet_name) do update set
+         operation = excluded.operation,
+         status = excluded.status,
+         row_number = excluded.row_number,
+         attempts = excluded.attempts,
+         last_attempt_at = excluded.last_attempt_at,
+         synchronized_at = excluded.synchronized_at,
+         last_error = excluded.last_error,
+         updated_at = excluded.updated_at`,
+      [
+        item.id,
+        item.entityType,
+        item.entityId,
+        item.sheetName,
+        item.operation,
+        item.status,
+        item.rowNumber,
+        item.attempts,
+        item.lastAttemptAt,
+        item.synchronizedAt,
+        item.lastError,
+        item.createdAt,
+        item.updatedAt,
+      ],
     );
   }
 
@@ -1304,7 +1400,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
         [input.providerTransactionId, input.payload, now, row.payment_id],
       );
       await client.query('commit');
-      return { statusCode: 409, registrationId: row.id, previousStatus: row.status, error: 'amount_mismatch' };
+      return { statusCode: 409, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, error: 'amount_mismatch' };
     }
 
     const duplicate = input.providerEventId
@@ -1354,7 +1450,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
       }, now],
     );
     await client.query('commit');
-    return { statusCode: 200, registrationId: row.id, previousStatus: row.status, duplicated: Boolean(duplicate.rowCount) };
+    return { statusCode: 200, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, duplicated: Boolean(duplicate.rowCount) };
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;
@@ -1757,6 +1853,132 @@ export async function completeRegistrationEmailInPostgres(
   } finally {
     client.release();
   }
+}
+
+export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promise<GoogleSheetSyncRecord> {
+  const now = new Date().toISOString();
+
+  if (!shouldUsePostgres()) {
+    return transaction((database) => {
+      const existing = database.googleSheetSyncs.find((item) => (
+        item.entityType === input.entityType
+        && item.entityId === input.entityId
+        && item.sheetName === input.sheetName
+      ));
+
+      if (existing) {
+        existing.operation = input.operation;
+        existing.status = 'pending';
+        existing.synchronizedAt = null;
+        existing.lastError = null;
+        existing.updatedAt = now;
+        return existing;
+      }
+
+      const created: GoogleSheetSyncRecord = {
+        id: randomUUID(),
+        ...input,
+        status: 'pending',
+        rowNumber: null,
+        attempts: 0,
+        lastAttemptAt: null,
+        synchronizedAt: null,
+        lastError: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      database.googleSheetSyncs.push(created);
+      return created;
+    });
+  }
+
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `insert into ${table.googleSheetSyncs} (id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, 'pending', null, 0, null, null, null, $6, $6)
+     on conflict (entity_type, entity_id, sheet_name) do update set
+       operation = excluded.operation,
+       status = 'pending',
+       synchronized_at = null,
+       last_error = null,
+       updated_at = excluded.updated_at
+     returning id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at`,
+    [randomUUID(), input.entityType, input.entityId, input.sheetName, input.operation, now],
+  );
+  return mapGoogleSheetSyncRow(result.rows[0]);
+}
+
+export async function claimGoogleSheetSync(syncId: string): Promise<GoogleSheetSyncRecord | null> {
+  const now = new Date().toISOString();
+
+  if (!shouldUsePostgres()) {
+    return transaction((database) => {
+      const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
+      if (!item || !['pending', 'failed'].includes(item.status)) return null;
+      item.status = 'processing';
+      item.attempts += 1;
+      item.lastAttemptAt = now;
+      item.updatedAt = now;
+      return item;
+    });
+  }
+
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `update ${table.googleSheetSyncs}
+     set status = 'processing', attempts = attempts + 1, last_attempt_at = $1, updated_at = $1
+     where id = $2 and status in ('pending', 'failed')
+     returning id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at`,
+    [now, syncId],
+  );
+  return result.rows[0] ? mapGoogleSheetSyncRow(result.rows[0]) : null;
+}
+
+export async function completeGoogleSheetSync(syncId: string, rowNumber: number | null): Promise<void> {
+  const now = new Date().toISOString();
+
+  if (!shouldUsePostgres()) {
+    await transaction((database) => {
+      const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
+      if (!item) return;
+      item.status = 'synchronized';
+      item.rowNumber = rowNumber ?? item.rowNumber;
+      item.synchronizedAt = now;
+      item.lastError = null;
+      item.updatedAt = now;
+    });
+    return;
+  }
+
+  await ensurePostgresReady();
+  await requirePool().query(
+    `update ${table.googleSheetSyncs}
+     set status = 'synchronized', row_number = coalesce($1, row_number), synchronized_at = $2, last_error = null, updated_at = $2
+     where id = $3`,
+    [rowNumber, now, syncId],
+  );
+}
+
+export async function failGoogleSheetSync(syncId: string, error: unknown): Promise<void> {
+  const now = new Date().toISOString();
+  const safeError = (error instanceof Error ? error.message : String(error || 'Unknown error')).slice(0, 500);
+
+  if (!shouldUsePostgres()) {
+    await transaction((database) => {
+      const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
+      if (!item) return;
+      item.status = 'failed';
+      item.lastError = safeError;
+      item.updatedAt = now;
+    });
+    return;
+  }
+
+  await ensurePostgresReady();
+  await requirePool().query(
+    `update ${table.googleSheetSyncs} set status = 'failed', last_error = $1, updated_at = $2 where id = $3`,
+    [safeError, now, syncId],
+  );
 }
 
 export function getDatabaseConfigurationIssue() {

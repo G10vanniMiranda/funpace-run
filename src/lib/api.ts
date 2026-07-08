@@ -351,6 +351,11 @@ export function getAdminRegistrations(adminKey: string, filters: Record<string, 
   return adminFetch<AdminRegistrationsResponse>(`/api/admin/registrations${toQueryString(filters)}`, adminKey);
 }
 
+export function getAdminGoogleSheetsStatus(adminKey: string) { return adminFetch<import('../types/registration').AdminGoogleSheetsStatus>('/api/admin/google-sheets/status', adminKey); }
+export function retryAdminGoogleSheets(adminKey: string) { return adminFetch<{ queued: number; remaining: number }>('/api/admin/google-sheets/retry', adminKey, { method: 'POST' }); }
+export function checkAdminGoogleSheets(adminKey: string) { return adminFetch<{ ok: boolean; createdSheets: string[]; message: string }>('/api/admin/google-sheets/check', adminKey, { method: 'POST' }); }
+export function syncAdminRegistrationToGoogleSheets(adminKey: string, registrationId: string) { return adminFetch<{ queued: number }>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/sync-google-sheets`, adminKey, { method: 'POST' }); }
+
 export function getAdminAuditLogs(adminKey: string, filters: Record<string, string> = {}) {
   return adminFetch<AdminAuditLogsResponse>(`/api/admin/audit-logs${toQueryString(filters)}`, adminKey);
 }

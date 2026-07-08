@@ -29,6 +29,15 @@ import {
   type RegistrationRecord,
 } from './database.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, sendRegistrationEmail, type RegistrationEmailContext, type RegistrationEmailKind } from './email.js';
+import {
+  processGoogleSheetSync,
+  processQueuedGoogleSheetSyncs,
+  getGoogleSheetsConfig,
+  createGoogleSheetsClient,
+  queueCheckInGoogleSheetSync,
+  queueConfirmedPaymentGoogleSheetSync,
+  queueRegistrationGoogleSheetSync,
+} from './google-sheets.js';
 import { checkInfinitePayPayment, createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 
 const port = Number(process.env.API_PORT || 3001);
@@ -1397,6 +1406,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     registrationStatus: response.registrationStatus,
     checkoutStatus: response.checkoutStatus,
   });
+  const registrationWasCreated = response.statusCode === 201;
 
   if (
     response.shouldCreateCheckout
@@ -1489,6 +1499,10 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
   const { statusCode, amountCents: _amountCents, description: _description, shouldCreateCheckout: _shouldCreateCheckout, ...payloadResponse } = response;
 
+  const googleSheetSync = registrationWasCreated && response.registrationId
+    ? await queueRegistrationGoogleSheetSync(response.registrationId)
+    : null;
+
   if (statusCode === 201 && response.registrationStatus === 'pending_payment' && response.registrationId) {
     processRegistrationEmail('pending', response.registrationId).catch((error) => {
       logServerError(req, error);
@@ -1502,6 +1516,12 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   });
   logRequest(req, statusCode, response.registrationId ? 'registration_processed' : 'registration_rejected');
   json(res, statusCode, payloadResponse);
+
+  // The durable outbox is created before the response. External I/O starts only
+  // after the participant has received the checkout result.
+  if (googleSheetSync) {
+    await processGoogleSheetSync(googleSheetSync.id);
+  }
 }
 
 async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse) {
@@ -1623,14 +1643,18 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     });
     if (result.error === 'not_found') { json(res, 400, { success: false, message: 'Pedido nao encontrado.' }); return; }
     if (result.error === 'amount_mismatch') { json(res, 400, { success: false, message: 'Valor do pagamento divergente.' }); return; }
+    const googleSheetSyncs = result.registrationId && result.paymentId
+      ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
+      : [];
     json(res, 200, { success: true, message: null, duplicated: result.duplicated || undefined });
+    await processQueuedGoogleSheetSyncs(googleSheetSyncs);
     if (result.registrationId) {
       processRegistrationEmail('confirmation', result.registrationId).catch((error) => logServerError(req, error));
     }
     return;
   }
 
-  const result = await transaction<{ statusCode: number; payload: unknown; registrationId?: string; nextStatus?: RegistrationStatus }>((database) => {
+  const result = await transaction<{ statusCode: number; payload: unknown; registrationId?: string; paymentId?: string; nextStatus?: RegistrationStatus }>((database) => {
     expirePendingPayments(database);
 
     const paymentByGatewayId = database.payments.find((item) => (
@@ -1701,7 +1725,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
         status: registration.status,
       }));
 
-      return { statusCode: 200, payload: { ok: true, duplicated: true }, registrationId: registration.id, nextStatus };
+      return { statusCode: 200, payload: { ok: true, duplicated: true }, registrationId: registration.id, paymentId: payment?.id, nextStatus };
     }
 
     const previousStatus = registration.status;
@@ -1779,14 +1803,19 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       nextStatus,
     }));
 
-    return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined }, registrationId: registration.id, nextStatus };
+    return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined }, registrationId: registration.id, paymentId: payment?.id, nextStatus };
   }, { scope: 'checkout' });
+
+  const googleSheetSyncs = result.statusCode === 200 && result.nextStatus === 'paid' && result.registrationId && result.paymentId
+    ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
+    : [];
 
   json(res, result.statusCode, result.payload);
 
   // Acknowledge the gateway before external e-mail I/O. InfinitePay recommends
   // responding in under one second and retries failed webhook responses.
   if (result.statusCode === 200 && result.nextStatus === 'paid' && result.registrationId) {
+    await processQueuedGoogleSheetSyncs(googleSheetSyncs);
     await processRegistrationEmail('confirmation', result.registrationId);
   }
 }
@@ -1920,6 +1949,7 @@ async function getAdminRows(url: URL) {
   const team = (url.searchParams.get('team') || '').trim().toLowerCase();
   const shirtSize = (url.searchParams.get('shirtSize') || '').trim().toUpperCase();
   const bibNumber = (url.searchParams.get('bibNumber') || '').trim().toLowerCase();
+  const sheetStatus = url.searchParams.get('sheetStatus') || '';
   const sortBy = url.searchParams.get('sortBy') || 'createdAt';
   const sortOrder = url.searchParams.get('sortOrder') === 'asc' ? 1 : -1;
   const query = (url.searchParams.get('q') || '').trim().toLowerCase();
@@ -1955,6 +1985,7 @@ async function getAdminRows(url: URL) {
       if (reportType === 'checkins' && row.checkInStatus !== 'checked_in') return false;
       if (reportType === 'paid' && row.status !== 'paid') return false;
       if (reportType === 'pending' && row.status !== 'pending_payment') return false;
+      if (sheetStatus === 'unsynchronized' && !['pending', 'processing', 'failed', 'not_queued'].includes(row.googleSheetsStatus)) return false;
       const referenceDate = reportType === 'kits'
         ? (row.kitDeliveredAt || '')
         : reportType === 'checkins'
@@ -1985,6 +2016,7 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
   const statusMismatch = paymentProvesPaid && registration.status !== 'paid';
   const hasPaymentDivergence = statusMismatch || paymentEvents.some((item) => item.eventType === 'infinitepay.amount_mismatch');
   const effectiveStatus = paymentProvesPaid ? 'paid' : registration.status;
+  const sheetSync = database.googleSheetSyncs.find((item) => item.entityType === 'registration' && item.entityId === registration.id && item.sheetName === 'registrations');
 
   return {
     id: registration.id,
@@ -2026,6 +2058,8 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     gatewayTransactionId: payment?.gatewayTransactionId || null,
     paymentMethod: paymentMethod || null,
     hasPaymentDivergence,
+    googleSheetsStatus: sheetSync?.status || 'not_queued',
+    googleSheetsSynchronizedAt: sheetSync?.synchronizedAt || null,
     pendingEmailSentAt: registration.pendingEmailSentAt || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
     confirmationEmailProvider: registration.confirmationEmailProvider || null,
@@ -2158,7 +2192,11 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
   if (confirmed.error) { json(res, confirmed.statusCode, { message: confirmed.error === 'not_found' ? 'Pagamento nao encontrado.' : 'Valor divergente.' }); return; }
   const refreshed = await transaction((database) => database, { persist: false, scope: 'admin-registrations' });
   const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId)!;
+  const googleSheetSyncs = confirmed.paymentId
+    ? await queueConfirmedPaymentGoogleSheetSync(registrationId, confirmed.paymentId)
+    : [];
   json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration) });
+  await processQueuedGoogleSheetSyncs(googleSheetSyncs);
   processRegistrationEmail('confirmation', registrationId).catch((error) => logServerError(req, error));
 }
 
@@ -2187,12 +2225,16 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
     });
     if (confirmed.error === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
     if (confirmed.error === 'amount_mismatch') { json(res, 409, { message: 'Valor do pagamento divergente.' }); return; }
+    const googleSheetSyncs = confirmed.registrationId && confirmed.paymentId
+      ? await queueConfirmedPaymentGoogleSheetSync(confirmed.registrationId, confirmed.paymentId)
+      : [];
     json(res, 200, { status: 'paid' });
+    await processQueuedGoogleSheetSyncs(googleSheetSyncs);
     if (confirmed.registrationId) processRegistrationEmail('confirmation', confirmed.registrationId).catch((error) => logServerError(req, error));
     return;
   }
 
-  const result = await transaction<{ statusCode: number; status?: RegistrationStatus; registrationId?: string; payload: unknown }>((database) => {
+  const result = await transaction<{ statusCode: number; status?: RegistrationStatus; registrationId?: string; paymentId?: string; payload: unknown }>((database) => {
     const registration = database.registrations.find((item) => item.id === orderNsu);
     const payment = database.payments.find((item) => item.registrationId === orderNsu);
     if (!registration || !payment) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
@@ -2203,10 +2245,16 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
     registration.status = 'paid'; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null; registration.updatedAt = now;
     payment.status = 'paid'; payment.provider = 'infinitepay'; payment.providerPaymentId = slug; payment.gatewayTransactionId = transactionNsu; payment.gatewayStatus = 'verified_paid'; payment.gatewayPayload = check.raw; payment.paidAt ||= now; payment.expiresAt = null; payment.updatedAt = now;
     database.auditLogs.push({ id: randomUUID(), actor: 'system', action: 'payment.redirect_reconciled', entityType: 'registration', entityId: orderNsu, payload: { previousStatus, transactionNsu, invoiceSlug: slug }, createdAt: now });
-    return { statusCode: 200, status: 'paid', registrationId: orderNsu, payload: { status: 'paid' } };
+    return { statusCode: 200, status: 'paid', registrationId: orderNsu, paymentId: payment.id, payload: { status: 'paid' } };
   }, { scope: 'checkout' });
+  const googleSheetSyncs = result.statusCode === 200 && result.registrationId && result.paymentId
+    ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
+    : [];
   json(res, result.statusCode, result.payload);
-  if (result.statusCode === 200 && result.registrationId) await processRegistrationEmail('confirmation', result.registrationId);
+  if (result.statusCode === 200 && result.registrationId) {
+    await processQueuedGoogleSheetSyncs(googleSheetSyncs);
+    await processRegistrationEmail('confirmation', result.registrationId);
+  }
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -2487,7 +2535,11 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
 
+  const googleSheetSync = result.statusCode === 200
+    ? await queueCheckInGoogleSheetSync(registrationId)
+    : null;
   json(res, result.statusCode, result.payload);
+  if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
 async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse, registrationId: string) {
@@ -2553,7 +2605,11 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
 
+  const googleSheetSync = result.statusCode === 200
+    ? await queueCheckInGoogleSheetSync(registrationId)
+    : null;
   json(res, result.statusCode, result.payload);
+  if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
 async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: ServerResponse, registrationId: string, action: string) {
@@ -2621,7 +2677,11 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
     database.auditLogs.push(createAuditLog(req, adminSession, { actor, action: `registration.${action}`, entityType: 'registration', entityId: registrationId, payload: { reason }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
+  const googleSheetSync = result.statusCode === 200 && ['undo-check-in', 'undo-kit'].includes(action)
+    ? await queueCheckInGoogleSheetSync(registrationId)
+    : null;
   json(res, result.statusCode, result.payload);
+  if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
 async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerResponse, registrationId: string) {
@@ -2719,6 +2779,62 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
   const totalPages = Math.max(Math.ceil(total / pageSize), 1);
   const page = Math.min(requestedPage, totalPages);
   json(res, 200, { registrations: rows.slice((page - 1) * pageSize, page * pageSize), pagination: { page, pageSize, total, totalPages } });
+}
+
+async function handleAdminGoogleSheetsStatus(req: IncomingMessage, res: ServerResponse) {
+  if (!await requireAdmin(req, res, ['administrator', 'operation']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const config = getGoogleSheetsConfig();
+  const counts = { pending: 0, processing: 0, synchronized: 0, failed: 0 };
+  for (const item of database.googleSheetSyncs) counts[item.status] += 1;
+  const last = database.googleSheetSyncs.filter((item) => item.synchronizedAt).sort((a, b) => (b.synchronizedAt || '').localeCompare(a.synchronizedAt || ''))[0];
+  json(res, 200, { enabled: config.enabled, configured: config.enabled && !config.configurationIssue, configurationIssue: config.configurationIssue, counts, lastSynchronizedAt: last?.synchronizedAt || null });
+}
+
+async function handleAdminGoogleSheetsCheck(req: IncomingMessage, res: ServerResponse) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const config = getGoogleSheetsConfig();
+  if (!config.enabled || config.configurationIssue) {
+    json(res, 409, { ok: false, message: config.configurationIssue || 'Google Sheets está desativado.' }); return;
+  }
+  try {
+    const result = await createGoogleSheetsClient({ config }).ensureSpreadsheetStructure();
+    json(res, 200, { ok: true, createdSheets: result.createdSheets, message: 'Conexão e estrutura validadas.' });
+  } catch (error) {
+    console.error(JSON.stringify({ at: new Date().toISOString(), message: 'google_sheets_connection_check_failed', error: error instanceof Error ? error.message.slice(0, 500) : 'Unknown error' }));
+    json(res, 502, { ok: false, message: error instanceof Error ? error.message : 'Falha ao validar Google Sheets.' });
+  }
+}
+
+async function handleAdminRegistrationGoogleSheetsSync(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!await requireAdmin(req, res, ['administrator', 'operation']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const registration = database.registrations.find((item) => item.id === registrationId);
+  if (!registration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  const payment = database.payments.find((item) => item.registrationId === registrationId);
+  const tasks = payment?.status === 'paid'
+    ? await queueConfirmedPaymentGoogleSheetSync(registrationId, payment.id)
+    : [await queueRegistrationGoogleSheetSync(registrationId)].filter(Boolean);
+  if (database.checkIns.some((item) => item.registrationId === registrationId) || database.kitDeliveries.some((item) => item.registrationId === registrationId)) {
+    const task = await queueCheckInGoogleSheetSync(registrationId); if (task) tasks.push(task);
+  }
+  json(res, 200, { queued: tasks.length });
+  await processQueuedGoogleSheetSyncs(tasks);
+}
+
+async function handleAdminGoogleSheetsRetry(req: IncomingMessage, res: ServerResponse) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const retryable = database.googleSheetSyncs.filter((item) => ['pending', 'failed'].includes(item.status));
+  const tasks = retryable.slice(0, 25);
+  const queuedRegistrationIds = new Set(database.googleSheetSyncs.filter((item) => item.entityType === 'registration').map((item) => item.entityId));
+  for (const registration of database.registrations.filter((item) => !queuedRegistrationIds.has(item.id)).slice(0, Math.max(25 - tasks.length, 0))) {
+    const task = await queueRegistrationGoogleSheetSync(registration.id); if (task) tasks.push(task);
+  }
+  const remaining = Math.max(retryable.length - Math.min(retryable.length, 25), 0)
+    + Math.max(database.registrations.filter((item) => !queuedRegistrationIds.has(item.id)).length - Math.max(25 - Math.min(retryable.length, 25), 0), 0);
+  json(res, 200, { queued: tasks.length, remaining });
+  await processQueuedGoogleSheetSyncs(tasks);
 }
 
 async function handleAdminOperation(req: IncomingMessage, res: ServerResponse, url: URL) {
@@ -3033,6 +3149,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       await handleAdminSummary(req, res);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/admin/google-sheets/status') { await handleAdminGoogleSheetsStatus(req, res); return; }
+    if (req.method === 'POST' && url.pathname === '/api/admin/google-sheets/check') { await handleAdminGoogleSheetsCheck(req, res); return; }
+    if (req.method === 'POST' && url.pathname === '/api/admin/google-sheets/retry') { await handleAdminGoogleSheetsRetry(req, res); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/event-config') { await handleAdminEventConfig(req, res); return; }
     if (req.method === 'PATCH' && url.pathname === '/api/admin/event-config') { await handleAdminEventUpdate(req, res); return; }
     if (req.method === 'POST' && url.pathname === '/api/admin/system-checks/email') { await handleAdminSystemCheck(req, res, 'email'); return; }
@@ -3086,6 +3205,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     if (req.method === 'POST' && adminRegistrationMaintenance) {
       await handleAdminRegistrationMaintenance(req, res, decodeURIComponent(adminRegistrationMaintenance[1]), adminRegistrationMaintenance[2]); return;
     }
+    const adminRegistrationSheetSync = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/sync-google-sheets$/);
+    if (req.method === 'POST' && adminRegistrationSheetSync) { await handleAdminRegistrationGoogleSheetsSync(req, res, decodeURIComponent(adminRegistrationSheetSync[1])); return; }
     const adminRegistrationUpdate = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)$/);
     if (req.method === 'PATCH' && adminRegistrationUpdate) { await handleAdminRegistrationUpdate(req, res, decodeURIComponent(adminRegistrationUpdate[1])); return; }
     if (req.method === 'GET' && adminRegistrationUpdate) { await handleAdminRegistrationDetails(req, res, decodeURIComponent(adminRegistrationUpdate[1])); return; }

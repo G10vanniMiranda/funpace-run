@@ -12,8 +12,10 @@ Este checklist cobre seguranca, performance e operacao. O deploy em si fica a ca
 - Configurar `PAYMENT_WEBHOOK_SECRET` forte.
 - Definir `PENDING_PAYMENT_TTL_MINUTES` conforme a janela operacional do checkout.
 - Configurar/testar o webhook da InfinitePay apontando para `/api/webhooks/payment?token=PAYMENT_WEBHOOK_SECRET`.
-- Criar as tabelas do Supabase com `server/supabase-schema.sql`.
+- Em uma instalação vazia, criar as tabelas com `server/supabase-schema.sql`. Em banco já populado, aplicar apenas migrations incrementais de `server/migrations/`.
 - Definir `DATABASE_PROVIDER=supabase`, `DATABASE_URL` e `DATABASE_SSL=true`.
+- Se Google Sheets for habilitado, configurar `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY` e somente então definir `GOOGLE_SHEETS_ENABLED=true`.
+- Compartilhar a planilha apenas com a Service Account e a equipe operacional autorizada; nunca enviar o JSON de credenciais ao Git.
 - Validar regulamento final e politica de privacidade.
 - Confirmar preco, lote, capacidade, data, horario e local oficial.
 - Rodar `npm run lint`.

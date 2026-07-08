@@ -9,7 +9,7 @@ export function PaymentErrorPage() {
           Pagamento nao concluido.
         </h1>
         <p className="text-zinc-400 font-mono leading-relaxed mb-8">
-          A vaga nao foi confirmada. Volte para a inscricao para tentar novamente quando o checkout real estiver habilitado.
+          A vaga não foi confirmada. Volte para a inscrição para tentar novamente quando o checkout real estiver habilitado.
         </p>
         <a href="/#register" className="inline-flex min-h-12 items-center bg-brand px-5 py-3 text-sm font-black uppercase tracking-widest text-black sm:px-6 sm:py-4">
           Tentar novamente

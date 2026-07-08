@@ -45,6 +45,9 @@ import {
   getAdminAuditLogsCsvUrl,
   getAdminCsvUrl,
   getAdminRegistrations,
+  getAdminGoogleSheetsStatus,
+  retryAdminGoogleSheets,
+  syncAdminRegistrationToGoogleSheets,
   getAdminPaymentDetails,
   getAdminPayments,
   getAdminPaymentsCsvUrl,
@@ -65,7 +68,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAuditLog, AdminEventConfig, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
+import type { AdminAuditLog, AdminEventConfig, AdminGoogleSheetsStatus, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
 
 type AdminFilters = {
   status: string;
@@ -80,6 +83,7 @@ type AdminFilters = {
   bibNumber: string;
   sortBy: string;
   sortOrder: string;
+  sheetStatus: string;
 };
 
 type AdminNavKey = 'registrations' | 'payments' | 'operation' | 'reports' | 'audit' | 'event';
@@ -156,7 +160,8 @@ export function AdminPage() {
   const [summary, setSummary] = useState<AdminSummaryResponse | null>(null);
   const [registrations, setRegistrations] = useState<AdminRegistration[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLog[]>([]);
-  const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: '25', city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc' });
+  const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: '25', city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc', sheetStatus: '' });
+  const [googleSheetsStatus, setGoogleSheetsStatus] = useState<AdminGoogleSheetsStatus | null>(null);
   const [reportFilters, setReportFilters] = useState({ dateFrom: '', dateTo: '' });
   const [registrationPagination, setRegistrationPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
   const [error, setError] = useState('');
@@ -192,6 +197,7 @@ export function AdminPage() {
       setRegistrations(registrationsResponse.registrations);
       setRegistrationPagination(registrationsResponse.pagination);
       setAuditLogs(auditLogsResponse.logs);
+      if (activeNav === 'registrations') setGoogleSheetsStatus(await getAdminGoogleSheetsStatus(key).catch(() => null));
     } catch (requestError) {
       if (requestError instanceof ApiError && requestError.status === 401 && key === 'session') {
         setAdminKey(''); setAdminActor(''); setAdminRole(null);
@@ -207,7 +213,7 @@ export function AdminPage() {
 
   useEffect(() => {
     void loadAdminData();
-  }, [filters.status, filters.distanceId, filters.lotId, filters.page, filters.pageSize, filters.city, filters.team, filters.shirtSize, filters.bibNumber, filters.sortBy, filters.sortOrder, activeNav]);
+  }, [filters.status, filters.distanceId, filters.lotId, filters.page, filters.pageSize, filters.city, filters.team, filters.shirtSize, filters.bibNumber, filters.sortBy, filters.sortOrder, filters.sheetStatus, activeNav]);
 
   useEffect(() => {
     void getAdminSession().then((session) => { setAdminActor(`${session.actor} · ${session.role}`); setAdminRole(session.role); setAdminKey('session'); void loadAdminData('session'); }).catch(() => undefined).finally(() => setAuthChecking(false));
@@ -406,6 +412,12 @@ export function AdminPage() {
               <StatusMessage tone="error" message={error} />
             )}
             {actionMessage && <StatusMessage tone="success" message={actionMessage} />}
+            {activeNav === 'registrations' && googleSheetsStatus && (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border border-white/10 bg-zinc-950 p-4 text-xs">
+                <span>Google Sheets: {googleSheetsStatus.configured ? 'configurado' : googleSheetsStatus.enabled ? 'configuração incompleta' : 'desativado'} · {googleSheetsStatus.counts.failed} falha(s) · {googleSheetsStatus.counts.pending} pendente(s)</span>
+                <button type="button" disabled={!googleSheetsStatus.enabled || actionLoading === 'sheets-retry'} onClick={() => void (async () => { setActionLoading('sheets-retry'); try { const result = await retryAdminGoogleSheets(adminKey); setActionMessage(`${result.queued} sincronização(ões) reenviada(s).`); await loadAdminData(); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Falha ao reenviar para o Google Sheets.'); } finally { setActionLoading(''); } })()} className="border border-brand/40 px-3 py-2 font-black uppercase text-brand disabled:opacity-40"><RefreshCcw className="mr-2 inline h-3 w-3" />Sincronizar com Google Sheets</button>
+              </div>
+            )}
 
             <AdminSection
               adminKey={adminKey}
@@ -576,6 +588,7 @@ function AdminSection({
     <>
       <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
       <RegistrationsPanel
+        adminKey={adminKey}
         summary={summary}
         registrations={registrations}
         filters={filters}
@@ -1753,6 +1766,7 @@ function MetricBox({
 }
 
 function RegistrationsPanel({
+  adminKey,
   summary,
   registrations,
   filters,
@@ -1762,6 +1776,7 @@ function RegistrationsPanel({
   onSearch,
   onOpenRegistration,
 }: {
+  adminKey: string;
   summary: AdminSummaryResponse | null;
   registrations: AdminRegistration[];
   filters: AdminFilters;
@@ -1771,6 +1786,7 @@ function RegistrationsPanel({
   onSearch: (event: FormEvent) => void;
   onOpenRegistration: (registration: AdminRegistration) => void;
 }) {
+  const [syncingId, setSyncingId] = useState('');
   return (
     <section className="mt-4 border border-white/10 bg-zinc-950/80">
       <div className="border-b border-white/10 p-4 md:p-5">
@@ -1821,6 +1837,7 @@ function RegistrationsPanel({
           <input value={filters.team} onChange={(event) => onFiltersChange({ ...filters, team: event.target.value, page: '1' })} className="min-h-12 border border-zinc-800 bg-black p-3 text-white outline-none focus:border-brand" placeholder="Filtrar por equipe" />
           <input value={filters.bibNumber} onChange={(event) => onFiltersChange({ ...filters, bibNumber: event.target.value, page: '1' })} className="min-h-12 border border-zinc-800 bg-black p-3 text-white outline-none focus:border-brand" placeholder="Numero de peito" />
           <SelectFilter value={filters.shirtSize} onChange={(value) => onFiltersChange({ ...filters, shirtSize: value, page: '1' })} options={[{ value: '', label: 'Todas as camisas' }, ...eventInfo.shirtSizes.map((size) => ({ value: size, label: `Camisa ${size}` }))]} />
+          <SelectFilter value={filters.sheetStatus} onChange={(value) => onFiltersChange({ ...filters, sheetStatus: value, page: '1' })} options={[{ value: '', label: 'Todos no Sheets' }, { value: 'unsynchronized', label: 'Não sincronizados' }]} />
         </div>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-500">
           <span>{pagination.total} resultado(s)</span>
@@ -1828,7 +1845,7 @@ function RegistrationsPanel({
             <SelectFilter value={filters.sortBy} onChange={(value) => onFiltersChange({ ...filters, sortBy: value, page: '1' })} options={[{ value: 'createdAt', label: 'Ordenar por data' }, { value: 'fullName', label: 'Ordenar por nome' }, { value: 'status', label: 'Ordenar por status' }, { value: 'amountCents', label: 'Ordenar por valor' }, { value: 'bibNumber', label: 'Ordenar por peito' }]} />
             <SelectFilter value={filters.sortOrder} onChange={(value) => onFiltersChange({ ...filters, sortOrder: value, page: '1' })} options={[{ value: 'desc', label: 'Decrescente' }, { value: 'asc', label: 'Crescente' }]} />
             <SelectFilter value={filters.pageSize} onChange={(value) => onFiltersChange({ ...filters, pageSize: value, page: '1' })} options={[{ value: '25', label: '25 por pagina' }, { value: '50', label: '50 por pagina' }, { value: '100', label: '100 por pagina' }]} />
-            <button type="button" onClick={() => onFiltersChange({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: filters.pageSize, city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc' })} className="border border-white/10 px-3 py-2 font-black uppercase hover:border-brand hover:text-brand">Limpar filtros</button>
+            <button type="button" onClick={() => onFiltersChange({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: filters.pageSize, city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc', sheetStatus: '' })} className="border border-white/10 px-3 py-2 font-black uppercase hover:border-brand hover:text-brand">Limpar filtros</button>
           </div>
         </div>
       </div>
@@ -1884,6 +1901,7 @@ function RegistrationsPanel({
                   <td className="p-4 font-mono font-bold">{currencyFormatter.format(registration.amountCents / 100)}</td>
                   <td className="p-4 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(registration.createdAt))}</td>
                   <td className="p-4 text-right">
+                    <button type="button" disabled={syncingId === registration.id} onClick={() => void (async () => { setSyncingId(registration.id); try { await syncAdminRegistrationToGoogleSheets(adminKey, registration.id); } finally { setSyncingId(''); } })()} className="mr-2 inline-flex min-h-10 items-center gap-2 border border-white/10 px-3 text-xs font-black uppercase text-zinc-300 hover:border-brand hover:text-brand disabled:opacity-40"><RefreshCcw className="h-4 w-4" />Sheets</button>
                     <button
                       type="button"
                       onClick={() => onOpenRegistration(registration)}

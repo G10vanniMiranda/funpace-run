@@ -81,6 +81,23 @@ create table if not exists "run-payment-events" (
   received_at text not null
 );
 
+create table if not exists "run-google-sheet-sync" (
+  id text primary key,
+  entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary')),
+  entity_id text not null,
+  sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in')),
+  operation text not null check (operation in ('upsert', 'replace')),
+  status text not null check (status in ('pending', 'processing', 'synchronized', 'failed')),
+  row_number integer,
+  attempts integer not null default 0,
+  last_attempt_at text,
+  synchronized_at text,
+  last_error text,
+  created_at text not null,
+  updated_at text not null,
+  unique (entity_type, entity_id, sheet_name)
+);
+
 create table if not exists "run-check-ins" (
   id text primary key,
   registration_id text not null references "run-registrations"(id),
@@ -151,6 +168,9 @@ create table if not exists "run-partnership-leads" (
 create index if not exists "run-registrations_cpf_hash_idx" on "run-registrations"(cpf_hash);
 create index if not exists "run-registrations_status_idx" on "run-registrations"(status);
 create index if not exists "run-payments_registration_id_idx" on "run-payments"(registration_id);
+create index if not exists "run-google-sheet-sync_status_idx" on "run-google-sheet-sync"(status);
+create index if not exists "run-google-sheet-sync_entity_idx" on "run-google-sheet-sync"(entity_type, entity_id);
+create index if not exists "run-google-sheet-sync_updated_at_idx" on "run-google-sheet-sync"(updated_at);
 create unique index if not exists "run-check-ins_registration_id_idx" on "run-check-ins"(registration_id);
 create unique index if not exists "run-kit-deliveries_registration_id_idx" on "run-kit-deliveries"(registration_id);
 create index if not exists "run-audit-logs_entity_idx" on "run-audit-logs"(entity_type, entity_id);

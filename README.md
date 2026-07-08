@@ -89,6 +89,21 @@ NEXT_PUBLIC_SITE_URL="https://funpace.club"
 
 Use `EMAIL_PROVIDER="console"` locally to log email attempts without sending. The API sends a pending-payment email after a registration is created and a confirmation email when the payment webhook marks the registration as `paid`.
 
+## Google Sheets operational copy
+
+Google Sheets is an optional backend-only operational copy. Supabase remains the source of truth, and disabling or misconfiguring Sheets must not interrupt registrations or payments.
+
+```bash
+GOOGLE_SHEETS_ENABLED="false"
+GOOGLE_SHEETS_SPREADSHEET_ID=""
+GOOGLE_SERVICE_ACCOUNT_EMAIL=""
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+```
+
+Enable the Google Sheets API in Google Cloud, create a dedicated Service Account, and share the spreadsheet with its e-mail as Editor. Store the private key only in backend environment variables. On Vercel, keep it on one line using escaped `\\n` line breaks. Never use a `VITE_` prefix or commit the Service Account JSON file.
+
+Use the isolated migration and homologation checklist in `GOOGLE_SHEETS_SETUP.md`; do not rerun the complete seed schema on a populated production database.
+
 ## Local Backup
 
 ```bash
