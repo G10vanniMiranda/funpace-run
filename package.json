@@ -12,6 +12,7 @@
     "admin:bootstrap": "tsx scripts/bootstrap-admin.ts",
     "backup:db": "node scripts/backup-db.mjs",
     "email:resend": "node --import tsx scripts/resend-registration-email.mjs",
+    "sheets:sync-existing": "node --import tsx scripts/sync-existing-registrations-to-sheets.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
