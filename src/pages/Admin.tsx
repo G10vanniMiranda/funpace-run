@@ -172,7 +172,7 @@ export function AdminPage() {
   const [selectedRegistration, setSelectedRegistration] = useState<AdminRegistration | null>(null);
   const [registrationDetails, setRegistrationDetails] = useState<AdminRegistrationDetailsResponse | null>(null);
   const [actionLoading, setActionLoading] = useState<string>('');
-  const [maintenanceDraft, setMaintenanceDraft] = useState<{ registration: AdminRegistration; action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit'; reason: string } | null>(null);
+  const [maintenanceDraft, setMaintenanceDraft] = useState<{ registration: AdminRegistration; action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit'; reason: string } | null>(null);
   const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
 
   const csvUrl = useMemo(() => getAdminCsvUrl(filters), [filters]);
@@ -309,17 +309,17 @@ export function AdminPage() {
     }
   };
 
-  const handleMaintenance = async (registration: AdminRegistration, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit') => {
+  const handleMaintenance = async (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => {
     setActionMessage('');
     setMaintenanceDraft({ registration, action, reason: '' });
   };
 
   const submitMaintenance = async () => {
     if (!maintenanceDraft) return;
-    const needsReason = maintenanceDraft.action !== 'resend-email';
+    const needsReason = maintenanceDraft.action !== 'send-email';
     if (needsReason && maintenanceDraft.reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
     setActionLoading(maintenanceDraft.action); setError('');
-    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setActionMessage(response.message || (maintenanceDraft.action === 'cancel' ? 'Inscricao cancelada com sucesso.' : maintenanceDraft.action === 'resend-email' ? 'Email de confirmacao reenviado com sucesso.' : 'Acao concluida com sucesso.')); setMaintenanceDraft(null); }
+    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setActionMessage(response.message || (maintenanceDraft.action === 'cancel' ? 'Inscricao cancelada com sucesso.' : maintenanceDraft.action === 'send-email' ? 'Email de confirmacao enviado com sucesso.' : 'Acao concluida com sucesso.')); setMaintenanceDraft(null); }
     catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel concluir a acao.'); }
     finally { setActionLoading(''); }
   };
@@ -458,19 +458,19 @@ export function AdminPage() {
 
       {maintenanceDraft && (
         <ActionModal
-          title={maintenanceDraft.action === 'cancel' ? 'Cancelar inscricao' : maintenanceDraft.action === 'resend-email' ? 'Reenviar email' : 'Confirmar acao administrativa'}
+          title={maintenanceDraft.action === 'cancel' ? 'Cancelar inscricao' : maintenanceDraft.action === 'send-email' ? 'Enviar email' : 'Confirmar acao administrativa'}
           description={maintenanceDraft.action === 'cancel'
             ? `A inscricao de ${maintenanceDraft.registration.fullName} sera cancelada e a vaga sera liberada.`
-            : maintenanceDraft.action === 'resend-email'
-              ? `A confirmacao sera reenviada para ${maintenanceDraft.registration.email}.`
+            : maintenanceDraft.action === 'send-email'
+              ? `A confirmacao sera enviada para ${maintenanceDraft.registration.email}.`
               : `Confirme a acao para ${maintenanceDraft.registration.fullName}.`}
-          confirmLabel={actionLoading ? 'Processando...' : maintenanceDraft.action === 'cancel' ? 'Cancelar inscricao' : maintenanceDraft.action === 'resend-email' ? 'Reenviar email' : 'Confirmar'}
+          confirmLabel={actionLoading ? 'Processando...' : maintenanceDraft.action === 'cancel' ? 'Cancelar inscricao' : maintenanceDraft.action === 'send-email' ? 'Enviar email' : 'Confirmar'}
           confirmTone={maintenanceDraft.action === 'cancel' ? 'danger' : 'brand'}
-          confirmDisabled={actionLoading !== '' || (maintenanceDraft.action !== 'resend-email' && maintenanceDraft.reason.trim().length < 5)}
+          confirmDisabled={actionLoading !== '' || (maintenanceDraft.action !== 'send-email' && maintenanceDraft.reason.trim().length < 5)}
           onConfirm={() => void submitMaintenance()}
           onClose={() => setMaintenanceDraft(null)}
         >
-          {maintenanceDraft.action !== 'resend-email' && (
+          {maintenanceDraft.action !== 'send-email' && (
             <label className="block text-xs font-bold text-zinc-400">
               Motivo da acao <span className="font-normal text-zinc-500">(minimo de 5 caracteres)</span>
               <textarea value={maintenanceDraft.reason} onChange={(event) => setMaintenanceDraft({ ...maintenanceDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
@@ -964,7 +964,7 @@ function PaymentControlPanel({
           <MetricBox label="Pagos" value={paid.length} detail={currencyFormatter.format(dashboard.revenueCents / 100)} />
           <MetricBox label="Pendentes" value={pending.length} detail="Aguardando gateway" />
           <MetricBox label="Não aprovados" value={failed.length} detail="Falha, expirado ou cancelado" />
-          <MetricBox label="Pagos sem email" value={paidWithoutEmail.length} detail="Exige reenvio" tone={paidWithoutEmail.length > 0 ? 'warning' : 'default'} />
+          <MetricBox label="Pagos sem email" value={paidWithoutEmail.length} detail="Exige envio" tone={paidWithoutEmail.length > 0 ? 'warning' : 'default'} />
         </div>
         <div className="mt-4">
           <RevenueChart data={dashboard.dailyRevenue} />
@@ -2043,7 +2043,7 @@ function AthleteDrawer({
   adminRole: AdminRole | null;
   onCheckIn: (registration: AdminRegistration) => void;
   onKitDelivery: (registration: AdminRegistration) => void;
-  onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit') => void;
+  onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => void;
   onUpdate: (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => Promise<void>;
   onAssignBib: (registration: AdminRegistration) => void;
   onClose: () => void;
@@ -2135,7 +2135,9 @@ function AthleteDrawer({
 
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {canResendEmail && (registration.status === 'paid'
-            ? <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'resend-email')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Reenviar email</button>
+            ? registration.confirmationEmailSentAt
+              ? <button type="button" disabled title="Email de confirmacao ja registrado" className="cursor-not-allowed border border-white/10 px-3 py-2 text-xs font-black uppercase text-zinc-600">Email enviado</button>
+              : <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'send-email')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Enviar email</button>
             : <button type="button" disabled title="Disponivel somente apos a confirmacao do pagamento" className="cursor-not-allowed border border-white/10 px-3 py-2 text-xs font-black uppercase text-zinc-600">Email disponivel apos pagamento</button>)}
           {canHandleOperation && registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
           {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}

@@ -60,7 +60,6 @@ export type RegistrationStatusResponse = {
   confirmedAt?: string | null;
   gatewayStatus?: string | null;
   gatewayTransactionId?: string | null;
-  pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
 };
 
@@ -171,7 +170,6 @@ export type AdminRegistration = {
   hasPaymentDivergence: boolean;
   googleSheetsStatus: 'not_queued' | 'pending' | 'processing' | 'synchronized' | 'failed';
   googleSheetsSynchronizedAt: string | null;
-  pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
   confirmationEmailProvider?: string | null;
   confirmationEmailId?: string | null;

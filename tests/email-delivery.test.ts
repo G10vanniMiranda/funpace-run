@@ -17,8 +17,8 @@ test('sends Resend requests with a stable idempotency key and timeout signal', a
   };
 
   try {
-    const { sendRegistrationEmail } = await import(`../server/email.js?test=${Date.now()}`);
-    const result = await sendRegistrationEmail('confirmation', {
+    const { sendRegistrationConfirmationEmail } = await import(`../server/email.js?test=${Date.now()}`);
+    const result = await sendRegistrationConfirmationEmail({
       registration: {
         id: 'registration-123',
         eventId: 'event-123',
@@ -47,6 +47,9 @@ test('sends Resend requests with a stable idempotency key and timeout signal', a
         },
         createdAt: '2026-07-07T00:00:00.000Z',
         updatedAt: '2026-07-07T00:00:00.000Z',
+        paidAt: '2026-07-07T00:10:00.000Z',
+        confirmedAt: '2026-07-07T00:10:00.000Z',
+        bibNumber: '0001',
       },
       event: {
         id: 'event-123',
@@ -61,6 +64,7 @@ test('sends Resend requests with a stable idempotency key and timeout signal', a
       },
       distanceName: '5K',
       lot: null,
+      paymentMethod: 'pix',
       deliveryKey: 'confirmation/registration-123',
     });
 
@@ -68,6 +72,13 @@ test('sends Resend requests with a stable idempotency key and timeout signal', a
     assert.equal(result.providerMessageId, 'email_123');
     assert.equal(new Headers(request?.headers).get('Idempotency-Key'), 'confirmation/registration-123');
     assert.ok(request?.signal instanceof AbortSignal);
+    const body = JSON.parse(String(request?.body || '{}'));
+    assert.equal(body.subject, 'Inscrição confirmada | FunPace Run');
+    assert.match(body.text, /Status: INSCRIÇÃO CONFIRMADA/);
+    assert.match(body.text, /Forma de pagamento: pix/);
+    assert.match(body.html, /QR Code da inscrição/);
+    assert.doesNotMatch(body.subject, /recebida/i);
+    assert.doesNotMatch(body.text, /Inscrição recebida/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -45,9 +45,7 @@ create table if not exists "run-registrations" (
   expires_at text,
   paid_at text,
   confirmed_at text,
-  pending_email_sent_at text,
   confirmation_email_sent_at text,
-  pending_email_last_attempt_at text,
   confirmation_email_last_attempt_at text,
   confirmation_email_provider text,
   confirmation_email_id text,
@@ -183,9 +181,7 @@ create index if not exists "run-partnership-leads_created_at_idx" on "run-partne
 alter table "run-registrations" add column if not exists expires_at text;
 alter table "run-registrations" add column if not exists paid_at text;
 alter table "run-registrations" add column if not exists confirmed_at text;
-alter table "run-registrations" add column if not exists pending_email_sent_at text;
 alter table "run-registrations" add column if not exists confirmation_email_sent_at text;
-alter table "run-registrations" add column if not exists pending_email_last_attempt_at text;
 alter table "run-registrations" add column if not exists confirmation_email_last_attempt_at text;
 alter table "run-registrations" add column if not exists confirmation_email_provider text;
 alter table "run-registrations" add column if not exists confirmation_email_id text;

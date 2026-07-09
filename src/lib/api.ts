@@ -420,7 +420,7 @@ export function updateAdminDistance(adminKey: string, distanceId: string, change
 export function updateAdminLot(adminKey: string, lotId: string, changes: { name: string; capacity: number; priceCents: number; status: string; startsAt: string; endsAt: string; reason: string }) { return adminFetch<{ lot: AdminEventConfig['lots'][number] }>(`/api/admin/lots/${encodeURIComponent(lotId)}`, adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) }); }
 export function runAdminSystemCheck(adminKey: string, target: 'email' | 'gateway') { return adminFetch<AdminSystemCheckResponse>(`/api/admin/system-checks/${target}`, adminKey, { method: 'POST' }); }
 
-export function maintainAdminRegistration(adminKey: string, registrationId: string, action: 'cancel' | 'resend-email' | 'undo-check-in' | 'undo-kit', reason = '') {
+export function maintainAdminRegistration(adminKey: string, registrationId: string, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit', reason = '') {
   return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`, adminKey, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false,
   });

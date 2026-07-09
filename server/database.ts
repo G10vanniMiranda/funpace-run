@@ -59,9 +59,7 @@ export type RegistrationRecord = {
   paidAt?: string | null;
   confirmedAt?: string | null;
   bibNumber?: string | null;
-  pendingEmailSentAt?: string | null;
   confirmationEmailSentAt?: string | null;
-  pendingEmailLastAttemptAt?: string | null;
   confirmationEmailLastAttemptAt?: string | null;
   confirmationEmailProvider?: string | null;
   confirmationEmailId?: string | null;
@@ -212,13 +210,12 @@ export type PendingRegistrationResult = CreateRegistrationResponse & {
   shouldCreateCheckout?: boolean;
 };
 
-export type RegistrationEmailDeliveryKind = 'pending' | 'confirmation';
-
 export type RegistrationEmailDeliveryContext = {
   registration: RegistrationRecord;
   event: EventRecord;
   distanceName: string;
   lot: LotRecord | null;
+  paymentMethod?: string | null;
   deliveryKey: string;
 };
 
@@ -464,9 +461,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       expires_at text,
       paid_at text,
       confirmed_at text,
-      pending_email_sent_at text,
       confirmation_email_sent_at text,
-      pending_email_last_attempt_at text,
       confirmation_email_last_attempt_at text,
       confirmation_email_provider text,
       confirmation_email_id text,
@@ -603,14 +598,14 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.registrations} add column if not exists expires_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists paid_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmed_at text`);
-  await client.query(`alter table ${table.registrations} add column if not exists pending_email_sent_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_sent_at text`);
-  await client.query(`alter table ${table.registrations} add column if not exists pending_email_last_attempt_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_last_attempt_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_provider text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_id text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_error text`);
   await client.query(`alter table ${table.registrations} add column if not exists bib_number text`);
+  await client.query(`alter table ${table.registrations} drop column if exists pending_email_sent_at`);
+  await client.query(`alter table ${table.registrations} drop column if exists pending_email_last_attempt_at`);
   await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
   await client.query(`alter table ${table.payments} add column if not exists expires_at text`);
   await client.query(`alter table ${table.payments} add column if not exists paid_at text`);
@@ -702,7 +697,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
   const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
   const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows;
-  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number from ${table.registrations}`) : emptyRows;
+  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
@@ -758,9 +753,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       expiresAt: row.expires_at,
       paidAt: row.paid_at,
       confirmedAt: row.confirmed_at,
-      pendingEmailSentAt: row.pending_email_sent_at,
       confirmationEmailSentAt: row.confirmation_email_sent_at,
-      pendingEmailLastAttemptAt: row.pending_email_last_attempt_at,
       confirmationEmailLastAttemptAt: row.confirmation_email_last_attempt_at,
       confirmationEmailProvider: row.confirmation_email_provider,
       confirmationEmailId: row.confirmation_email_id,
@@ -907,8 +900,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -921,9 +914,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          expires_at = excluded.expires_at,
          paid_at = excluded.paid_at,
          confirmed_at = excluded.confirmed_at,
-         pending_email_sent_at = excluded.pending_email_sent_at,
          confirmation_email_sent_at = excluded.confirmation_email_sent_at,
-         pending_email_last_attempt_at = excluded.pending_email_last_attempt_at,
          confirmation_email_last_attempt_at = excluded.confirmation_email_last_attempt_at,
          confirmation_email_provider = excluded.confirmation_email_provider,
          confirmation_email_id = excluded.confirmation_email_id,
@@ -943,9 +934,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.expiresAt || null,
         item.paidAt || null,
         item.confirmedAt || null,
-        item.pendingEmailSentAt || null,
         item.confirmationEmailSentAt || null,
-        item.pendingEmailLastAttemptAt || null,
         item.confirmationEmailLastAttemptAt || null,
         item.confirmationEmailProvider || null,
         item.confirmationEmailId || null,
@@ -1276,8 +1265,8 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     const amountCents = Number(lot.price_cents);
 
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, pending_email_sent_at, confirmation_email_sent_at, pending_email_last_attempt_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null, null, null, null, null, null)`,
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null, null, null, null)`,
       [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now, input.expiresAt],
     );
     await client.query(
@@ -1369,6 +1358,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
   try {
     await ensurePostgresReady();
     await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-payment-confirmation'))");
     await client.query("set local lock_timeout = '5s'");
     await client.query("set local statement_timeout = '15s'");
 
@@ -1408,12 +1398,22 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
       : { rowCount: 0 };
     const wasClosed = ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(row.status);
 
+    const bibResult = await client.query(
+      `select lpad((coalesce(max(nullif(regexp_replace(bib_number, '\\D', '', 'g'), '')::int), 0) + 1)::text, 4, '0') as next_bib_number
+       from ${table.registrations}
+       where event_id = (select event_id from ${table.registrations} where id = $1)
+         and bib_number is not null`,
+      [row.id],
+    );
+    const nextBibNumber = String(bibResult.rows[0]?.next_bib_number || '0001');
+
     await client.query(
       `update ${table.registrations}
        set status = 'paid', updated_at = $1, expires_at = null,
-           paid_at = coalesce(paid_at, $1), confirmed_at = coalesce(confirmed_at, $1)
+           paid_at = coalesce(paid_at, $1), confirmed_at = coalesce(confirmed_at, $1),
+           bib_number = coalesce(bib_number, $3)
        where id = $2`,
-      [now, row.id],
+      [now, row.id, nextBibNumber],
     );
     await client.query(
       `update ${table.payments}
@@ -1685,15 +1685,25 @@ export async function cancelRegistrationInPostgres(input: {
   }
 }
 
+function findPaymentMethod(value: unknown, depth = 0): string | null {
+  if (!value || typeof value !== 'object' || depth > 4) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ['payment_method', 'paymentMethod', 'method', 'payment_type', 'paymentType', 'capture_method']) {
+    if (typeof record[key] === 'string' && record[key].trim()) return record[key].trim();
+  }
+  for (const nested of Object.values(record)) {
+    const found = findPaymentMethod(nested, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
 export async function claimRegistrationEmailInPostgres(
-  kind: RegistrationEmailDeliveryKind,
   registrationId: string,
   provider: string,
   options: { force?: boolean } = {},
 ): Promise<RegistrationEmailDeliveryContext | null> {
   const client = await requirePool().connect();
-  const sentColumn = kind === 'pending' ? 'pending_email_sent_at' : 'confirmation_email_sent_at';
-  const attemptColumn = kind === 'pending' ? 'pending_email_last_attempt_at' : 'confirmation_email_last_attempt_at';
 
   try {
     await ensurePostgresReady();
@@ -1706,43 +1716,45 @@ export async function claimRegistrationEmailInPostgres(
               distance.name as distance_name,
               lot.name as lot_name, lot.price_cents as lot_price_cents,
               lot.capacity as lot_capacity, lot.sold_count as lot_sold_count,
-              lot.status as lot_status, lot.starts_at, lot.ends_at
+              lot.status as lot_status, lot.starts_at, lot.ends_at,
+              payment.gateway_payload, payment.gateway_status
        from ${table.registrations} registration
        join ${table.events} event on event.id = registration.event_id
        join ${table.distances} distance on distance.id = registration.distance_id
        left join ${table.lots} lot on lot.id = registration.lot_id
+       left join ${table.payments} payment on payment.registration_id = registration.id
        where registration.id = $1
        for update of registration`,
       [registrationId],
     );
     const row = result.rows[0];
 
-    if (!row || (kind === 'confirmation' && row.status !== 'paid')) {
+    if (!row || row.status !== 'paid') {
       await client.query('commit');
       return null;
     }
 
-    const recentAttempt = row[attemptColumn]
-      && Date.now() - new Date(row[attemptColumn]).getTime() < 5 * 60_000;
+    const recentAttempt = row.confirmation_email_last_attempt_at
+      && Date.now() - new Date(row.confirmation_email_last_attempt_at).getTime() < 5 * 60_000;
 
-    if (!options.force && (row[sentColumn] || recentAttempt)) {
+    if (!options.force && (row.confirmation_email_sent_at || recentAttempt)) {
       await client.query('commit');
       return null;
     }
 
     const attemptedAt = new Date().toISOString();
     const deliveryKey = options.force
-      ? `${kind}/${registrationId}/${randomUUID()}`
-      : `${kind}/${registrationId}`;
+      ? `confirmation/${registrationId}/${randomUUID()}`
+      : `confirmation/${registrationId}`;
 
     await client.query(
-      `update ${table.registrations} set ${attemptColumn} = $1 where id = $2`,
+      `update ${table.registrations} set confirmation_email_last_attempt_at = $1 where id = $2`,
       [attemptedAt, registrationId],
     );
     await client.query(
       `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
        values ($1, $2, $3, $4, $5, $6, $7)`,
-      [randomUUID(), 'system', `email.${kind}.attempted`, 'registration', registrationId, {
+      [randomUUID(), 'system', 'email.confirmation.attempted', 'registration', registrationId, {
         provider,
         email: row.payload.email,
         deliveryKey,
@@ -1766,10 +1778,8 @@ export async function claimRegistrationEmailInPostgres(
         paidAt: row.paid_at,
         confirmedAt: row.confirmed_at,
         bibNumber: row.bib_number,
-        pendingEmailSentAt: row.pending_email_sent_at,
         confirmationEmailSentAt: row.confirmation_email_sent_at,
-        pendingEmailLastAttemptAt: kind === 'pending' ? attemptedAt : row.pending_email_last_attempt_at,
-        confirmationEmailLastAttemptAt: kind === 'confirmation' ? attemptedAt : row.confirmation_email_last_attempt_at,
+        confirmationEmailLastAttemptAt: attemptedAt,
         confirmationEmailProvider: row.confirmation_email_provider,
         confirmationEmailId: row.confirmation_email_id,
         confirmationEmailError: row.confirmation_email_error,
@@ -1797,6 +1807,7 @@ export async function claimRegistrationEmailInPostgres(
         startsAt: row.starts_at,
         endsAt: row.ends_at,
       } : null,
+      paymentMethod: findPaymentMethod(row.gateway_payload) || row.gateway_status || null,
       deliveryKey,
     };
   } catch (error) {
@@ -1808,39 +1819,28 @@ export async function claimRegistrationEmailInPostgres(
 }
 
 export async function completeRegistrationEmailInPostgres(
-  kind: RegistrationEmailDeliveryKind,
   registrationId: string,
   result: RegistrationEmailDeliveryResult,
 ) {
   const client = await requirePool().connect();
-  const sentColumn = kind === 'pending' ? 'pending_email_sent_at' : 'confirmation_email_sent_at';
   const completedAt = new Date().toISOString();
 
   try {
     await ensurePostgresReady();
     await client.query('begin');
-    if (kind === 'confirmation') {
-      await client.query(
-        `update ${table.registrations}
-         set ${sentColumn} = case when $1 then $2 else ${sentColumn} end,
-             confirmation_email_provider = $3,
-             confirmation_email_id = case when $1 then $4 else confirmation_email_id end,
-             confirmation_email_error = case when $1 then null else $5 end
-         where id = $6`,
-        [result.ok, completedAt, result.provider, result.providerMessageId || null, result.error || 'Email send failed', registrationId],
-      );
-    } else {
-      await client.query(
-        `update ${table.registrations}
-         set ${sentColumn} = case when $1 then $2 else ${sentColumn} end
-         where id = $3`,
-        [result.ok, completedAt, registrationId],
-      );
-    }
+    await client.query(
+      `update ${table.registrations}
+       set confirmation_email_sent_at = case when $1 then $2 else confirmation_email_sent_at end,
+           confirmation_email_provider = $3,
+           confirmation_email_id = case when $1 then $4 else confirmation_email_id end,
+           confirmation_email_error = case when $1 then null else $5 end
+       where id = $6`,
+      [result.ok, completedAt, result.provider, result.providerMessageId || null, result.error || 'Email send failed', registrationId],
+    );
     await client.query(
       `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
        values ($1, $2, $3, $4, $5, $6, $7)`,
-      [randomUUID(), 'system', result.ok ? `email.${kind}.sent` : `email.${kind}.failed`, 'registration', registrationId, {
+      [randomUUID(), 'system', result.ok ? 'email.confirmation.sent' : 'email.confirmation.failed', 'registration', registrationId, {
         provider: result.provider,
         providerMessageId: result.providerMessageId || null,
         error: result.ok ? null : result.error || 'Email send failed',

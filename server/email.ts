@@ -1,12 +1,12 @@
+import QRCode from 'qrcode';
 import type { EventRecord, LotRecord, RegistrationRecord } from './database.js';
-
-export type RegistrationEmailKind = 'pending' | 'confirmation';
 
 export type RegistrationEmailContext = {
   registration: RegistrationRecord;
   event: EventRecord;
   distanceName: string;
   lot: LotRecord | null;
+  paymentMethod?: string | null;
   deliveryKey?: string;
 };
 
@@ -34,14 +34,8 @@ export function isEmailEnabled() {
 }
 
 export function isEmailConfigured() {
-  if (emailProvider === 'console') {
-    return true;
-  }
-
-  if (emailProvider === 'resend') {
-    return Boolean(resendApiKey && emailFrom);
-  }
-
+  if (emailProvider === 'console') return true;
+  if (emailProvider === 'resend') return Boolean(resendApiKey && emailFrom);
   return false;
 }
 
@@ -60,15 +54,25 @@ function formatCurrency(cents: number) {
 
 function formatEventDate(date: string) {
   const parsedDate = new Date(`${date}T00:00:00-04:00`);
-
-  if (Number.isNaN(parsedDate.getTime())) {
-    return date;
-  }
-
+  if (Number.isNaN(parsedDate.getTime())) return date;
   return new Intl.DateTimeFormat('pt-BR', {
     day: '2-digit',
     month: 'long',
     year: 'numeric',
+    timeZone: 'America/Manaus',
+  }).format(parsedDate);
+}
+
+function formatDateTime(date: string | null | undefined) {
+  if (!date) return 'Confirmado';
+  const parsedDate = new Date(date);
+  if (Number.isNaN(parsedDate.getTime())) return date;
+  return new Intl.DateTimeFormat('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
     timeZone: 'America/Manaus',
   }).format(parsedDate);
 }
@@ -79,49 +83,32 @@ function getEventLocation(event: EventRecord) {
     : 'Local a definir';
 }
 
-function getEmailCopy(kind: RegistrationEmailKind) {
-  if (kind === 'confirmation') {
-    return {
-      subject: 'Inscrição confirmada | FunPace Run',
-      eyebrow: 'Inscrição confirmada',
-      title: 'Sua inscrição está confirmada.',
-      intro: 'Pagamento aprovado. Agora você faz parte da FunPace Run Experience.',
-      paymentStatus: 'Confirmado',
-      closing: 'Nos vemos na largada. Corra leve, corra junto, leve fun.',
-    };
-  }
-
-  return {
-    subject: 'Inscrição recebida | FunPace Run',
-    eyebrow: 'Inscrição recebida',
-    title: 'Recebemos sua inscrição.',
-    intro: 'A confirmação final depende da aprovação do pagamento pelo gateway.',
-    paymentStatus: 'Aguardando pagamento',
-    closing: 'Finalize o pagamento para garantir sua vaga na FunPace Run Experience.',
-  };
-}
-
-function buildRegistrationEmail(kind: RegistrationEmailKind, context: RegistrationEmailContext) {
+async function buildRegistrationConfirmationEmail(context: RegistrationEmailContext) {
   const { registration, event, distanceName, lot } = context;
-  const copy = getEmailCopy(kind);
   const athleteName = registration.payload.fullName;
-  const details = [
-    ['Atleta', athleteName],
-    ['Evento', event.name],
-    ['Distância', distanceName],
-    ['Camisa', registration.payload.shirtSize],
-    ['Inscrição', registration.id],
-    ['Lote', lot?.name || registration.lotId],
-    ['Valor', formatCurrency(registration.amountCents)],
-    ['Pagamento', copy.paymentStatus],
-    ['Data', formatEventDate(event.date)],
-    ['Horário', event.startTime],
-    ['Local', getEventLocation(event)],
-  ];
+  const registrationCode = registration.bibNumber || registration.id;
+  const qrCodeDataUrl = await QRCode.toDataURL(registrationCode, { margin: 1, width: 180 });
+  const subject = 'Inscrição confirmada | FunPace Run';
+  const intro = 'Pagamento aprovado. Sua vaga na FunPace Run Experience está garantida.';
   const whatsappUrl = whatsappNumber
     ? `https://wa.me/55${whatsappNumber}?text=${encodeURIComponent(`Ola, preciso de suporte sobre minha inscricao ${registration.id} na FunPace Run.`)}`
     : '';
-
+  const details = [
+    ['Atleta', athleteName],
+    ['Número da inscrição', registrationCode],
+    ['Código da inscrição', registration.id],
+    ['Evento', event.name],
+    ['Distância', distanceName],
+    ['Lote', lot?.name || registration.lotId],
+    ['Tamanho da camisa', registration.payload.shirtSize],
+    ['Valor pago', formatCurrency(registration.amountCents)],
+    ['Data da confirmação', formatDateTime(registration.confirmedAt || registration.paidAt)],
+    ['Forma de pagamento', context.paymentMethod || 'Pagamento aprovado pelo gateway'],
+    ['Status', 'INSCRIÇÃO CONFIRMADA'],
+    ['Data do evento', formatEventDate(event.date)],
+    ['Horário do evento', event.startTime],
+    ['Local do evento', getEventLocation(event)],
+  ];
   const rowsHtml = details.map(([label, value]) => `
     <tr>
       <td style="padding:12px 0;color:#71717a;font:700 12px Arial,sans-serif;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #27272a;">${escapeHtml(label)}</td>
@@ -134,10 +121,10 @@ function buildRegistrationEmail(kind: RegistrationEmailKind, context: Registrati
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${escapeHtml(copy.subject)}</title>
+    <title>${escapeHtml(subject)}</title>
   </head>
   <body style="margin:0;background:#050505;color:#ffffff;">
-    <div style="display:none;max-height:0;overflow:hidden;">${escapeHtml(copy.intro)}</div>
+    <div style="display:none;max-height:0;overflow:hidden;">${escapeHtml(intro)}</div>
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#050505;padding:32px 16px;">
       <tr>
         <td align="center">
@@ -149,9 +136,9 @@ function buildRegistrationEmail(kind: RegistrationEmailKind, context: Registrati
             </tr>
             <tr>
               <td style="padding:8px 28px 0;">
-                <p style="margin:0 0 14px;color:#d7ff00;font:800 12px Arial,sans-serif;text-transform:uppercase;letter-spacing:.16em;">${escapeHtml(copy.eyebrow)}</p>
-                <h1 style="margin:0;color:#ffffff;font:900 34px/0.95 Arial,sans-serif;text-transform:uppercase;letter-spacing:-.04em;">${escapeHtml(copy.title)}</h1>
-                <p style="margin:20px 0 0;color:#d4d4d8;font:400 16px/1.55 Arial,sans-serif;">Olá, ${escapeHtml(athleteName)}. ${escapeHtml(copy.intro)}</p>
+                <p style="margin:0 0 14px;color:#d7ff00;font:800 12px Arial,sans-serif;text-transform:uppercase;letter-spacing:.16em;">Inscrição confirmada</p>
+                <h1 style="margin:0;color:#ffffff;font:900 34px/0.95 Arial,sans-serif;text-transform:uppercase;">Sua inscrição está confirmada.</h1>
+                <p style="margin:20px 0 0;color:#d4d4d8;font:400 16px/1.55 Arial,sans-serif;">Olá, ${escapeHtml(athleteName)}. ${escapeHtml(intro)}</p>
               </td>
             </tr>
             <tr>
@@ -162,20 +149,36 @@ function buildRegistrationEmail(kind: RegistrationEmailKind, context: Registrati
               </td>
             </tr>
             <tr>
+              <td style="padding:24px 28px 0;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#ffffff;color:#000000;">
+                  <tr>
+                    <td style="padding:18px;vertical-align:middle;">
+                      <p style="margin:0;color:#000000;font:900 12px Arial,sans-serif;text-transform:uppercase;letter-spacing:.12em;">Código para identificação</p>
+                      <p style="margin:8px 0 0;color:#000000;font:900 24px Arial,sans-serif;">${escapeHtml(registrationCode)}</p>
+                    </td>
+                    <td align="right" style="padding:18px;width:150px;">
+                      <img src="${qrCodeDataUrl}" alt="QR Code da inscrição" width="132" height="132" style="display:block;border:0;" />
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
               <td style="padding:22px 28px 0;">
-                <p style="margin:0;color:#d4d4d8;font:400 15px/1.6 Arial,sans-serif;">A retirada do kit terá local, data e horário divulgados nos canais oficiais da FunPace. Fique atento ao seu e-mail e ao Instagram.</p>
+                <p style="margin:0;color:#d4d4d8;font:400 15px/1.6 Arial,sans-serif;">A retirada do kit terá local, data e horário divulgados nos canais oficiais da FunPace. Leve este código ou QR Code quando solicitado pela organização.</p>
               </td>
             </tr>
             <tr>
               <td style="padding:26px 28px;">
                 <a href="${siteUrl}/regulamento" style="display:inline-block;background:#d7ff00;color:#000000;text-decoration:none;font:900 13px Arial,sans-serif;text-transform:uppercase;letter-spacing:.12em;padding:16px 18px;">Ver regulamento</a>
+                <a href="${siteUrl}/privacidade" style="display:inline-block;margin-left:8px;color:#ffffff;text-decoration:none;font:900 13px Arial,sans-serif;text-transform:uppercase;letter-spacing:.12em;padding:16px 0;">Política de privacidade</a>
                 ${whatsappUrl ? `<a href="${whatsappUrl}" style="display:inline-block;margin-left:8px;color:#ffffff;text-decoration:none;font:900 13px Arial,sans-serif;text-transform:uppercase;letter-spacing:.12em;padding:16px 0;">Suporte WhatsApp</a>` : ''}
               </td>
             </tr>
             <tr>
               <td style="padding:0 28px 30px;">
                 <p style="margin:0;color:#a1a1aa;font:400 13px/1.6 Arial,sans-serif;">Contato oficial: <a href="mailto:${escapeHtml(emailReplyTo)}" style="color:#d7ff00;text-decoration:none;">${escapeHtml(emailReplyTo)}</a></p>
-                <p style="margin:18px 0 0;color:#ffffff;font:700 14px/1.5 Arial,sans-serif;">${escapeHtml(copy.closing)}</p>
+                <p style="margin:18px 0 0;color:#ffffff;font:700 14px/1.5 Arial,sans-serif;">Nos vemos na largada. Corra leve, corra junto, leve fun.</p>
               </td>
             </tr>
           </table>
@@ -186,28 +189,24 @@ function buildRegistrationEmail(kind: RegistrationEmailKind, context: Registrati
 </html>`;
 
   const text = [
-    copy.title,
+    'Sua inscrição está confirmada.',
     '',
-    `Olá, ${athleteName}. ${copy.intro}`,
+    `Olá, ${athleteName}. ${intro}`,
     '',
     ...details.map(([label, value]) => `${label}: ${value}`),
     '',
+    `Código para identificação: ${registrationCode}`,
     'A retirada do kit terá local, data e horário divulgados nos canais oficiais da FunPace.',
     `Regulamento: ${siteUrl}/regulamento`,
+    `Política de privacidade: ${siteUrl}/privacidade`,
     ...(whatsappUrl ? [`Suporte WhatsApp: ${whatsappUrl}`] : []),
     `Contato oficial: ${emailReplyTo}`,
-    '',
-    copy.closing,
   ].join('\n');
 
-  return {
-    subject: copy.subject,
-    html,
-    text,
-  };
+  return { subject, html, text };
 }
 
-export async function sendRegistrationEmail(kind: RegistrationEmailKind, context: RegistrationEmailContext): Promise<EmailSendResult> {
+export async function sendRegistrationConfirmationEmail(context: RegistrationEmailContext): Promise<EmailSendResult> {
   const provider = getEmailProvider();
 
   if (!isEmailEnabled()) {
@@ -215,13 +214,13 @@ export async function sendRegistrationEmail(kind: RegistrationEmailKind, context
   }
 
   const to = context.registration.payload.email;
-  const email = buildRegistrationEmail(kind, context);
+  const email = await buildRegistrationConfirmationEmail(context);
 
   if (emailProvider === 'console') {
     console.log(JSON.stringify({
       at: new Date().toISOString(),
       message: 'email_console_provider',
-      kind,
+      kind: 'confirmation',
       to,
       subject: email.subject,
       registrationId: context.registration.id,
@@ -267,8 +266,4 @@ export async function sendRegistrationEmail(kind: RegistrationEmailKind, context
     provider,
     providerMessageId: payload?.id || undefined,
   };
-}
-
-export function sendRegistrationConfirmationEmail(context: RegistrationEmailContext) {
-  return sendRegistrationEmail('confirmation', context);
 }

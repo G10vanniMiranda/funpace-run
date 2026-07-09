@@ -87,7 +87,7 @@ EMAIL_REPLY_TO="funpacerunclub@gmail.com"
 NEXT_PUBLIC_SITE_URL="https://funpace.club"
 ```
 
-Use `EMAIL_PROVIDER="console"` locally to log email attempts without sending. The API sends a pending-payment email after a registration is created and a confirmation email when the payment webhook marks the registration as `paid`.
+Use `EMAIL_PROVIDER="console"` locally to log email attempts without sending. The API sends a single registration confirmation email only after the payment webhook or verified gateway return marks the registration as `paid`.
 
 ## Google Sheets operational copy
 

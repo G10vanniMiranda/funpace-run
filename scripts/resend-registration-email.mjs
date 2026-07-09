@@ -61,7 +61,7 @@ if (registration.status !== 'paid') {
   throw new Error(`Confirmation e-mail requires a paid registration. Current status: ${registration.status}`);
 }
 
-await processRegistrationEmail('confirmation', registration.id, { force: true });
+await processRegistrationEmail(registration.id);
 
 const result = await transaction((database) => {
   const updated = database.registrations.find((item) => item.id === registration.id);

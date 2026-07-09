@@ -28,7 +28,7 @@ import {
   type PaymentRecord,
   type RegistrationRecord,
 } from './database.js';
-import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, sendRegistrationEmail, type RegistrationEmailContext, type RegistrationEmailKind } from './email.js';
+import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, type RegistrationEmailContext } from './email.js';
 import {
   processGoogleSheetSync,
   processQueuedGoogleSheetSyncs,
@@ -732,6 +732,16 @@ function claimRegistrationCapacity(database: Database, registration: Registratio
   }
 }
 
+function ensureRegistrationBibNumber(database: Database, registration: RegistrationRecord) {
+  if (registration.bibNumber) return;
+  const nextNumber = database.registrations
+    .filter((item) => item.eventId === registration.eventId && item.bibNumber)
+    .map((item) => Number(String(item.bibNumber).replace(/\D/g, '')))
+    .filter((value) => Number.isFinite(value))
+    .reduce((max, value) => Math.max(max, value), 0) + 1;
+  registration.bibNumber = String(nextNumber).padStart(4, '0');
+}
+
 function expirePendingPayments(database: Database, now = new Date()) {
   let expiredCount = 0;
 
@@ -745,6 +755,7 @@ function expirePendingPayments(database: Database, now = new Date()) {
       registration.expiresAt = null;
       registration.paidAt ||= payment?.paidAt || now.toISOString();
       registration.confirmedAt ||= registration.paidAt;
+      ensureRegistrationBibNumber(database, registration);
       registration.updatedAt = now.toISOString();
       if (payment) {
         payment.status = 'paid';
@@ -1006,10 +1017,21 @@ async function markPaymentCreationFailed(registrationId: string) {
   }, { scope: 'checkout' });
 }
 
-export async function processRegistrationEmail(kind: RegistrationEmailKind, registrationId: string, options: { force?: boolean } = {}) {
+function findPaymentMethod(value: unknown, depth = 0): string | null {
+  if (!value || typeof value !== 'object' || depth > 4) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ['payment_method', 'paymentMethod', 'method', 'payment_type', 'paymentType', 'capture_method']) {
+    if (typeof record[key] === 'string' && record[key].trim()) return record[key].trim();
+  }
+  for (const nested of Object.values(record)) {
+    const found = findPaymentMethod(nested, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+export async function processRegistrationEmail(registrationId: string, options: { force?: boolean } = {}) {
   const provider = getEmailProvider();
-  const attemptField = kind === 'pending' ? 'pendingEmailLastAttemptAt' : 'confirmationEmailLastAttemptAt';
-  const sentField = kind === 'pending' ? 'pendingEmailSentAt' : 'confirmationEmailSentAt';
   const now = new Date().toISOString();
 
   if (!isEmailConfigured()) {
@@ -1023,7 +1045,7 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
       database.auditLogs.push({
         id: randomUUID(),
         actor: 'system',
-        action: `email.${kind}.skipped`,
+        action: 'email.confirmation.skipped',
         entityType: 'registration',
         entityId: registration.id,
         payload: {
@@ -1038,7 +1060,7 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
     console.log(JSON.stringify({
       at: now,
       message: 'registration_email_skipped',
-      kind,
+      kind: 'confirmation',
       provider,
       registrationId,
       reason: 'email provider not configured',
@@ -1047,7 +1069,7 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
   }
 
   const context = usesPostgresDatabase()
-    ? await claimRegistrationEmailInPostgres(kind, registrationId, provider, options)
+    ? await claimRegistrationEmailInPostgres(registrationId, provider, options)
     : await transaction<RegistrationEmailContext | null>((database) => {
       const registration = database.registrations.find((item) => item.id === registrationId);
 
@@ -1055,19 +1077,24 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
         return null;
       }
 
-      if (registration[sentField] && !options.force) {
+      if (registration.status !== 'paid') {
+        return null;
+      }
+
+      if (registration.confirmationEmailSentAt && !options.force) {
         return null;
       }
 
       const event = database.events.find((item) => item.id === registration.eventId);
       const distance = database.distances.find((item) => item.id === registration.distanceId);
       const lot = database.lots.find((item) => item.id === registration.lotId) || null;
+      const payment = database.payments.find((item) => item.registrationId === registration.id) || null;
 
       if (!event || !distance) {
         database.auditLogs.push({
           id: randomUUID(),
           actor: 'system',
-          action: `email.${kind}.failed`,
+          action: 'email.confirmation.failed',
           entityType: 'registration',
           entityId: registration.id,
           payload: {
@@ -1080,12 +1107,12 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
         return null;
       }
 
-      registration[attemptField] = now;
+      registration.confirmationEmailLastAttemptAt = now;
 
       database.auditLogs.push({
         id: randomUUID(),
         actor: 'system',
-        action: `email.${kind}.attempted`,
+        action: 'email.confirmation.attempted',
         entityType: 'registration',
         entityId: registration.id,
         payload: {
@@ -1100,9 +1127,10 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
         event: { ...event },
         distanceName: distance.name,
         lot: lot ? { ...lot } : null,
+        paymentMethod: findPaymentMethod(payment?.gatewayPayload) || payment?.gatewayStatus || null,
         deliveryKey: options.force
-          ? `${kind}/${registration.id}/${randomUUID()}`
-          : `${kind}/${registration.id}`,
+          ? `confirmation/${registration.id}/${randomUUID()}`
+          : `confirmation/${registration.id}`,
       };
     }, { scope: 'checkout' });
 
@@ -1115,9 +1143,7 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      result = kind === 'confirmation'
-        ? await sendRegistrationConfirmationEmail(context)
-        : await sendRegistrationEmail(kind, context);
+      result = await sendRegistrationConfirmationEmail(context);
     } catch (error) {
       result = {
         ok: false,
@@ -1136,7 +1162,7 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
   const completedAt = new Date().toISOString();
 
   if (usesPostgresDatabase()) {
-    await completeRegistrationEmailInPostgres(kind, registrationId, result);
+    await completeRegistrationEmailInPostgres(registrationId, result);
   } else {
     await transaction((database) => {
       const registration = database.registrations.find((item) => item.id === registrationId);
@@ -1146,19 +1172,17 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
       }
 
       if (result.ok) {
-        registration[sentField] = completedAt;
+        registration.confirmationEmailSentAt = completedAt;
       }
 
-      if (kind === 'confirmation') {
-        registration.confirmationEmailProvider = result.provider;
-        registration.confirmationEmailId = result.ok ? result.providerMessageId || null : registration.confirmationEmailId || null;
-        registration.confirmationEmailError = result.ok ? null : result.error || 'Email send failed';
-      }
+      registration.confirmationEmailProvider = result.provider;
+      registration.confirmationEmailId = result.ok ? result.providerMessageId || null : registration.confirmationEmailId || null;
+      registration.confirmationEmailError = result.ok ? null : result.error || 'Email send failed';
 
     database.auditLogs.push({
       id: randomUUID(),
       actor: 'system',
-      action: result.ok ? `email.${kind}.sent` : `email.${kind}.failed`,
+      action: result.ok ? 'email.confirmation.sent' : 'email.confirmation.failed',
       entityType: 'registration',
       entityId: registration.id,
       payload: {
@@ -1175,7 +1199,7 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
   console.log(JSON.stringify({
     at: completedAt,
     message: result.ok ? 'registration_email_sent' : 'registration_email_failed',
-    kind,
+    kind: 'confirmation',
     provider: result.provider,
     registrationId,
     email: context.registration.payload.email,
@@ -1184,6 +1208,15 @@ export async function processRegistrationEmail(kind: RegistrationEmailKind, regi
   }));
 
   return result;
+}
+
+async function processPaymentConfirmationEmail(req: IncomingMessage, registrationId: string) {
+  try {
+    return await processRegistrationEmail(registrationId);
+  } catch (error) {
+    logServerError(req, error);
+    return null;
+  }
 }
 
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
@@ -1354,9 +1387,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       expiresAt,
       paidAt: null,
       confirmedAt: null,
-      pendingEmailSentAt: null,
       confirmationEmailSentAt: null,
-      pendingEmailLastAttemptAt: null,
       confirmationEmailLastAttemptAt: null,
       confirmationEmailProvider: null,
       confirmationEmailId: null,
@@ -1503,12 +1534,6 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     ? await queueRegistrationGoogleSheetSync(response.registrationId)
     : null;
 
-  if (statusCode === 201 && response.registrationStatus === 'pending_payment' && response.registrationId) {
-    processRegistrationEmail('pending', response.registrationId).catch((error) => {
-      logServerError(req, error);
-    });
-  }
-
   logStage('response_ready', {
     statusCode,
     registrationId: response.registrationId || null,
@@ -1646,11 +1671,11 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     const googleSheetSyncs = result.registrationId && result.paymentId
       ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
       : [];
+    if (result.registrationId) {
+      await processPaymentConfirmationEmail(req, result.registrationId);
+    }
     json(res, 200, { success: true, message: null, duplicated: result.duplicated || undefined });
     await processQueuedGoogleSheetSyncs(googleSheetSyncs);
-    if (result.registrationId) {
-      processRegistrationEmail('confirmation', result.registrationId).catch((error) => logServerError(req, error));
-    }
     return;
   }
 
@@ -1742,6 +1767,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       registration.expiresAt = null;
       registration.paidAt = registration.paidAt || now;
       registration.confirmedAt = registration.confirmedAt || now;
+      ensureRegistrationBibNumber(database, registration);
 
       if (wasExpired) {
         claimRegistrationCapacity(database, registration);
@@ -1810,14 +1836,14 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
     : [];
 
-  json(res, result.statusCode, result.payload);
-
-  // Acknowledge the gateway before external e-mail I/O. InfinitePay recommends
-  // responding in under one second and retries failed webhook responses.
   if (result.statusCode === 200 && result.nextStatus === 'paid' && result.registrationId) {
+    await processPaymentConfirmationEmail(req, result.registrationId);
+    json(res, result.statusCode, result.payload);
     await processQueuedGoogleSheetSyncs(googleSheetSyncs);
-    await processRegistrationEmail('confirmation', result.registrationId);
+    return;
   }
+
+  json(res, result.statusCode, result.payload);
 }
 
 async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) {
@@ -1847,7 +1873,6 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     confirmedAt: registration.confirmedAt || (paymentProvesPaid ? payment?.paidAt || null : null),
     gatewayStatus: payment?.gatewayStatus || null,
     gatewayTransactionId: payment?.gatewayTransactionId || payment?.providerPaymentId || null,
-    pendingEmailSentAt: registration.pendingEmailSentAt || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
   });
 }
@@ -2060,7 +2085,6 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     hasPaymentDivergence,
     googleSheetsStatus: sheetSync?.status || 'not_queued',
     googleSheetsSynchronizedAt: sheetSync?.synchronizedAt || null,
-    pendingEmailSentAt: registration.pendingEmailSentAt || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
     confirmationEmailProvider: registration.confirmationEmailProvider || null,
     confirmationEmailId: registration.confirmationEmailId || null,
@@ -2195,9 +2219,9 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
   const googleSheetSyncs = confirmed.paymentId
     ? await queueConfirmedPaymentGoogleSheetSync(registrationId, confirmed.paymentId)
     : [];
+  await processPaymentConfirmationEmail(req, registrationId);
   json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration) });
   await processQueuedGoogleSheetSyncs(googleSheetSyncs);
-  processRegistrationEmail('confirmation', registrationId).catch((error) => logServerError(req, error));
 }
 
 async function handlePaymentConfirmation(req: IncomingMessage, res: ServerResponse) {
@@ -2228,9 +2252,11 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
     const googleSheetSyncs = confirmed.registrationId && confirmed.paymentId
       ? await queueConfirmedPaymentGoogleSheetSync(confirmed.registrationId, confirmed.paymentId)
       : [];
+    if (confirmed.registrationId) {
+      await processPaymentConfirmationEmail(req, confirmed.registrationId);
+    }
     json(res, 200, { status: 'paid' });
     await processQueuedGoogleSheetSyncs(googleSheetSyncs);
-    if (confirmed.registrationId) processRegistrationEmail('confirmation', confirmed.registrationId).catch((error) => logServerError(req, error));
     return;
   }
 
@@ -2242,7 +2268,7 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
     const now = new Date().toISOString();
     const previousStatus = registration.status;
     if (['payment_failed', 'expired', 'cancelled', 'refunded'].includes(previousStatus)) claimRegistrationCapacity(database, registration);
-    registration.status = 'paid'; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null; registration.updatedAt = now;
+    registration.status = 'paid'; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null; ensureRegistrationBibNumber(database, registration); registration.updatedAt = now;
     payment.status = 'paid'; payment.provider = 'infinitepay'; payment.providerPaymentId = slug; payment.gatewayTransactionId = transactionNsu; payment.gatewayStatus = 'verified_paid'; payment.gatewayPayload = check.raw; payment.paidAt ||= now; payment.expiresAt = null; payment.updatedAt = now;
     database.auditLogs.push({ id: randomUUID(), actor: 'system', action: 'payment.redirect_reconciled', entityType: 'registration', entityId: orderNsu, payload: { previousStatus, transactionNsu, invoiceSlug: slug }, createdAt: now });
     return { statusCode: 200, status: 'paid', registrationId: orderNsu, paymentId: payment.id, payload: { status: 'paid' } };
@@ -2250,11 +2276,14 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
   const googleSheetSyncs = result.statusCode === 200 && result.registrationId && result.paymentId
     ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
     : [];
-  json(res, result.statusCode, result.payload);
   if (result.statusCode === 200 && result.registrationId) {
+    await processPaymentConfirmationEmail(req, result.registrationId);
+    json(res, result.statusCode, result.payload);
     await processQueuedGoogleSheetSyncs(googleSheetSyncs);
-    await processRegistrationEmail('confirmation', result.registrationId);
+    return;
   }
+
+  json(res, result.statusCode, result.payload);
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -2613,27 +2642,31 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
 }
 
 async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: ServerResponse, registrationId: string, action: string) {
-  const roles: AdminRole[] = action === 'resend-email' ? ['administrator', 'finance'] : action === 'cancel' ? ['administrator'] : ['administrator', 'operation'];
+  const roles: AdminRole[] = action === 'send-email' ? ['administrator', 'finance'] : action === 'cancel' ? ['administrator'] : ['administrator', 'operation'];
   const adminSession = await requireAdmin(req, res, roles);
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<{ reason?: string }>(await readBody(req)) || {};
   const reason = body.reason?.trim() || '';
   if (['cancel', 'undo-check-in', 'undo-kit'].includes(action) && reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
-  if (action === 'resend-email') {
+  if (action === 'send-email') {
     const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
     const registration = database.registrations.find((item) => item.id === registrationId);
     if (!registration || registration.status !== 'paid') { json(res, 409, { message: 'Reenvio permitido apenas para inscricoes pagas.' }); return; }
-    const emailResult = await processRegistrationEmail('confirmation', registrationId, { force: true });
+    if (registration.confirmationEmailSentAt) {
+      json(res, 200, { registration: toAdminRow(database, registration), message: 'Email de confirmacao ja registrado. Nenhum novo envio foi realizado.' });
+      return;
+    }
+    const emailResult = await processRegistrationEmail(registrationId);
     const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
     const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId)!;
     if (!emailResult?.ok) {
       json(res, 502, {
-        message: `Nao foi possivel reenviar o email: ${emailResult?.error || refreshedRegistration.confirmationEmailError || 'falha desconhecida'}`,
+        message: `Nao foi possivel enviar o email: ${emailResult?.error || refreshedRegistration.confirmationEmailError || 'falha desconhecida'}`,
         registration: toAdminRow(refreshed, refreshedRegistration),
       });
       return;
     }
-    json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration), message: 'Email de confirmacao reenviado com sucesso.' }); return;
+    json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration), message: 'Email de confirmacao enviado com sucesso.' }); return;
   }
   if (action === 'cancel' && usesPostgresDatabase()) {
     const cancelResult = await cancelRegistrationInPostgres({
@@ -3201,7 +3234,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     const adminRegistrationAction = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/(check-in|kit)$/);
 
-    const adminRegistrationMaintenance = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/(cancel|resend-email|undo-check-in|undo-kit)$/);
+    const adminRegistrationMaintenance = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/(cancel|send-email|undo-check-in|undo-kit)$/);
     if (req.method === 'POST' && adminRegistrationMaintenance) {
       await handleAdminRegistrationMaintenance(req, res, decodeURIComponent(adminRegistrationMaintenance[1]), adminRegistrationMaintenance[2]); return;
     }
