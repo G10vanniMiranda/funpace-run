@@ -604,8 +604,6 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_id text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_error text`);
   await client.query(`alter table ${table.registrations} add column if not exists bib_number text`);
-  await client.query(`alter table ${table.registrations} drop column if exists pending_email_sent_at`);
-  await client.query(`alter table ${table.registrations} drop column if exists pending_email_last_attempt_at`);
   await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
   await client.query(`alter table ${table.payments} add column if not exists expires_at text`);
   await client.query(`alter table ${table.payments} add column if not exists paid_at text`);
