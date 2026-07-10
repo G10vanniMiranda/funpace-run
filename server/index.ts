@@ -1341,11 +1341,11 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
     const distance = database.distances.find((item) => item.eventId === event.id && item.name === payload.distance && item.status === 'active');
     const configuredLots = database.lots.filter((item) => item.eventId === event.id && ['active', 'sold_out'].includes(item.status));
-    const eventSold = database.registrations.filter((item) => (
-      item.eventId === event.id && ['pending_payment', 'paid'].includes(item.status)
+    const eventPaid = database.registrations.filter((item) => (
+      item.eventId === event.id && item.status === 'paid'
     )).length;
-    const previousLot = eventSold > 0 ? selectLotForRegistrationNumber(configuredLots, eventSold) : null;
-    const activeLot = selectLotForRegistrationNumber(configuredLots, eventSold + 1);
+    const previousLot = eventPaid > 0 ? selectLotForRegistrationNumber(configuredLots, eventPaid) : null;
+    const activeLot = selectLotForRegistrationNumber(configuredLots, eventPaid + 1);
 
     if (!distance || !activeLot) {
       return {
@@ -1429,7 +1429,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
           previousLotName: previousLot.name,
           newLotId: activeLot.id,
           newLotName: activeLot.name,
-          registrationNumber: eventSold + 1,
+          registrationNumber: eventPaid + 1,
           registrationId: registration.id,
         },
         createdAt: now,
@@ -1908,6 +1908,13 @@ async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse)
     return;
   }
 
+  const paidRegistrations = database.registrations.filter((registration) => (
+    registration.eventId === event.id && registration.status === 'paid'
+  ));
+  const commercialLots = database.lots.filter((lot) => (
+    lot.eventId === event.id && ['active', 'sold_out'].includes(lot.status)
+  ));
+  const currentLot = selectLotForRegistrationNumber(commercialLots, paidRegistrations.length + 1);
   const lots = database.lots
     .filter((item) => item.eventId === event.id)
     .map((lot) => ({
@@ -1917,7 +1924,7 @@ async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse)
       capacity: lot.capacity,
       soldCount: lot.soldCount,
       remaining: Math.max(lot.capacity - lot.soldCount, 0),
-      status: lot.status,
+      status: lot.id === currentLot?.id ? 'active' : lot.status,
     }));
   const distances = database.distances
     .filter((item) => item.eventId === event.id)
@@ -2357,6 +2364,8 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     accumulator[registration.payload.shirtSize] = (accumulator[registration.payload.shirtSize] || 0) + 1;
     return accumulator;
   }, {})).map(([size, total]) => ({ size, total }));
+  const commercialLots = database.lots.filter((lot) => ['active', 'sold_out'].includes(lot.status));
+  const currentLot = selectLotForRegistrationNumber(commercialLots, paid.length + 1);
   const lots = database.lots.map((lot) => ({
     id: lot.id,
     name: lot.name,
@@ -2364,7 +2373,7 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     soldCount: lot.soldCount,
     remaining: Math.max(lot.capacity - lot.soldCount, 0),
     priceCents: lot.priceCents,
-    status: lot.status,
+    status: lot.id === currentLot?.id ? 'active' : lot.status,
   }));
 
   json(res, 200, {

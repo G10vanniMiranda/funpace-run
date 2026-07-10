@@ -1440,11 +1440,11 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     );
     const distanceSold = Number(distanceSoldResult.rows[0]?.count || 0);
 
-    const eventSoldResult = await client.query(
-      `select count(*)::int as count from ${table.registrations} where event_id = $1 and status = any($2)`,
-      [event.id, ['pending_payment', 'paid']],
+    const eventPaidResult = await client.query(
+      `select count(*)::int as count from ${table.registrations} where event_id = $1 and status = $2`,
+      [event.id, 'paid'],
     );
-    const eventSold = Number(eventSoldResult.rows[0]?.count || 0);
+    const eventPaid = Number(eventPaidResult.rows[0]?.count || 0);
     const configuredLots = lotResult.rows.map((row) => ({
       id: String(row.id),
       eventId: String(event.id),
@@ -1458,12 +1458,12 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       orderIndex: Number(row.order_index || 0),
       continuesAfterCapacity: Boolean(row.continues_after_capacity),
     }));
-    const previousLot = eventSold > 0 ? selectLotForRegistrationNumber(configuredLots, eventSold) : null;
+    const previousLot = eventPaid > 0 ? selectLotForRegistrationNumber(configuredLots, eventPaid) : null;
     const selectedLotResult = await client.query(
       `select id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity
        from public.run_select_lot_for_registration_number($1, $2)
        limit 1`,
-      [event.id, eventSold + 1],
+      [event.id, eventPaid + 1],
     );
     const selectedLot = selectedLotResult.rows[0];
     const lot = selectedLot ? {
@@ -1532,7 +1532,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
           previousLotName: previousLot.name,
           newLotId: lot.id,
           newLotName: lot.name,
-          registrationNumber: eventSold + 1,
+          registrationNumber: eventPaid + 1,
           registrationId,
         }, now],
       );
