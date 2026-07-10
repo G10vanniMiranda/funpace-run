@@ -1879,7 +1879,8 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     return;
   }
   const payment = database.payments.find((item) => item.registrationId === registration.id);
-  const paymentProvesPaid = payment?.status === 'paid' || Boolean(payment?.paidAt);
+  const registrationIsClosed = ['cancelled', 'refunded'].includes(registration.status);
+  const paymentProvesPaid = !registrationIsClosed && (payment?.status === 'paid' || Boolean(payment?.paidAt));
 
   json(res, 200, {
     registrationId: registration.id,
@@ -2066,7 +2067,8 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
   const kitDelivery = database.kitDeliveries.find((item) => item.registrationId === registration.id);
   const paymentEvents = payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id) : [];
   const paymentMethod = toStringValue(findFirstValue(payment?.gatewayPayload, ['payment_method', 'paymentMethod', 'method', 'payment_type', 'paymentType']));
-  const paymentProvesPaid = payment?.status === 'paid' || Boolean(payment?.paidAt);
+  const registrationIsClosed = ['cancelled', 'refunded'].includes(registration.status);
+  const paymentProvesPaid = !registrationIsClosed && (payment?.status === 'paid' || Boolean(payment?.paidAt));
   const statusMismatch = paymentProvesPaid && registration.status !== 'paid';
   const hasPaymentDivergence = statusMismatch || paymentEvents.some((item) => item.eventType === 'infinitepay.amount_mismatch');
   const effectiveStatus = paymentProvesPaid ? 'paid' : registration.status;
@@ -2713,7 +2715,9 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
     if (cancelResult.status === 'already_closed') { json(res, 409, { message: 'Inscricao ja encerrada.' }); return; }
     const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
     const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId)!;
+    const googleSheetSync = await queueRegistrationGoogleSheetSync(registrationId);
     json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration), message: 'Inscricao cancelada com sucesso.' });
+    if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
     return;
   }
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
@@ -2741,10 +2745,14 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
     database.auditLogs.push(createAuditLog(req, adminSession, { actor, action: `registration.${action}`, entityType: 'registration', entityId: registrationId, payload: { reason }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
+  const registrationGoogleSheetSync = result.statusCode === 200 && action === 'cancel'
+    ? await queueRegistrationGoogleSheetSync(registrationId)
+    : null;
   const googleSheetSync = result.statusCode === 200 && ['undo-check-in', 'undo-kit'].includes(action)
     ? await queueCheckInGoogleSheetSync(registrationId)
     : null;
   json(res, result.statusCode, result.payload);
+  if (registrationGoogleSheetSync) await processGoogleSheetSync(registrationGoogleSheetSync.id);
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
