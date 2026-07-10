@@ -1308,20 +1308,49 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       item.eventId === event.id && item.cpfHash === hash && ['pending_payment', 'paid'].includes(item.status)
     ));
 
-    if (existing) {
-      const payment = database.payments.find((item) => item.registrationId === existing.id);
-      const existingDistance = database.distances.find((item) => item.id === existing.distanceId);
+    if (existing?.status === 'pending_payment') {
+      const existingPayment = database.payments.find((item) => item.registrationId === existing.id);
       const existingLot = database.lots.find((item) => item.id === existing.lotId);
-      const shouldCreateCheckout = existing.status === 'pending_payment' && !payment?.checkoutUrl;
+      const isStalePending = !existingLot
+        || existingLot.status !== 'active'
+        || existing.amountCents !== existingLot.priceCents
+        || !existingPayment
+        || existingPayment.amountCents !== existingLot.priceCents;
+
+      if (isStalePending) {
+        releaseRegistrationCapacity(database, existing);
+        existing.status = 'expired';
+        existing.updatedAt = new Date().toISOString();
+        existing.expiresAt ||= existing.updatedAt;
+
+        if (existingPayment) {
+          existingPayment.status = 'expired';
+          existingPayment.checkoutUrl = null;
+          existingPayment.providerPaymentId = null;
+          existingPayment.updatedAt = existing.updatedAt;
+          existingPayment.expiresAt ||= existing.updatedAt;
+        }
+      }
+    }
+
+    const activeExisting = database.registrations.find((item) => (
+      item.eventId === event.id && item.cpfHash === hash && ['pending_payment', 'paid'].includes(item.status)
+    ));
+
+    if (activeExisting) {
+      const payment = database.payments.find((item) => item.registrationId === activeExisting.id);
+      const existingDistance = database.distances.find((item) => item.id === activeExisting.distanceId);
+      const existingLot = database.lots.find((item) => item.id === activeExisting.lotId);
+      const shouldCreateCheckout = activeExisting.status === 'pending_payment' && !payment?.checkoutUrl;
       const response: CreateRegistrationResponse = {
-        success: existing.status !== 'paid',
-        registrationId: existing.id,
+        success: activeExisting.status !== 'paid',
+        registrationId: activeExisting.id,
         paymentId: payment?.id || null,
-        registrationStatus: existing.status,
+        registrationStatus: activeExisting.status,
         checkoutStatus: payment?.checkoutUrl ? 'created' : 'not_configured',
         checkoutUrl: payment?.checkoutUrl || null,
-        expiresAt: existing.expiresAt || null,
-        message: existing.status === 'paid'
+        expiresAt: activeExisting.expiresAt || null,
+        message: activeExisting.status === 'paid'
           ? 'Ja existe uma inscricao paga para este CPF.'
           : shouldCreateCheckout
             ? 'Inscricao recuperada. Preparando um novo acesso ao checkout.'
@@ -1330,10 +1359,10 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
       return {
         ...response,
-        statusCode: existing.status === 'paid' ? 409 : 200,
-        amountCents: shouldCreateCheckout ? existing.amountCents : undefined,
+        statusCode: activeExisting.status === 'paid' ? 409 : 200,
+        amountCents: shouldCreateCheckout ? activeExisting.amountCents : undefined,
         description: shouldCreateCheckout
-          ? getRegistrationDescription(existingDistance?.name || existing.payload.distance, existingLot?.name || existing.lotId)
+          ? getRegistrationDescription(existingDistance?.name || activeExisting.payload.distance, existingLot?.name || activeExisting.lotId)
           : undefined,
         shouldCreateCheckout,
       };
@@ -1690,6 +1719,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     });
     if (result.error === 'not_found') { json(res, 400, { success: false, message: 'Pedido nao encontrado.' }); return; }
     if (result.error === 'amount_mismatch') { json(res, 400, { success: false, message: 'Valor do pagamento divergente.' }); return; }
+    if (result.error === 'stale_checkout') { json(res, 409, { success: false, message: 'Checkout expirado por mudanca de lote.' }); return; }
     const googleSheetSyncs = result.registrationId && result.paymentId
       ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
       : [];
@@ -1735,10 +1765,28 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     }
 
     const payment = database.payments.find((item) => item.registrationId === registration.id);
+    const lot = database.lots.find((item) => item.id === registration.lotId);
     const now = new Date().toISOString();
     const providerEventId = normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId || '';
     // Never downgrade a confirmed payment because of a delayed/stale event.
     const nextStatus = resolvePaymentTransition(registration.status, normalizedEvent.nextStatus);
+
+    if (
+      registration.status !== 'paid'
+      && (!lot || lot.status !== 'active' || registration.amountCents !== lot.priceCents)
+    ) {
+      if (payment) {
+        payment.gatewayStatus = 'stale_checkout';
+        payment.gatewayTransactionId = normalizedEvent.providerTransactionId || payment.gatewayTransactionId || null;
+        payment.gatewayPayload = event;
+        payment.updatedAt = now;
+      }
+      database.auditLogs.push({
+        id: randomUUID(), actor: 'system', action: 'payment.stale_checkout', entityType: 'registration', entityId: registration.id,
+        payload: { lotId: registration.lotId, amountCents: registration.amountCents, receivedAmountCents: normalizedEvent.amountCents }, createdAt: now,
+      });
+      return { statusCode: 409, payload: { message: 'Checkout expirado por mudanca de lote.' } };
+    }
 
     if (normalizedEvent.amountCents !== null && normalizedEvent.amountCents !== registration.amountCents) {
       if (payment) {
@@ -2248,7 +2296,16 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
     auditAction: 'payment.gateway_reconciled',
     actor: adminSession.actor,
   });
-  if (confirmed.error) { json(res, confirmed.statusCode, { message: confirmed.error === 'not_found' ? 'Pagamento nao encontrado.' : 'Valor divergente.' }); return; }
+  if (confirmed.error) {
+    json(res, confirmed.statusCode, {
+      message: confirmed.error === 'not_found'
+        ? 'Pagamento nao encontrado.'
+        : confirmed.error === 'stale_checkout'
+          ? 'Checkout expirado por mudanca de lote.'
+          : 'Valor divergente.',
+    });
+    return;
+  }
   const refreshed = await transaction((database) => database, { persist: false, scope: 'admin-registrations' });
   const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId)!;
   const googleSheetSyncs = confirmed.paymentId
@@ -2284,6 +2341,7 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
     });
     if (confirmed.error === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
     if (confirmed.error === 'amount_mismatch') { json(res, 409, { message: 'Valor do pagamento divergente.' }); return; }
+    if (confirmed.error === 'stale_checkout') { json(res, 409, { message: 'Checkout expirado por mudanca de lote.' }); return; }
     const googleSheetSyncs = confirmed.registrationId && confirmed.paymentId
       ? await queueConfirmedPaymentGoogleSheetSync(confirmed.registrationId, confirmed.paymentId)
       : [];

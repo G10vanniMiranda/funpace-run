@@ -247,7 +247,7 @@ export type PaymentConfirmationResult = {
   paymentId?: string;
   previousStatus?: RegistrationStatus;
   duplicated?: boolean;
-  error?: 'not_found' | 'amount_mismatch';
+  error?: 'not_found' | 'amount_mismatch' | 'stale_checkout';
 };
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
@@ -1367,6 +1367,62 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       };
     }
 
+    const stalePendingResult = await client.query(
+      `select registration.id, registration.lot_id
+       from ${table.registrations} registration
+       join ${table.lots} lot on lot.id = registration.lot_id
+       left join ${table.payments} payment on payment.registration_id = registration.id
+       where registration.event_id = $1
+         and registration.cpf_hash = $2
+         and registration.status = $3
+         and (
+           lot.status <> 'active'
+           or registration.amount_cents <> lot.price_cents
+           or payment.id is null
+           or payment.amount_cents <> lot.price_cents
+         )
+       for update of registration`,
+      [event.id, input.cpfHash, 'pending_payment'],
+    );
+
+    if (stalePendingResult.rows.length > 0) {
+      const now = new Date().toISOString();
+      const staleIds = stalePendingResult.rows.map((row) => String(row.id));
+      const staleLotCounts = stalePendingResult.rows.reduce<Record<string, number>>((accumulator, row) => {
+        const lotId = String(row.lot_id);
+        accumulator[lotId] = (accumulator[lotId] || 0) + 1;
+        return accumulator;
+      }, {});
+
+      await client.query(
+        `update ${table.registrations}
+         set status = 'expired',
+             updated_at = $1,
+             expires_at = coalesce(expires_at, $1)
+         where id = any($2::text[])`,
+        [now, staleIds],
+      );
+      await client.query(
+        `update ${table.payments}
+         set status = 'expired',
+             checkout_url = null,
+             provider_payment_id = null,
+             updated_at = $1,
+             expires_at = coalesce(expires_at, $1)
+         where registration_id = any($2::text[])`,
+        [now, staleIds],
+      );
+
+      for (const [lotId, total] of Object.entries(staleLotCounts)) {
+        await client.query(
+          `update ${table.lots}
+           set sold_count = greatest(sold_count - $1::int, 0)
+           where id = $2`,
+          [total, lotId],
+        );
+      }
+    }
+
     const existingResult = await client.query(
       `select registration.id, registration.status, registration.expires_at,
               registration.amount_cents, payment.id as payment_id, payment.checkout_url,
@@ -1620,9 +1676,11 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
 
     const result = await client.query(
       `select registration.id, registration.status, registration.amount_cents, registration.lot_id,
-              payment.id as payment_id, payment.status as payment_status
+              payment.id as payment_id, payment.status as payment_status,
+              lot.status as lot_status, lot.price_cents as lot_price_cents
        from ${table.registrations} registration
        join ${table.payments} payment on payment.registration_id = registration.id
+       join ${table.lots} lot on lot.id = registration.lot_id
        where registration.id = $1
           or ($2 <> '' and payment.provider_payment_id = $2)
           or ($3 <> '' and (payment.gateway_transaction_id = $3 or payment.provider_payment_id = $3))
@@ -1635,6 +1693,21 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
     if (!row) {
       await client.query('rollback');
       return { statusCode: 404, error: 'not_found' };
+    }
+
+    if (
+      row.status !== 'paid'
+      && (row.lot_status !== 'active' || Number(row.amount_cents) !== Number(row.lot_price_cents))
+    ) {
+      await client.query(
+        `update ${table.payments}
+         set gateway_status = 'stale_checkout', gateway_transaction_id = coalesce(nullif($1, ''), gateway_transaction_id),
+             gateway_payload = $2, updated_at = $3
+         where id = $4`,
+        [input.providerTransactionId, input.payload, now, row.payment_id],
+      );
+      await client.query('commit');
+      return { statusCode: 409, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, error: 'stale_checkout' };
     }
 
     if (input.amountCents !== null && Number(row.amount_cents) !== input.amountCents) {

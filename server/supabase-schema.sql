@@ -313,26 +313,52 @@ on conflict (id) do update set
   order_index = excluded.order_index,
   continues_after_capacity = excluded.continues_after_capacity;
 
-update "run-registrations"
-set
-  status = 'expired',
-  amount_cents = 7990,
-  updated_at = now()::text,
-  expires_at = coalesce(expires_at, now()::text)
-where lot_id = 'lot-1'
-  and status = 'pending_payment'
-  and amount_cents <> 7990;
+with stale_pending as (
+  select registration.id, registration.lot_id
+  from "run-registrations" registration
+  join "run-lots" lot on lot.id = registration.lot_id
+  left join "run-payments" payment on payment.registration_id = registration.id
+  where registration.status = 'pending_payment'
+    and (
+      lot.status <> 'active'
+      or registration.amount_cents <> lot.price_cents
+      or payment.id is null
+      or payment.amount_cents <> lot.price_cents
+    )
+),
+expired_registrations as (
+  update "run-registrations" registration
+  set
+    status = 'expired',
+    updated_at = now()::text,
+    expires_at = coalesce(registration.expires_at, now()::text)
+  from stale_pending
+  where registration.id = stale_pending.id
+  returning stale_pending.lot_id
+),
+released_lots as (
+  select lot_id, count(*)::int as total
+  from expired_registrations
+  group by lot_id
+)
+update "run-lots" lot
+set sold_count = greatest(lot.sold_count - released_lots.total, 0)
+from released_lots
+where lot.id = released_lots.lot_id;
 
 update "run-payments" payment
 set
   status = 'expired',
-  amount_cents = 7990,
   checkout_url = null,
   provider_payment_id = null,
   updated_at = now()::text,
   expires_at = coalesce(payment.expires_at, now()::text)
 from "run-registrations" registration
 where payment.registration_id = registration.id
-  and registration.lot_id = 'lot-1'
+  and registration.status = 'expired'
   and payment.status = 'pending_payment'
-  and payment.amount_cents <> 7990;
+  and (
+    payment.checkout_url is not null
+    or payment.provider_payment_id is not null
+    or payment.amount_cents <> registration.amount_cents
+  );
