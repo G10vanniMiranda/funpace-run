@@ -368,7 +368,7 @@ const initialDatabase: Database = {
       priceCents: 13990,
       capacity: 100,
       soldCount: 0,
-      status: 'active',
+      status: 'inactive',
       startsAt: '2026-09-01T00:00:00-04:00',
       endsAt: '2026-09-10T23:59:59-04:00',
       orderIndex: 3,
@@ -381,7 +381,7 @@ const initialDatabase: Database = {
       priceCents: 16990,
       capacity: 100,
       soldCount: 0,
-      status: 'active',
+      status: 'inactive',
       startsAt: '2026-09-11T00:00:00-04:00',
       endsAt: '2026-09-20T23:59:59-04:00',
       orderIndex: 4,
@@ -1306,7 +1306,7 @@ async function ensureConfiguredLots(client: Queryable) {
          capacity = excluded.capacity,
          status = case
            when ${table.lots}.status = 'inactive' then ${table.lots}.status
-           when excluded.continues_after_capacity then 'active'
+           when excluded.continues_after_capacity and excluded.status = 'active' then 'active'
            when ${table.lots}.sold_count >= excluded.capacity then 'sold_out'
            else excluded.status
          end,

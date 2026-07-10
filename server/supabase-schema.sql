@@ -295,8 +295,8 @@ insert into "run-lots" (id, event_id, name, price_cents, capacity, sold_count, s
 values
   ('lot-1', 'funpace-run-2026', 'Lote 1', 7990, 100, 0, 'inactive', '2026-06-01T00:00:00-04:00', '2026-07-31T23:59:59-04:00', 1, false),
   ('lot-2', 'funpace-run-2026', 'Lote 2', 9990, 400, 0, 'active', '2026-08-01T00:00:00-04:00', '2026-08-31T23:59:59-04:00', 2, false),
-  ('lot-3', 'funpace-run-2026', 'Lote 3', 13990, 100, 0, 'active', '2026-09-01T00:00:00-04:00', '2026-09-10T23:59:59-04:00', 3, false),
-  ('lot-4', 'funpace-run-2026', 'Lote 4', 16990, 100, 0, 'active', '2026-09-11T00:00:00-04:00', '2026-09-20T23:59:59-04:00', 4, true)
+  ('lot-3', 'funpace-run-2026', 'Lote 3', 13990, 100, 0, 'inactive', '2026-09-01T00:00:00-04:00', '2026-09-10T23:59:59-04:00', 3, false),
+  ('lot-4', 'funpace-run-2026', 'Lote 4', 16990, 100, 0, 'inactive', '2026-09-11T00:00:00-04:00', '2026-09-20T23:59:59-04:00', 4, true)
 on conflict (id) do update set
   event_id = excluded.event_id,
   name = excluded.name,
@@ -304,7 +304,7 @@ on conflict (id) do update set
   capacity = excluded.capacity,
   status = case
     when "run-lots".status = 'inactive' then "run-lots".status
-    when excluded.continues_after_capacity then 'active'
+    when excluded.continues_after_capacity and excluded.status = 'active' then 'active'
     when "run-lots".sold_count >= excluded.capacity then 'sold_out'
     else excluded.status
   end,
