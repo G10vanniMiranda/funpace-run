@@ -19,9 +19,9 @@ export const eventInfo = {
     { value: 'female', label: 'Feminino' },
     { value: 'male', label: 'Masculino' },
   ],
-  currentLot: 'Lote 1',
-  currentLotPriceCents: 7990,
-  currentLotCapacity: 100,
+  currentLot: 'Lote 2',
+  currentLotPriceCents: 9990,
+  currentLotCapacity: 400,
   offerNote: 'Inscrição confirmada somente após pagamento aprovado.',
   kitItems: [
     'Camiseta',

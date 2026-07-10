@@ -342,7 +342,7 @@ const initialDatabase: Database = {
       priceCents: 7990,
       capacity: 100,
       soldCount: 0,
-      status: 'active',
+      status: 'inactive',
       startsAt: '2026-06-01T00:00:00-04:00',
       endsAt: '2026-07-31T23:59:59-04:00',
       orderIndex: 1,

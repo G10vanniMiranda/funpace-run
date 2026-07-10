@@ -293,7 +293,7 @@ on conflict (id) do nothing;
 
 insert into "run-lots" (id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity)
 values
-  ('lot-1', 'funpace-run-2026', 'Lote 1', 7990, 100, 0, 'active', '2026-06-01T00:00:00-04:00', '2026-07-31T23:59:59-04:00', 1, false),
+  ('lot-1', 'funpace-run-2026', 'Lote 1', 7990, 100, 0, 'inactive', '2026-06-01T00:00:00-04:00', '2026-07-31T23:59:59-04:00', 1, false),
   ('lot-2', 'funpace-run-2026', 'Lote 2', 9990, 400, 0, 'active', '2026-08-01T00:00:00-04:00', '2026-08-31T23:59:59-04:00', 2, false),
   ('lot-3', 'funpace-run-2026', 'Lote 3', 13990, 100, 0, 'active', '2026-09-01T00:00:00-04:00', '2026-09-10T23:59:59-04:00', 3, false),
   ('lot-4', 'funpace-run-2026', 'Lote 4', 16990, 100, 0, 'active', '2026-09-11T00:00:00-04:00', '2026-09-20T23:59:59-04:00', 4, true)

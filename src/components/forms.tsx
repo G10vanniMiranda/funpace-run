@@ -153,7 +153,7 @@ export function RegistrationSection() {
             Não fique <br />para trás.
           </h2>
           <p className="mb-8 max-w-xl text-base font-medium leading-relaxed opacity-80 sm:text-lg md:mb-10 md:text-xl">
-            Garanta agora sua vaga no valor promocional do primeiro lote.
+            Garanta agora sua vaga no valor promocional do segundo lote.
           </p>
 
           <div className="mb-6 grid w-full max-w-xl grid-cols-1 gap-3 sm:mb-8">
