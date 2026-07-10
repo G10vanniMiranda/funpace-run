@@ -279,6 +279,7 @@ export function createRegistration(data: RegistrationFormData) {
 
 export function getAvailability() {
   return apiFetch<AvailabilityResponse>('/api/availability', {
+    cache: 'no-store',
     retry: true,
   });
 }

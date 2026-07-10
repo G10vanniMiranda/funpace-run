@@ -40,7 +40,9 @@ export function RegistrationSection() {
   const [availability, setAvailability] = useState<AvailabilityResponse | null>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [showSlowCheckoutHint, setShowSlowCheckoutHint] = useState(false);
-  const activeLot = availability?.lots.find((lot) => lot.status === 'active') || availability?.lots[0];
+  const activeLot = availability?.lots.find((lot) => lot.name === eventInfo.currentLot)
+    || availability?.lots.find((lot) => lot.status === 'active')
+    || availability?.lots[0];
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
   const isSubmitting = status === 'submitting';
   const checkoutSupportUrl = getWhatsAppUrl('Ola, tentei fazer minha inscricao na FunPace Run, mas nao consegui abrir o checkout.');

@@ -1912,12 +1912,13 @@ async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse)
   const paidRegistrations = database.registrations.filter((registration) => (
     registration.eventId === event.id && registration.status === 'paid'
   ));
-  const commercialLots = database.lots.filter((lot) => (
-    lot.eventId === event.id && ['active', 'sold_out'].includes(lot.status)
-  ));
+  const commercialLots = database.lots
+    .filter((lot) => lot.eventId === event.id && ['active', 'sold_out'].includes(lot.status))
+    .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0));
   const currentLot = selectLotForRegistrationNumber(commercialLots, paidRegistrations.length + 1);
   const lots = database.lots
     .filter((item) => item.eventId === event.id)
+    .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0))
     .map((lot) => ({
       id: lot.id,
       name: lot.name,
@@ -1925,7 +1926,7 @@ async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse)
       capacity: lot.capacity,
       soldCount: lot.soldCount,
       remaining: Math.max(lot.capacity - lot.soldCount, 0),
-      status: lot.id === currentLot?.id ? 'active' : lot.status,
+      status: lot.id === currentLot?.id ? 'active' : lot.status === 'active' ? 'inactive' : lot.status,
     }));
   const distances = database.distances
     .filter((item) => item.eventId === event.id)
@@ -1944,6 +1945,9 @@ async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse)
       };
     });
 
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  res.setHeader('CDN-Cache-Control', 'no-store');
+  res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
   json(res, 200, { event, lots, distances });
 }
 
@@ -2366,17 +2370,22 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     accumulator[registration.payload.shirtSize] = (accumulator[registration.payload.shirtSize] || 0) + 1;
     return accumulator;
   }, {})).map(([size, total]) => ({ size, total }));
-  const commercialLots = database.lots.filter((lot) => ['active', 'sold_out'].includes(lot.status));
+  const commercialLots = database.lots
+    .filter((lot) => ['active', 'sold_out'].includes(lot.status))
+    .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0));
   const currentLot = selectLotForRegistrationNumber(commercialLots, paid.length + 1);
-  const lots = database.lots.map((lot) => ({
-    id: lot.id,
-    name: lot.name,
-    capacity: lot.capacity,
-    soldCount: lot.soldCount,
-    remaining: Math.max(lot.capacity - lot.soldCount, 0),
-    priceCents: lot.priceCents,
-    status: lot.id === currentLot?.id ? 'active' : lot.status,
-  }));
+  const lots = database.lots
+    .slice()
+    .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0))
+    .map((lot) => ({
+      id: lot.id,
+      name: lot.name,
+      capacity: lot.capacity,
+      soldCount: lot.soldCount,
+      remaining: Math.max(lot.capacity - lot.soldCount, 0),
+      priceCents: lot.priceCents,
+      status: lot.id === currentLot?.id ? 'active' : lot.status === 'active' ? 'inactive' : lot.status,
+    }));
 
   json(res, 200, {
     totals: {
