@@ -19,6 +19,7 @@ import {
   markPaymentCreationFailedInPostgres,
   pingDatabase,
   revokeAdminSessionInPostgres,
+  selectLotForRegistrationNumber,
   transaction,
   upsertAdminBootstrapInPostgres,
   usesPostgresDatabase,
@@ -727,8 +728,10 @@ function claimRegistrationCapacity(database: Database, registration: Registratio
 
   lot.soldCount += 1;
 
-  if (lot.soldCount >= lot.capacity) {
+  if (lot.soldCount >= lot.capacity && !lot.continuesAfterCapacity) {
     lot.status = 'sold_out';
+  } else {
+    lot.status = 'active';
   }
 }
 
@@ -1337,7 +1340,12 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     }
 
     const distance = database.distances.find((item) => item.eventId === event.id && item.name === payload.distance && item.status === 'active');
-    const activeLot = database.lots.find((item) => item.eventId === event.id && item.status === 'active');
+    const configuredLots = database.lots.filter((item) => item.eventId === event.id && ['active', 'sold_out'].includes(item.status));
+    const eventSold = database.registrations.filter((item) => (
+      item.eventId === event.id && ['pending_payment', 'paid'].includes(item.status)
+    )).length;
+    const previousLot = eventSold > 0 ? selectLotForRegistrationNumber(configuredLots, eventSold) : null;
+    const activeLot = selectLotForRegistrationNumber(configuredLots, eventSold + 1);
 
     if (!distance || !activeLot) {
       return {
@@ -1356,9 +1364,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       item.distanceId === distance.id && ['pending_payment', 'paid'].includes(item.status)
     )).length;
 
-    if (distanceSold >= distance.capacity || activeLot.soldCount >= activeLot.capacity) {
-      activeLot.status = 'sold_out';
-
+    if (distanceSold >= distance.capacity) {
       return {
         statusCode: 409,
         success: false,
@@ -1367,7 +1373,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         registrationStatus: 'cancelled',
         checkoutStatus: 'not_configured',
         checkoutUrl: null,
-        message: 'Vagas esgotadas para este lote ou distancia.',
+        message: 'Vagas esgotadas para esta distancia.',
       };
     }
 
@@ -1410,9 +1416,25 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       gatewayPayload: null,
     };
 
-    activeLot.soldCount += 1;
+    claimRegistrationCapacity(database, registration);
     database.registrations.push(registration);
     database.payments.push(payment);
+    if (previousLot && previousLot.id !== activeLot.id) {
+      database.auditLogs.push(createAuditLog(req, null, {
+        action: 'lot.changed',
+        entityType: 'lot',
+        entityId: activeLot.id,
+        payload: {
+          previousLotId: previousLot.id,
+          previousLotName: previousLot.name,
+          newLotId: activeLot.id,
+          newLotName: activeLot.name,
+          registrationNumber: eventSold + 1,
+          registrationId: registration.id,
+        },
+        createdAt: now,
+      }));
+    }
 
     return {
       statusCode: 201,

@@ -42,6 +42,8 @@ export type LotRecord = {
   status: 'active' | 'inactive' | 'sold_out' | 'scheduled' | 'closed';
   startsAt: string;
   endsAt: string;
+  orderIndex: number;
+  continuesAfterCapacity: boolean;
 };
 
 export type RegistrationRecord = {
@@ -343,6 +345,47 @@ const initialDatabase: Database = {
       status: 'active',
       startsAt: '2026-06-01T00:00:00-04:00',
       endsAt: '2026-07-31T23:59:59-04:00',
+      orderIndex: 1,
+      continuesAfterCapacity: false,
+    },
+    {
+      id: 'lot-2',
+      eventId: 'funpace-run-2026',
+      name: 'Lote 2',
+      priceCents: 9990,
+      capacity: 400,
+      soldCount: 0,
+      status: 'active',
+      startsAt: '2026-08-01T00:00:00-04:00',
+      endsAt: '2026-08-31T23:59:59-04:00',
+      orderIndex: 2,
+      continuesAfterCapacity: false,
+    },
+    {
+      id: 'lot-3',
+      eventId: 'funpace-run-2026',
+      name: 'Lote 3',
+      priceCents: 13990,
+      capacity: 100,
+      soldCount: 0,
+      status: 'active',
+      startsAt: '2026-09-01T00:00:00-04:00',
+      endsAt: '2026-09-10T23:59:59-04:00',
+      orderIndex: 3,
+      continuesAfterCapacity: false,
+    },
+    {
+      id: 'lot-4',
+      eventId: 'funpace-run-2026',
+      name: 'Lote 4',
+      priceCents: 16990,
+      capacity: 100,
+      soldCount: 0,
+      status: 'active',
+      startsAt: '2026-09-11T00:00:00-04:00',
+      endsAt: '2026-09-20T23:59:59-04:00',
+      orderIndex: 4,
+      continuesAfterCapacity: true,
     },
   ],
   registrations: [],
@@ -385,7 +428,11 @@ function normalizeDatabase(database: Partial<Database>): Database {
   return {
     events: database.events || [],
     distances: database.distances || [],
-    lots: database.lots || [],
+    lots: (database.lots || []).map((lot, index) => ({
+      ...lot,
+      orderIndex: lot.orderIndex || index + 1,
+      continuesAfterCapacity: Boolean(lot.continuesAfterCapacity),
+    })),
     registrations: database.registrations || [],
     payments: database.payments || [],
     paymentEvents: database.paymentEvents || [],
@@ -444,7 +491,9 @@ async function ensurePostgresDatabase(client: Queryable) {
       sold_count integer not null default 0,
       status text not null check (status in ('active', 'inactive', 'sold_out')),
       starts_at text not null,
-      ends_at text not null
+      ends_at text not null,
+      order_index integer not null default 0,
+      continues_after_capacity boolean not null default false
     );
 
     create table if not exists ${table.registrations} (
@@ -605,6 +654,68 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_error text`);
   await client.query(`alter table ${table.registrations} add column if not exists bib_number text`);
   await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
+  await client.query(`alter table ${table.lots} add column if not exists order_index integer not null default 0`);
+  await client.query(`alter table ${table.lots} add column if not exists continues_after_capacity boolean not null default false`);
+  await client.query(`create index if not exists "run-lots_event_order_idx" on ${table.lots}(event_id, order_index, starts_at)`);
+  await client.query(`
+    create or replace function public.run_select_lot_for_registration_number(
+      p_event_id text,
+      p_registration_number integer
+    )
+    returns table (
+      id text,
+      name text,
+      price_cents integer,
+      capacity integer,
+      sold_count integer,
+      status text,
+      starts_at text,
+      ends_at text,
+      order_index integer,
+      continues_after_capacity boolean
+    )
+    language plpgsql
+    security definer
+    set search_path = public
+    as $$
+    declare
+      v_accumulated_capacity integer := 0;
+      v_lot record;
+      v_continuous_lot_id text := null;
+    begin
+      for v_lot in
+        select lot.*
+        from "run-lots" lot
+        where lot.event_id = p_event_id
+          and lot.status in ('active', 'sold_out')
+        order by lot.order_index asc, lot.starts_at asc
+      loop
+        v_accumulated_capacity := v_accumulated_capacity + v_lot.capacity;
+
+        if v_lot.continues_after_capacity then
+          v_continuous_lot_id := v_lot.id;
+        end if;
+
+        if p_registration_number <= v_accumulated_capacity then
+          return query
+          select lot.id, lot.name, lot.price_cents, lot.capacity, lot.sold_count, lot.status,
+                 lot.starts_at, lot.ends_at, lot.order_index, lot.continues_after_capacity
+          from "run-lots" lot
+          where lot.id = v_lot.id;
+          return;
+        end if;
+      end loop;
+
+      if v_continuous_lot_id is not null then
+        return query
+        select lot.id, lot.name, lot.price_cents, lot.capacity, lot.sold_count, lot.status,
+               lot.starts_at, lot.ends_at, lot.order_index, lot.continues_after_capacity
+        from "run-lots" lot
+        where lot.id = v_continuous_lot_id;
+      end if;
+    end;
+    $$;
+  `);
   await client.query(`alter table ${table.payments} add column if not exists expires_at text`);
   await client.query(`alter table ${table.payments} add column if not exists paid_at text`);
   await client.query(`alter table ${table.payments} add column if not exists gateway_status text`);
@@ -620,6 +731,8 @@ async function ensurePostgresDatabase(client: Queryable) {
   if (existingEvents.rows[0]?.count === 0) {
     await savePostgresDatabase(client, initialDatabase);
   }
+
+  await ensureConfiguredLots(client);
 }
 
 async function ensurePostgresReady() {
@@ -694,7 +807,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   // deprecated and can leave request completion detached from query completion.
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
   const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
-  const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at from ${table.lots}`) : emptyRows;
+  const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`) : emptyRows;
   const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
@@ -736,6 +849,8 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       status: row.status,
       startsAt: row.starts_at,
       endsAt: row.ends_at,
+      orderIndex: Number(row.order_index || 0),
+      continuesAfterCapacity: Boolean(row.continues_after_capacity),
     })),
     registrations: registrations.rows.map((row) => ({
       id: row.id,
@@ -881,8 +996,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.lots) {
     await client.query(
-      `insert into ${table.lots} (id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `insert into ${table.lots} (id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        on conflict (id) do update set
          event_id = excluded.event_id,
          name = excluded.name,
@@ -891,8 +1006,22 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          sold_count = excluded.sold_count,
          status = excluded.status,
          starts_at = excluded.starts_at,
-         ends_at = excluded.ends_at`,
-      [item.id, item.eventId, item.name, item.priceCents, item.capacity, item.soldCount, item.status, item.startsAt, item.endsAt],
+         ends_at = excluded.ends_at,
+         order_index = excluded.order_index,
+         continues_after_capacity = excluded.continues_after_capacity`,
+      [
+        item.id,
+        item.eventId,
+        item.name,
+        item.priceCents,
+        item.capacity,
+        item.soldCount,
+        item.status,
+        item.startsAt,
+        item.endsAt,
+        item.orderIndex,
+        item.continuesAfterCapacity,
+      ],
     );
   }
 
@@ -1137,6 +1266,70 @@ export function usesPostgresDatabase() {
   return shouldUsePostgres();
 }
 
+type LotSelectionCandidate = Pick<LotRecord, 'id' | 'capacity' | 'orderIndex' | 'continuesAfterCapacity'>;
+
+export function selectLotForRegistrationNumber<Lot extends LotSelectionCandidate>(
+  lots: Lot[],
+  registrationNumber: number,
+): Lot | null {
+  const orderedLots = lots
+    .slice()
+    .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0));
+  let accumulatedCapacity = 0;
+
+  for (const lot of orderedLots) {
+    accumulatedCapacity += Number(lot.capacity);
+
+    if (registrationNumber <= accumulatedCapacity) {
+      return lot;
+    }
+  }
+
+  for (let index = orderedLots.length - 1; index >= 0; index -= 1) {
+    if (orderedLots[index].continuesAfterCapacity) {
+      return orderedLots[index];
+    }
+  }
+
+  return null;
+}
+
+async function ensureConfiguredLots(client: Queryable) {
+  for (const lot of initialDatabase.lots) {
+    await client.query(
+      `insert into ${table.lots} (id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity)
+       values ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10)
+       on conflict (id) do update set
+         event_id = excluded.event_id,
+         name = excluded.name,
+         price_cents = excluded.price_cents,
+         capacity = excluded.capacity,
+         status = case
+           when ${table.lots}.status = 'inactive' then ${table.lots}.status
+           when excluded.continues_after_capacity then 'active'
+           when ${table.lots}.sold_count >= excluded.capacity then 'sold_out'
+           else excluded.status
+         end,
+         starts_at = excluded.starts_at,
+         ends_at = excluded.ends_at,
+         order_index = excluded.order_index,
+         continues_after_capacity = excluded.continues_after_capacity`,
+      [
+        lot.id,
+        lot.eventId,
+        lot.name,
+        lot.priceCents,
+        lot.capacity,
+        lot.status,
+        lot.startsAt,
+        lot.endsAt,
+        lot.orderIndex,
+        lot.continuesAfterCapacity,
+      ],
+    );
+  }
+}
+
 export async function createPendingRegistrationInPostgres(input: PendingRegistrationInput): Promise<PendingRegistrationResult> {
   const configurationIssue = getDatabaseConfigurationIssue();
 
@@ -1150,6 +1343,9 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     await ensurePostgresReady();
 
     await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '15s'");
 
     const eventResult = await client.query(
       `select id from ${table.events} where slug = $1 and status = $2 limit 1`,
@@ -1215,13 +1411,16 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       [event.id, input.payload.distance, 'active'],
     );
     const lotResult = await client.query(
-      `select id, name, price_cents, capacity, sold_count from ${table.lots} where event_id = $1 and status = $2 order by starts_at asc limit 1 for update`,
-      [event.id, 'active'],
+      `select id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity
+       from ${table.lots}
+       where event_id = $1 and status in ('active', 'sold_out')
+       order by order_index asc, starts_at asc
+       for update`,
+      [event.id],
     );
     const distance = distanceResult.rows[0];
-    const lot = lotResult.rows[0];
 
-    if (!distance || !lot) {
+    if (!distance || lotResult.rows.length === 0) {
       await client.query('rollback');
       return {
         statusCode: 409,
@@ -1241,8 +1440,47 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     );
     const distanceSold = Number(distanceSoldResult.rows[0]?.count || 0);
 
-    if (distanceSold >= Number(distance.capacity) || Number(lot.sold_count) >= Number(lot.capacity)) {
-      await client.query(`update ${table.lots} set status = $1 where id = $2`, ['sold_out', lot.id]);
+    const eventSoldResult = await client.query(
+      `select count(*)::int as count from ${table.registrations} where event_id = $1 and status = any($2)`,
+      [event.id, ['pending_payment', 'paid']],
+    );
+    const eventSold = Number(eventSoldResult.rows[0]?.count || 0);
+    const configuredLots = lotResult.rows.map((row) => ({
+      id: String(row.id),
+      eventId: String(event.id),
+      name: String(row.name),
+      priceCents: Number(row.price_cents),
+      capacity: Number(row.capacity),
+      soldCount: Number(row.sold_count),
+      status: row.status as LotRecord['status'],
+      startsAt: String(row.starts_at),
+      endsAt: String(row.ends_at),
+      orderIndex: Number(row.order_index || 0),
+      continuesAfterCapacity: Boolean(row.continues_after_capacity),
+    }));
+    const previousLot = eventSold > 0 ? selectLotForRegistrationNumber(configuredLots, eventSold) : null;
+    const selectedLotResult = await client.query(
+      `select id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity
+       from public.run_select_lot_for_registration_number($1, $2)
+       limit 1`,
+      [event.id, eventSold + 1],
+    );
+    const selectedLot = selectedLotResult.rows[0];
+    const lot = selectedLot ? {
+      id: String(selectedLot.id),
+      eventId: String(event.id),
+      name: String(selectedLot.name),
+      priceCents: Number(selectedLot.price_cents),
+      capacity: Number(selectedLot.capacity),
+      soldCount: Number(selectedLot.sold_count),
+      status: selectedLot.status as LotRecord['status'],
+      startsAt: String(selectedLot.starts_at),
+      endsAt: String(selectedLot.ends_at),
+      orderIndex: Number(selectedLot.order_index || 0),
+      continuesAfterCapacity: Boolean(selectedLot.continues_after_capacity),
+    } : null;
+
+    if (distanceSold >= Number(distance.capacity) || !lot) {
       await client.query('commit');
 
       return {
@@ -1253,14 +1491,16 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         registrationStatus: 'cancelled',
         checkoutStatus: 'not_configured',
         checkoutUrl: null,
-        message: 'Vagas esgotadas para este lote ou distancia.',
+        message: distanceSold >= Number(distance.capacity)
+          ? 'Vagas esgotadas para esta distancia.'
+          : 'Nao ha lote configurado para novas inscricoes.',
       };
     }
 
     const now = new Date().toISOString();
     const registrationId = randomUUID();
     const paymentId = randomUUID();
-    const amountCents = Number(lot.price_cents);
+    const amountCents = Number(lot.priceCents);
 
     await client.query(
       `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error)
@@ -1275,10 +1515,28 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     await client.query(
       `update ${table.lots}
        set sold_count = sold_count + 1,
-           status = case when sold_count + 1 >= capacity then 'sold_out' else status end
+           status = case
+             when continues_after_capacity then 'active'
+             when sold_count + 1 >= capacity then 'sold_out'
+             else 'active'
+           end
        where id = $1`,
       [lot.id],
     );
+    if (previousLot && previousLot.id !== lot.id) {
+      await client.query(
+        `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+         values ($1, 'system', 'lot.changed', 'lot', $2, $3, $4)`,
+        [randomUUID(), lot.id, {
+          previousLotId: previousLot.id,
+          previousLotName: previousLot.name,
+          newLotId: lot.id,
+          newLotName: lot.name,
+          registrationNumber: eventSold + 1,
+          registrationId,
+        }, now],
+      );
+    }
     await client.query('commit');
 
     return {
@@ -1425,7 +1683,11 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
     if (wasClosed) {
       await client.query(
         `update ${table.lots} set sold_count = sold_count + 1,
-           status = case when sold_count + 1 >= capacity then 'sold_out' else status end where id = $1`,
+           status = case
+             when continues_after_capacity then 'active'
+             when sold_count + 1 >= capacity then 'sold_out'
+             else 'active'
+           end where id = $1`,
         [row.lot_id],
       );
     }
@@ -1483,7 +1745,11 @@ export async function markPaymentCreationFailedInPostgres(registrationId: string
       await client.query(
         `update ${table.lots}
          set sold_count = greatest(sold_count - 1, 0),
-             status = case when status = 'sold_out' then 'active' else status end
+             status = case
+               when continues_after_capacity then 'active'
+               when status = 'sold_out' and greatest(sold_count - 1, 0) < capacity then 'active'
+               else status
+             end
          where id = $1`,
         [lotId],
       );
@@ -1658,7 +1924,11 @@ export async function cancelRegistrationInPostgres(input: {
       await client.query(
         `update ${table.lots}
          set sold_count = greatest(sold_count - 1, 0),
-             status = case when status = 'sold_out' then 'active' else status end
+             status = case
+               when continues_after_capacity then 'active'
+               when status = 'sold_out' and greatest(sold_count - 1, 0) < capacity then 'active'
+               else status
+             end
          where id = $1`,
         [registration.lot_id],
       );
@@ -1714,7 +1984,7 @@ export async function claimRegistrationEmailInPostgres(
               distance.name as distance_name,
               lot.name as lot_name, lot.price_cents as lot_price_cents,
               lot.capacity as lot_capacity, lot.sold_count as lot_sold_count,
-              lot.status as lot_status, lot.starts_at, lot.ends_at,
+              lot.status as lot_status, lot.starts_at, lot.ends_at, lot.order_index, lot.continues_after_capacity,
               payment.gateway_payload, payment.gateway_status
        from ${table.registrations} registration
        join ${table.events} event on event.id = registration.event_id
@@ -1804,6 +2074,8 @@ export async function claimRegistrationEmailInPostgres(
         status: row.lot_status,
         startsAt: row.starts_at,
         endsAt: row.ends_at,
+        orderIndex: Number(row.order_index || 0),
+        continuesAfterCapacity: Boolean(row.continues_after_capacity),
       } : null,
       paymentMethod: findPaymentMethod(row.gateway_payload) || row.gateway_status || null,
       deliveryKey,

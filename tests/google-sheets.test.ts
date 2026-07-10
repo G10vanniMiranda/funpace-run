@@ -80,7 +80,7 @@ const payment: PaymentRecord = {
 const database: Database = {
   events: [],
   distances: [{ id: 'distance-5k', eventId: 'event-1', name: '5K', distanceKm: 5, capacity: 100, status: 'active' }],
-  lots: [{ id: 'lot-1', eventId: 'event-1', name: 'Lote 1', priceCents: 7990, capacity: 100, soldCount: 1, status: 'active', startsAt: '', endsAt: '' }],
+  lots: [{ id: 'lot-1', eventId: 'event-1', name: 'Lote 1', priceCents: 7990, capacity: 100, soldCount: 1, status: 'active', startsAt: '', endsAt: '', orderIndex: 1, continuesAfterCapacity: false }],
   registrations: [registration],
   payments: [payment],
   paymentEvents: [],

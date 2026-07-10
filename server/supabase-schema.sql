@@ -28,7 +28,9 @@ create table if not exists "run-lots" (
   sold_count integer not null default 0,
   status text not null check (status in ('active', 'inactive', 'sold_out')),
   starts_at text not null,
-  ends_at text not null
+  ends_at text not null,
+  order_index integer not null default 0,
+  continues_after_capacity boolean not null default false
 );
 
 create table if not exists "run-registrations" (
@@ -188,6 +190,68 @@ alter table "run-registrations" add column if not exists confirmation_email_id t
 alter table "run-registrations" add column if not exists confirmation_email_error text;
 alter table "run-registrations" add column if not exists bib_number text;
 create unique index if not exists "run-registrations_event_bib_idx" on "run-registrations"(event_id, bib_number) where bib_number is not null;
+alter table "run-lots" add column if not exists order_index integer not null default 0;
+alter table "run-lots" add column if not exists continues_after_capacity boolean not null default false;
+create index if not exists "run-lots_event_order_idx" on "run-lots"(event_id, order_index, starts_at);
+
+create or replace function public.run_select_lot_for_registration_number(
+  p_event_id text,
+  p_registration_number integer
+)
+returns table (
+  id text,
+  name text,
+  price_cents integer,
+  capacity integer,
+  sold_count integer,
+  status text,
+  starts_at text,
+  ends_at text,
+  order_index integer,
+  continues_after_capacity boolean
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_accumulated_capacity integer := 0;
+  v_lot record;
+  v_continuous_lot_id text := null;
+begin
+  for v_lot in
+    select lot.*
+    from "run-lots" lot
+    where lot.event_id = p_event_id
+      and lot.status in ('active', 'sold_out')
+    order by lot.order_index asc, lot.starts_at asc
+  loop
+    v_accumulated_capacity := v_accumulated_capacity + v_lot.capacity;
+
+    if v_lot.continues_after_capacity then
+      v_continuous_lot_id := v_lot.id;
+    end if;
+
+    if p_registration_number <= v_accumulated_capacity then
+      return query
+      select lot.id, lot.name, lot.price_cents, lot.capacity, lot.sold_count, lot.status,
+             lot.starts_at, lot.ends_at, lot.order_index, lot.continues_after_capacity
+      from "run-lots" lot
+      where lot.id = v_lot.id;
+      return;
+    end if;
+  end loop;
+
+  if v_continuous_lot_id is not null then
+    return query
+    select lot.id, lot.name, lot.price_cents, lot.capacity, lot.sold_count, lot.status,
+           lot.starts_at, lot.ends_at, lot.order_index, lot.continues_after_capacity
+    from "run-lots" lot
+    where lot.id = v_continuous_lot_id;
+  end if;
+end;
+$$;
+
 alter table "run-payments" add column if not exists expires_at text;
 alter table "run-payments" add column if not exists paid_at text;
 alter table "run-payments" add column if not exists gateway_status text;
@@ -227,25 +291,27 @@ values
   ('distance-5k', 'funpace-run-2026', '5K', 5, 500, 'active')
 on conflict (id) do nothing;
 
-insert into "run-lots" (id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at)
-values (
-  'lot-1',
-  'funpace-run-2026',
-  'Lote 1',
-  7990,
-  100,
-  0,
-  'active',
-  '2026-06-01T00:00:00-04:00',
-  '2026-07-31T23:59:59-04:00'
-)
-on conflict (id) do nothing;
-
-update "run-lots"
-set
-  price_cents = 7990,
-  capacity = 100
-where id = 'lot-1';
+insert into "run-lots" (id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity)
+values
+  ('lot-1', 'funpace-run-2026', 'Lote 1', 7990, 100, 0, 'active', '2026-06-01T00:00:00-04:00', '2026-07-31T23:59:59-04:00', 1, false),
+  ('lot-2', 'funpace-run-2026', 'Lote 2', 9990, 400, 0, 'active', '2026-08-01T00:00:00-04:00', '2026-08-31T23:59:59-04:00', 2, false),
+  ('lot-3', 'funpace-run-2026', 'Lote 3', 13990, 100, 0, 'active', '2026-09-01T00:00:00-04:00', '2026-09-10T23:59:59-04:00', 3, false),
+  ('lot-4', 'funpace-run-2026', 'Lote 4', 16990, 100, 0, 'active', '2026-09-11T00:00:00-04:00', '2026-09-20T23:59:59-04:00', 4, true)
+on conflict (id) do update set
+  event_id = excluded.event_id,
+  name = excluded.name,
+  price_cents = excluded.price_cents,
+  capacity = excluded.capacity,
+  status = case
+    when "run-lots".status = 'inactive' then "run-lots".status
+    when excluded.continues_after_capacity then 'active'
+    when "run-lots".sold_count >= excluded.capacity then 'sold_out'
+    else excluded.status
+  end,
+  starts_at = excluded.starts_at,
+  ends_at = excluded.ends_at,
+  order_index = excluded.order_index,
+  continues_after_capacity = excluded.continues_after_capacity;
 
 update "run-registrations"
 set
