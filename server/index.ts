@@ -59,6 +59,7 @@ const apiPublicUrl = (process.env.API_PUBLIC_URL || appUrl).replace(/\/$/, '');
 const paymentProvider = process.env.PAYMENT_PROVIDER || '';
 const infinitePayHandle = process.env.INFINITEPAY_HANDLE || process.env.INFINITIPAY_HANDLE || '';
 const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
+const cronSecret = process.env.CRON_SECRET || '';
 const partnershipWebhookUrl = process.env.PARTNERSHIP_WEBHOOK_URL || '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
 const adminBootstrapEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
@@ -679,6 +680,13 @@ function verifyWebhookSignature(rawBody: string, signature: string | undefined) 
   return expectedBuffer.length === signatureBuffer.length && timingSafeEqual(expectedBuffer, signatureBuffer);
 }
 
+function safeSecretEqual(received: string, expected: string) {
+  if (!received || !expected) return false;
+  const receivedBuffer = Buffer.from(received);
+  const expectedBuffer = Buffer.from(expected);
+  return receivedBuffer.length === expectedBuffer.length && timingSafeEqual(receivedBuffer, expectedBuffer);
+}
+
 function getWebhookUrl() {
   const url = new URL('/api/webhooks/payment', apiPublicUrl);
 
@@ -987,6 +995,16 @@ export function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWeb
     receiptUrl: toStringValue(findFirstValue(rawEvent, ['receipt_url', 'receiptUrl'])),
     nextStatus,
   };
+}
+
+export function validateInfinitePayApproval(event: NormalizedPaymentWebhook | null) {
+  if (!event) return 'invalid_payload';
+  if (!event.registrationId) return 'missing_order_nsu';
+  if (!event.providerTransactionId) return 'missing_transaction_nsu';
+  if (!event.providerPaymentId) return 'missing_invoice_slug';
+  if (event.amountCents === null || event.amountCents <= 0) return 'invalid_amount';
+  if (event.nextStatus !== 'paid') return 'not_paid';
+  return null;
 }
 
 type PendingCheckout = CreateRegistrationResponse & {
@@ -1673,17 +1691,25 @@ async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse
 }
 
 async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
+  const processingStartedAt = Date.now();
   if (!requireJson(req, res)) {
     return;
   }
 
   const rawBody = await readBody(req);
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
-  const signature = Array.isArray(req.headers['x-webhook-signature'])
-    ? req.headers['x-webhook-signature'][0]
-    : req.headers['x-webhook-signature'];
+  const receivedToken = url.searchParams.get('token') || '';
 
-  if (webhookSecret && url.searchParams.get('token') !== webhookSecret && !verifyWebhookSignature(rawBody, signature)) {
+  // InfinitePay does not document a webhook signature. The secret URL blocks
+  // unsolicited traffic; financial authenticity is established below through
+  // the provider's server-to-server payment_check endpoint.
+  if (!webhookSecret) {
+    console.error(JSON.stringify({ at: new Date().toISOString(), message: 'payment_webhook_secret_missing' }));
+    json(res, 503, { success: false, message: 'Webhook indisponivel.' });
+    return;
+  }
+
+  if (!safeSecretEqual(receivedToken, webhookSecret)) {
     json(res, 401, { message: 'Webhook nao autorizado.' });
     return;
   }
@@ -1696,7 +1722,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     message: 'payment_webhook_received',
     provider: 'infinitepay',
     path: url.pathname,
-    authorizedBy: url.searchParams.get('token') === webhookSecret ? 'token' : signature ? 'signature' : 'none',
+    authorizedBy: 'secret_url',
     normalized: normalizedEvent,
   }));
 
@@ -1706,28 +1732,73 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   }
 
   if (usesPostgresDatabase() && normalizedEvent.nextStatus === 'paid') {
+    if (validateInfinitePayApproval(normalizedEvent)) {
+      json(res, 400, { success: false, message: 'Identificadores do pagamento incompletos.' });
+      return;
+    }
+
+    const verificationStartedAt = Date.now();
+    const gatewayCheck = await checkInfinitePayPayment({
+      handle: infinitePayHandle,
+      orderNsu: normalizedEvent.registrationId,
+      transactionNsu: normalizedEvent.providerTransactionId,
+      slug: normalizedEvent.providerPaymentId,
+    });
+    const verificationElapsedMs = Date.now() - verificationStartedAt;
+
+    if (!gatewayCheck.paid) {
+      console.error(JSON.stringify({
+        at: new Date().toISOString(), message: 'payment_webhook_not_verified',
+        registrationId: normalizedEvent.registrationId,
+        transactionId: normalizedEvent.providerTransactionId,
+        verificationElapsedMs,
+      }));
+      json(res, 400, { success: false, message: 'Pagamento nao confirmado pela InfinitePay.' });
+      return;
+    }
+
+    if (gatewayCheck.amountCents !== null && normalizedEvent.amountCents !== null
+      && gatewayCheck.amountCents !== normalizedEvent.amountCents) {
+      json(res, 400, { success: false, message: 'Valor do webhook diverge da InfinitePay.' });
+      return;
+    }
+
     const result = await confirmPaymentInPostgres({
       registrationId: normalizedEvent.registrationId,
       providerEventId: normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId,
       providerPaymentId: normalizedEvent.providerPaymentId,
       providerTransactionId: normalizedEvent.providerTransactionId,
       eventType: normalizedEvent.eventType,
-      gatewayStatus: normalizedEvent.gatewayStatus || 'paid',
-      amountCents: normalizedEvent.amountCents,
-      payload: event,
+      gatewayStatus: 'verified_paid',
+      amountCents: gatewayCheck.amountCents ?? normalizedEvent.amountCents,
+      payload: { webhook: event, verification: gatewayCheck.raw },
       auditAction: 'payment.webhook_processed',
+      auditMetadata: {
+        paymentMethod: normalizedEvent.paymentMethod || null,
+        webhookReceivedAt: new Date(processingStartedAt).toISOString(),
+        verificationElapsedMs,
+      },
     });
     if (result.error === 'not_found') { json(res, 400, { success: false, message: 'Pedido nao encontrado.' }); return; }
     if (result.error === 'amount_mismatch') { json(res, 400, { success: false, message: 'Valor do pagamento divergente.' }); return; }
     if (result.error === 'stale_checkout') { json(res, 409, { success: false, message: 'Checkout expirado por mudanca de lote.' }); return; }
+    const processingElapsedMs = Date.now() - processingStartedAt;
+    json(res, 200, { success: true, message: null, duplicated: result.duplicated || undefined });
+    console.log(JSON.stringify({
+      at: new Date().toISOString(), message: 'payment_webhook_completed',
+      registrationId: result.registrationId, transactionId: normalizedEvent.providerTransactionId,
+      duplicated: Boolean(result.duplicated), verificationElapsedMs, processingElapsedMs,
+    }));
+
+    // The financial transaction is already committed and the provider has its
+    // response. Post-processing remains idempotent and can be recovered by cron.
     const googleSheetSyncs = result.registrationId && result.paymentId
       ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
       : [];
-    if (result.registrationId) {
-      await processPaymentConfirmationEmail(req, result.registrationId);
-    }
-    json(res, 200, { success: true, message: null, duplicated: result.duplicated || undefined });
-    await processQueuedGoogleSheetSyncs(googleSheetSyncs);
+    await Promise.allSettled([
+      result.registrationId ? processPaymentConfirmationEmail(req, result.registrationId) : Promise.resolve(),
+      processQueuedGoogleSheetSyncs(googleSheetSyncs),
+    ]);
     return;
   }
 
@@ -2377,6 +2448,91 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
   }
 
   json(res, result.statusCode, result.payload);
+}
+
+function isAuthorizedCron(req: IncomingMessage) {
+  const authorization = Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : req.headers.authorization;
+  return Boolean(cronSecret && authorization && safeSecretEqual(authorization, `Bearer ${cronSecret}`));
+}
+
+async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) {
+  if (!isAuthorizedCron(req)) {
+    json(res, cronSecret ? 401 : 503, { message: cronSecret ? 'Nao autorizado.' : 'CRON_SECRET nao configurado.' });
+    return;
+  }
+
+  const startedAt = Date.now();
+  const database = await transaction((current) => current, { persist: false, scope: 'checkout' });
+  const recoverable = database.payments.filter((payment) => {
+    const registration = database.registrations.find((item) => item.id === payment.registrationId);
+    return registration
+      && registration.status !== 'paid'
+      && Boolean(payment.gatewayTransactionId)
+      && Boolean(payment.providerPaymentId)
+      && payment.provider === 'infinitepay';
+  }).slice(0, 5);
+
+  const summary = { checked: 0, confirmed: 0, alreadyPending: 0, errors: 0, emailsRecovered: 0 };
+
+  for (const payment of recoverable) {
+    const registration = database.registrations.find((item) => item.id === payment.registrationId)!;
+    summary.checked += 1;
+    try {
+      const check = await checkInfinitePayPayment({
+        handle: infinitePayHandle,
+        orderNsu: registration.id,
+        transactionNsu: payment.gatewayTransactionId!,
+        slug: payment.providerPaymentId!,
+      });
+      if (!check.paid) { summary.alreadyPending += 1; continue; }
+      const confirmed = await confirmPaymentInPostgres({
+        registrationId: registration.id,
+        providerEventId: payment.gatewayTransactionId!,
+        providerPaymentId: payment.providerPaymentId!,
+        providerTransactionId: payment.gatewayTransactionId!,
+        eventType: 'infinitepay.automatic_recovery',
+        gatewayStatus: 'verified_paid',
+        amountCents: check.amountCents,
+        payload: { verification: check.raw, recovery: true },
+        auditAction: 'payment.automatically_recovered',
+        auditMetadata: { recoveryStartedAt: new Date(startedAt).toISOString() },
+      });
+      if (confirmed.error) { summary.errors += 1; continue; }
+      summary.confirmed += confirmed.duplicated ? 0 : 1;
+      if (confirmed.paymentId) {
+        const tasks = await queueConfirmedPaymentGoogleSheetSync(registration.id, confirmed.paymentId);
+        await processQueuedGoogleSheetSyncs(tasks);
+      }
+    } catch (error) {
+      summary.errors += 1;
+      console.error(JSON.stringify({
+        at: new Date().toISOString(), message: 'payment_automatic_recovery_failed',
+        registrationId: registration.id, transactionId: payment.gatewayTransactionId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      }));
+    }
+  }
+
+  const refreshed = await transaction((current) => current, { persist: false, scope: 'checkout' });
+  const missingEmails = refreshed.registrations
+    .filter((registration) => registration.status === 'paid' && !registration.confirmationEmailSentAt)
+    .slice(0, 10);
+  for (const registration of missingEmails) {
+    try {
+      const result = await processPaymentConfirmationEmail(req, registration.id);
+      if (result?.ok) summary.emailsRecovered += 1;
+    } catch (error) {
+      summary.errors += 1;
+      console.error(JSON.stringify({
+        at: new Date().toISOString(), message: 'email_automatic_recovery_failed', registrationId: registration.id,
+        error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined,
+      }));
+    }
+  }
+
+  console.log(JSON.stringify({ at: new Date().toISOString(), message: 'payment_recovery_completed', ...summary, elapsedMs: Date.now() - startedAt }));
+  json(res, 200, { success: true, ...summary, elapsedMs: Date.now() - startedAt });
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -3378,6 +3534,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     if (req.method === 'POST' && url.pathname === '/api/payments/confirm') {
       await handlePaymentConfirmation(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/cron/payments') {
+      await handlePaymentRecovery(req, res);
       return;
     }
 

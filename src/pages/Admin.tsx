@@ -220,6 +220,19 @@ export function AdminPage() {
   }, []);
 
   useEffect(() => {
+    if (!adminKey) return;
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void loadAdminData(adminKey);
+    };
+    const interval = window.setInterval(refresh, 15_000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [adminKey, activeNav, filters]);
+
+  useEffect(() => {
     if (!adminRole) {
       return;
     }

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 
+throw new Error('Desativado na Fase 1: pagamentos so podem ser confirmados por webhook ou payment_check verificado.');
+
 function loadEnvFile(path) {
   if (!existsSync(path)) {
     return;

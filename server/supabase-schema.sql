@@ -168,6 +168,9 @@ create table if not exists "run-partnership-leads" (
 create index if not exists "run-registrations_cpf_hash_idx" on "run-registrations"(cpf_hash);
 create index if not exists "run-registrations_status_idx" on "run-registrations"(status);
 create index if not exists "run-payments_registration_id_idx" on "run-payments"(registration_id);
+create unique index if not exists "run-payments_gateway_transaction_idx"
+  on "run-payments"(gateway_transaction_id)
+  where gateway_transaction_id is not null and gateway_transaction_id not like 'manual_reconcile_%';
 create index if not exists "run-google-sheet-sync_status_idx" on "run-google-sheet-sync"(status);
 create index if not exists "run-google-sheet-sync_entity_idx" on "run-google-sheet-sync"(entity_type, entity_id);
 create index if not exists "run-google-sheet-sync_updated_at_idx" on "run-google-sheet-sync"(updated_at);

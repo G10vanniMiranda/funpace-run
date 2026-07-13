@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizePaymentWebhook, resolvePaymentTransition, toPaymentProviderStatus } from '../server/index.js';
+import { normalizePaymentWebhook, resolvePaymentTransition, toPaymentProviderStatus, validateInfinitePayApproval } from '../server/index.js';
 
 test('treats received status as paid', () => {
   assert.equal(toPaymentProviderStatus({ status: 'received' }), 'paid');
@@ -62,4 +62,20 @@ test('never downgrades a paid registration from delayed gateway events', () => {
 
 test('accepts delayed approval after local expiration', () => {
   assert.equal(resolvePaymentTransition('expired', 'paid'), 'paid');
+});
+
+test('maps expired and declined payments without confirming them', () => {
+  assert.equal(toPaymentProviderStatus({ status: 'expired' }), 'expired');
+  assert.equal(toPaymentProviderStatus({ status: 'declined' }), 'payment_failed');
+});
+
+test('requires every identifier needed for server-to-server verification', () => {
+  const incomplete = normalizePaymentWebhook({ order_nsu: 'reg-1', amount: 7990, paid_amount: 7990 });
+  assert.equal(validateInfinitePayApproval(incomplete), 'missing_transaction_nsu');
+
+  const complete = normalizePaymentWebhook({
+    order_nsu: 'reg-1', transaction_nsu: 'txn-1', invoice_slug: 'slug-1',
+    amount: 7990, paid_amount: 7990, capture_method: 'pix',
+  });
+  assert.equal(validateInfinitePayApproval(complete), null);
 });

@@ -239,6 +239,7 @@ export type PaymentConfirmationInput = {
   payload: unknown;
   auditAction: string;
   actor?: string;
+  auditMetadata?: Record<string, unknown>;
 };
 
 export type PaymentConfirmationResult = {
@@ -1677,6 +1678,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
     const result = await client.query(
       `select registration.id, registration.status, registration.amount_cents, registration.lot_id,
               payment.id as payment_id, payment.status as payment_status,
+              payment.gateway_transaction_id as existing_gateway_transaction_id,
               lot.status as lot_status, lot.price_cents as lot_price_cents
        from ${table.registrations} registration
        join ${table.payments} payment on payment.registration_id = registration.id
@@ -1695,21 +1697,6 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
       return { statusCode: 404, error: 'not_found' };
     }
 
-    if (
-      row.status !== 'paid'
-      && (row.lot_status !== 'active' || Number(row.amount_cents) !== Number(row.lot_price_cents))
-    ) {
-      await client.query(
-        `update ${table.payments}
-         set gateway_status = 'stale_checkout', gateway_transaction_id = coalesce(nullif($1, ''), gateway_transaction_id),
-             gateway_payload = $2, updated_at = $3
-         where id = $4`,
-        [input.providerTransactionId, input.payload, now, row.payment_id],
-      );
-      await client.query('commit');
-      return { statusCode: 409, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, error: 'stale_checkout' };
-    }
-
     if (input.amountCents !== null && Number(row.amount_cents) !== input.amountCents) {
       await client.query(
         `update ${table.payments}
@@ -1722,9 +1709,18 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
       return { statusCode: 409, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, error: 'amount_mismatch' };
     }
 
-    const duplicate = input.providerEventId
+    const duplicateEvent = input.providerEventId
       ? await client.query(`select 1 from ${table.paymentEvents} where provider_event_id = $1 limit 1`, [input.providerEventId])
       : { rowCount: 0 };
+    const duplicate = Boolean(
+      duplicateEvent.rowCount
+      || (input.providerTransactionId && row.existing_gateway_transaction_id === input.providerTransactionId),
+    );
+
+    if (duplicate && row.status === 'paid' && row.payment_status === 'paid') {
+      await client.query('commit');
+      return { statusCode: 200, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, duplicated: true };
+    }
     const wasClosed = ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(row.status);
 
     const bibResult = await client.query(
@@ -1764,7 +1760,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
         [row.lot_id],
       );
     }
-    if (!duplicate.rowCount) {
+    if (!duplicate) {
       await client.query(
         `insert into ${table.paymentEvents} (id, payment_id, provider_event_id, event_type, payload, received_at)
          values ($1, $2, $3, $4, $5, $6) on conflict (provider_event_id) do nothing`,
@@ -1780,10 +1776,11 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
         providerEventId: input.providerEventId || null,
         providerPaymentId: input.providerPaymentId || null,
         providerTransactionId: input.providerTransactionId || null,
+        ...(input.auditMetadata || {}),
       }, now],
     );
     await client.query('commit');
-    return { statusCode: 200, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, duplicated: Boolean(duplicate.rowCount) };
+    return { statusCode: 200, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, duplicated: duplicate };
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;

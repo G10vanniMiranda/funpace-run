@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 
+throw new Error('Desativado na Fase 1: inscricoes pagas nao podem ser criadas sem transacao verificada no gateway.');
+
 function loadEnvFile(path) {
   if (!existsSync(path)) {
     return;

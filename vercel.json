@@ -1,4 +1,10 @@
 {
+  "crons": [
+    {
+      "path": "/api/cron/payments",
+      "schedule": "17 7 * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/((?!api/.*).*)",
