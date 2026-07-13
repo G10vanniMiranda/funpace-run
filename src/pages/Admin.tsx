@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import QrScanner from 'qr-scanner';
 import {
   Activity,
+  Bell,
   ArrowDownRight,
   ArrowUpRight,
   BadgeCheck,
@@ -18,6 +19,7 @@ import {
   Loader2,
   Lock,
   Mail,
+  MapPin,
   Medal,
   Menu,
   RefreshCcw,
@@ -25,6 +27,7 @@ import {
   ScanLine,
   Settings,
   ShieldCheck,
+  HeartPulse,
   Shirt,
   Ticket,
   TimerReset,
@@ -44,6 +47,7 @@ import {
   getAdminAuditLogs,
   getAdminAuditLogsCsvUrl,
   getAdminCsvUrl,
+  getAdminReportExportUrl,
   getAdminRegistrations,
   getAdminGoogleSheetsStatus,
   retryAdminGoogleSheets,
@@ -58,6 +62,10 @@ import {
   updateAdminDistance,
   updateAdminLot,
   getAdminSummary,
+  getAdminExecutiveDashboard,
+  getAdminAlerts,
+  updateAdminAlert,
+  getAdminMonitoring,
   getAdminReconciliation,
   runAdminReconciliation,
   getAdminSession,
@@ -70,7 +78,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAuditLog, AdminEventConfig, AdminGoogleSheetsStatus, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 
 type AdminFilters = {
   status: string;
@@ -88,7 +96,7 @@ type AdminFilters = {
   sheetStatus: string;
 };
 
-type AdminNavKey = 'registrations' | 'payments' | 'reconciliation' | 'operation' | 'reports' | 'audit' | 'event';
+type AdminNavKey = 'executive' | 'registrations' | 'payments' | 'reconciliation' | 'alerts' | 'monitoring' | 'operation' | 'reports' | 'audit' | 'event';
 type AdminRole = AdminSession['role'];
 
 const currencyFormatter = new Intl.NumberFormat('pt-BR', {
@@ -117,9 +125,12 @@ const statusOptions = [
 ];
 
 const navItems: Array<{ key: AdminNavKey; label: string; icon: LucideIcon; status?: 'soon' }> = [
+  { key: 'executive', label: 'Dashboard Executivo', icon: BarChart3 },
   { key: 'registrations', label: 'Inscrições', icon: Ticket },
   { key: 'payments', label: 'Pagamentos', icon: CreditCard },
   { key: 'reconciliation', label: 'Reconciliação', icon: ShieldCheck },
+  { key: 'alerts', label: 'Alertas', icon: Bell },
+  { key: 'monitoring', label: 'Monitoramento', icon: HeartPulse },
   { key: 'operation', label: 'Operação', icon: ClipboardCheck },
   { key: 'reports', label: 'Relatórios', icon: FileBarChart },
   { key: 'audit', label: 'Auditoria', icon: Activity },
@@ -127,12 +138,15 @@ const navItems: Array<{ key: AdminNavKey; label: string; icon: LucideIcon; statu
 ];
 
 const navPermissions: Record<AdminNavKey, AdminRole[]> = {
+  executive: ['administrator', 'finance'],
   registrations: ['administrator', 'finance', 'operation'],
   payments: ['administrator', 'finance'],
   reconciliation: ['administrator', 'finance'],
+  alerts: ['administrator', 'finance'],
+  monitoring: ['administrator', 'finance'],
   operation: ['administrator', 'operation'],
   reports: ['administrator', 'finance'],
-  audit: ['administrator'],
+  audit: ['administrator', 'finance'],
   event: ['administrator'],
 };
 
@@ -171,7 +185,7 @@ export function AdminPage() {
   const [error, setError] = useState('');
   const [actionMessage, setActionMessage] = useState('');
   const [loading, setLoading] = useState(false);
-  const [activeNav, setActiveNav] = useState<AdminNavKey>('registrations');
+  const [activeNav, setActiveNav] = useState<AdminNavKey>('executive');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [selectedRegistration, setSelectedRegistration] = useState<AdminRegistration | null>(null);
   const [registrationDetails, setRegistrationDetails] = useState<AdminRegistrationDetailsResponse | null>(null);
@@ -563,6 +577,10 @@ function AdminSection({
       </section>
     );
   }
+
+  if (activeNav === 'executive') return <ExecutiveDashboardPanel adminKey={adminKey} />;
+  if (activeNav === 'alerts') return <AlertsCenterPanel adminKey={adminKey} registrations={registrations} onOpenRegistration={onOpenRegistration} />;
+  if (activeNav === 'monitoring') return <MonitoringPanel adminKey={adminKey} />;
 
   if (activeNav === 'payments') {
     return (
@@ -1339,6 +1357,7 @@ function ReportsPanel({
   onExport: () => void;
 }) {
   const [exportError, setExportError] = useState('');
+  const [exportFilters, setExportFilters] = useState({ status: '', lotId: '', distanceId: '', city: '', gender: '', payment: '' });
   const paidRegistrations = registrations.filter((registration) => registration.status === 'paid');
   const pendingRegistrations = registrations.filter((registration) => registration.status === 'pending_payment');
   const confirmationEmailMissing = paidRegistrations.filter((registration) => !registration.confirmationEmailSentAt);
@@ -1385,11 +1404,12 @@ function ReportsPanel({
       setExportError(error instanceof Error ? error.message : 'Nao foi possivel exportar o relatorio.');
     }
   };
-  const registrationReportUrl = getAdminCsvUrl({ ...reportFilters });
-  const paidReportUrl = getAdminCsvUrl({ ...reportFilters, reportType: 'paid' });
-  const kitReportUrl = getAdminCsvUrl({ ...reportFilters, reportType: 'kits' });
-  const checkInReportUrl = getAdminCsvUrl({ ...reportFilters, reportType: 'checkins' });
-  const paymentsReportUrl = getAdminPaymentsCsvUrl({ ...reportFilters });
+  const combinedReportFilters = { ...reportFilters, ...exportFilters };
+  const registrationReportUrl = getAdminCsvUrl(combinedReportFilters);
+  const paidReportUrl = getAdminCsvUrl({ ...combinedReportFilters, reportType: 'paid' });
+  const kitReportUrl = getAdminCsvUrl({ ...combinedReportFilters, reportType: 'kits' });
+  const checkInReportUrl = getAdminCsvUrl({ ...combinedReportFilters, reportType: 'checkins' });
+  const paymentsReportUrl = getAdminPaymentsCsvUrl(combinedReportFilters);
 
   return (
     <section className="mt-4 space-y-4">
@@ -1404,12 +1424,20 @@ function ReportsPanel({
               O CSV exporta a base completa com campos de pagamento, gateway e email.
             </p>
           </div>
-          <div className="grid gap-3 lg:grid-cols-[180px_180px_1fr] lg:items-end">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <label className="text-xs font-bold text-zinc-400">Periodo inicial<input type="date" value={reportFilters.dateFrom} onChange={(event) => onReportFiltersChange({ ...reportFilters, dateFrom: event.target.value })} className="mt-1 min-h-11 w-full border border-white/10 bg-black px-3 text-white" /></label>
             <label className="text-xs font-bold text-zinc-400">Periodo final<input type="date" value={reportFilters.dateTo} onChange={(event) => onReportFiltersChange({ ...reportFilters, dateTo: event.target.value })} className="mt-1 min-h-11 w-full border border-white/10 bg-black px-3 text-white" /></label>
-            <div className="flex flex-wrap gap-2">
+            <SelectFilter value={exportFilters.status} onChange={(status) => setExportFilters({ ...exportFilters, status })} options={statusOptions} />
+            <SelectFilter value={exportFilters.lotId} onChange={(lotId) => setExportFilters({ ...exportFilters, lotId })} options={[{ value: '', label: 'Todos os lotes' }, ...(summary?.lots || []).map((lot) => ({ value: lot.id, label: lot.name }))]} />
+            <SelectFilter value={exportFilters.distanceId} onChange={(distanceId) => setExportFilters({ ...exportFilters, distanceId })} options={[{ value: '', label: 'Todas as distâncias' }, ...(summary?.byDistance || []).map((distance) => ({ value: distance.id, label: distance.name }))]} />
+            <input value={exportFilters.city} onChange={(event) => setExportFilters({ ...exportFilters, city: event.target.value })} className="min-h-12 border border-white/10 bg-black px-3 text-white" placeholder="Cidade" />
+            <SelectFilter value={exportFilters.gender} onChange={(gender) => setExportFilters({ ...exportFilters, gender })} options={[{ value: '', label: 'Todos os sexos' }, { value: 'female', label: 'Feminino' }, { value: 'male', label: 'Masculino' }]} />
+            <SelectFilter value={exportFilters.payment} onChange={(payment) => setExportFilters({ ...exportFilters, payment })} options={[{ value: '', label: 'Todos pagamentos' }, { value: 'paid', label: 'Pagos' }, { value: 'infinitepay', label: 'InfinitePay' }, { value: 'pix', label: 'PIX' }]} />
+            <div className="flex flex-wrap gap-2 sm:col-span-2 lg:col-span-4">
               <button type="button" onClick={onExport} className="flex min-h-11 items-center justify-center gap-2 bg-brand px-4 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white"><Download className="h-4 w-4" /> Base completa</button>
               <button type="button" onClick={() => void exportReport(registrationReportUrl, 'funpace-run-inscricoes.csv')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Inscricoes</button>
+              <button type="button" onClick={() => void exportReport(getAdminReportExportUrl(combinedReportFilters, 'excel'), 'funpace-relatorio.xls')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Excel</button>
+              <button type="button" onClick={() => void exportReport(getAdminReportExportUrl(combinedReportFilters, 'pdf'), 'funpace-relatorio.pdf')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">PDF</button>
               <button type="button" onClick={() => void exportReport(paymentsReportUrl, 'funpace-run-pagamentos.csv')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Pagamentos</button>
               <button type="button" onClick={() => void exportReport(kitReportUrl, 'funpace-run-kits.csv')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Kits</button>
               <button type="button" onClick={() => void exportReport(checkInReportUrl, 'funpace-run-checkins.csv')} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Check-ins</button>
@@ -1559,6 +1587,71 @@ function ReportList({
       )}
     </Panel>
   );
+}
+
+function ExecutiveDashboardPanel({ adminKey }: { adminKey: string }) {
+  const [data, setData] = useState<AdminExecutiveDashboard | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const load = async () => { try { setData(await getAdminExecutiveDashboard(adminKey)); setError(''); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível carregar o dashboard executivo.'); } finally { setLoading(false); } };
+  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 30_000); return () => window.clearInterval(interval); }, [adminKey]);
+  if (error) return <StatusMessage tone="error" message={error} />;
+  const financial = data?.financial;
+  const registrationsData = data?.registrations;
+  return (
+    <section className="mt-4 space-y-4">
+      <div className="flex flex-col gap-3 border border-white/10 bg-zinc-950/80 p-5 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p><h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1><p className="mt-2 text-sm text-zinc-400">Visão financeira, comercial e operacional atualizada automaticamente.</p></div><p className="font-mono text-xs text-zinc-500">{data ? `Atualizado ${dateTimeFormatter.format(new Date(data.generatedAt))}` : 'Carregando…'}</p></div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <KpiCard label="Receita bruta" value={currencyFormatter.format((financial?.grossRevenueCents || 0) / 100)} icon={WalletCards} detail="pagamentos confirmados" trend="up" loading={loading} />
+        <KpiCard label="Receita líquida" value={currencyFormatter.format((financial?.netRevenueCents || 0) / 100)} icon={BadgeCheck} detail={financial?.feeConfigurationAvailable ? 'descontadas taxas e reembolsos' : 'sem taxa configurada'} trend="up" loading={loading} />
+        <KpiCard label="Receita hoje" value={currencyFormatter.format((financial?.todayRevenueCents || 0) / 100)} icon={Activity} detail="confirmações de hoje" trend="neutral" loading={loading} />
+        <KpiCard label="Receita da semana" value={currencyFormatter.format((financial?.weekRevenueCents || 0) / 100)} icon={BarChart3} detail="últimos sete dias" trend="up" loading={loading} />
+        <KpiCard label="Ticket médio" value={currencyFormatter.format((financial?.averageTicketCents || 0) / 100)} icon={Ticket} detail="por inscrição confirmada" trend="neutral" loading={loading} />
+        <KpiCard label="Inscrições" value={registrationsData?.total || 0} icon={Users} detail={`${registrationsData?.confirmed || 0} confirmadas`} trend="up" loading={loading} />
+        <KpiCard label="Conversão" value={`${registrationsData?.conversionRate || 0}%`} icon={ArrowUpRight} detail="confirmadas / inscrições" trend="up" loading={loading} />
+        <KpiCard label="Abandono checkout" value={`${data?.checkouts.abandonmentRate || 0}%`} icon={TimerReset} detail={`${data?.checkouts.created || 0} criados · ${data?.checkouts.paid || 0} pagos`} trend="neutral" loading={loading} />
+      </div>
+      <Panel title="Inscrições por status" eyebrow="Funil operacional"><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">{[
+        ['Confirmadas', registrationsData?.confirmed || 0, 'text-brand'], ['Pendentes', registrationsData?.pending || 0, 'text-amber-300'], ['Expiradas', registrationsData?.expired || 0, 'text-zinc-300'], ['Canceladas', registrationsData?.cancelled || 0, 'text-red-300'], ['Reembolsadas', registrationsData?.refunded || 0, 'text-cyan-300'], ['Conversão', `${registrationsData?.conversionRate || 0}%`, 'text-white'],
+      ].map(([label, value, tone]) => <div key={String(label)} className="border border-white/10 bg-black/30 p-4"><p className="text-xs font-black uppercase tracking-widest text-zinc-500">{label}</p><p className={`mt-3 font-mono text-2xl font-black ${tone}`}>{value}</p></div>)}</div></Panel>
+      <div className="grid gap-4 xl:grid-cols-3"><Panel title="Receita por dia" eyebrow="Financeiro"><ExecutiveSeries data={data?.charts.daily || []} /></Panel><Panel title="Receita por hora" eyebrow="Comportamento"><ExecutiveSeries data={data?.charts.hourly || []} /></Panel><Panel title="Receita acumulada" eyebrow="Tendência"><ExecutiveSeries data={data?.charts.cumulativeRevenue || []} /></Panel></div>
+      <div className="grid gap-4 xl:grid-cols-2"><Panel title="Receita por lote" eyebrow="Financeiro"><DistributionBars data={data?.charts.byLot || []} value="amount" /></Panel><Panel title="Receita por distância" eyebrow="Financeiro"><DistributionBars data={data?.charts.byDistance || []} value="amount" /></Panel><Panel title="Receita por cidade" eyebrow="Geografia"><DistributionBars data={data?.charts.byCity || []} value="amount" /></Panel><Panel title="Receita por sexo" eyebrow="Atletas"><DistributionBars data={data?.charts.byGender || []} value="amount" /></Panel></div>
+      <Panel title="Ocupação dos lotes" eyebrow="Capacidade em tempo real"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{(data?.lots || []).map((lot) => <div key={lot.id} className={`border p-4 ${lot.level === 'blocked' || lot.level === 'critical' ? 'border-red-400/40 bg-red-400/5' : lot.level === 'warning' ? 'border-amber-400/40 bg-amber-400/5' : 'border-white/10 bg-black/30'}`}><div className="flex items-start justify-between"><div><p className="font-black">{lot.name}</p><p className="mt-1 text-xs text-zinc-500">{currencyFormatter.format(lot.priceCents / 100)}</p></div><span className="font-mono text-lg font-black">{lot.occupancyPercent}%</span></div><div className="mt-4 h-2 bg-white/10"><div className={`h-full ${lot.level === 'blocked' || lot.level === 'critical' ? 'bg-red-400' : lot.level === 'warning' ? 'bg-amber-400' : 'bg-brand'}`} style={{ width: `${Math.min(lot.occupancyPercent, 100)}%` }} /></div><div className="mt-4 grid grid-cols-2 gap-2 text-xs"><span>Capacidade <b className="float-right">{lot.capacityTotal}</b></span><span>Pagas <b className="float-right">{lot.confirmed}</b></span><span>Reservadas <b className="float-right">{lot.temporaryReservations}</b></span><span>Disponíveis <b className="float-right">{lot.available}</b></span></div>{lot.level === 'blocked' && <p className="mt-3 text-xs font-black uppercase text-red-300">Bloqueado</p>}</div>)}</div></Panel>
+      <div className="grid gap-4 xl:grid-cols-3"><Panel title="Origem das inscrições" eyebrow="Marketing"><DistributionBars data={(data?.marketing.sources || []).map((item) => ({ label: item.label, count: item.paid, amountCents: item.amountCents }))} /></Panel><Panel title="Conversão por campanha" eyebrow="Marketing"><DistributionBars data={data?.marketing.campaigns || []} /></Panel><Panel title="Faixa etária" eyebrow="Atletas"><DistributionBars data={data?.athletes.byAge || []} /></Panel></div>
+      <div className="grid gap-4 xl:grid-cols-3"><Panel title="Mapa de calor por cidade" eyebrow="Atletas"><HeatTiles data={data?.athletes.byCity || []} /></Panel><Panel title="Tamanhos de camisa" eyebrow="Produção"><DistributionBars data={data?.athletes.byShirt || []} /></Panel><Panel title="Distâncias" eyebrow="Modalidades"><DistributionBars data={data?.athletes.byDistance || []} /></Panel></div>
+      <div className="grid gap-4 xl:grid-cols-3"><RecentList title="Últimos pagamentos" rows={(data?.recent.payments || []).map((item) => ({ label: item.registrationId, detail: currencyFormatter.format(item.amountCents / 100), at: item.paidAt || item.updatedAt }))} /><RecentList title="Últimas confirmações" rows={(data?.recent.confirmations || []).map((item) => ({ label: item.id, detail: currencyFormatter.format(item.amountCents / 100), at: item.confirmedAt || '' }))} /><RecentList title="Últimos webhooks" rows={(data?.recent.webhooks || []).map((item) => ({ label: item.eventType, detail: item.providerEventId, at: item.receivedAt }))} /></div>
+    </section>
+  );
+}
+
+function ExecutiveSeries({ data }: { data: DashboardChartPoint[] }) {
+  const visible = data.slice(-14); const max = Math.max(...visible.map((item) => item.amountCents), 1);
+  return <div className="flex h-52 items-end gap-1">{visible.map((item) => <div key={item.label} className="group flex min-w-0 flex-1 flex-col items-center justify-end"><span className="mb-2 hidden text-[10px] text-zinc-400 group-hover:block">{currencyFormatter.format(item.amountCents / 100)}</span><div className="w-full bg-brand transition-[height]" style={{ height: `${Math.max(item.amountCents / max * 100, item.amountCents ? 4 : 1)}%` }} /><span className="mt-2 max-w-full truncate text-[9px] text-zinc-600">{item.label.includes('-') ? item.label.slice(5) : item.label}</span></div>)}</div>;
+}
+
+function DistributionBars({ data, value = 'count' }: { data: DashboardChartPoint[]; value?: 'count' | 'amount' }) {
+  const rows = data.slice(0, 8); const max = Math.max(...rows.map((item) => value === 'amount' ? item.amountCents : item.count), 1);
+  return <div className="space-y-3">{rows.map((item) => { const current = value === 'amount' ? item.amountCents : item.count; return <div key={item.label}><div className="mb-1 flex justify-between gap-3 text-xs"><span className="truncate font-bold text-zinc-300">{item.label}</span><span className="font-mono text-zinc-500">{value === 'amount' ? currencyFormatter.format(current / 100) : current}</span></div><div className="h-2 bg-white/10"><div className="h-full bg-brand" style={{ width: `${current / max * 100}%` }} /></div></div>; })}{rows.length === 0 && <p className="text-sm text-zinc-500">Sem dados disponíveis.</p>}</div>;
+}
+
+function HeatTiles({ data }: { data: DashboardChartPoint[] }) { const rows = data.slice(0, 12); const max = Math.max(...rows.map((item) => item.count), 1); return <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{rows.map((item) => <div key={item.label} className="border border-brand/20 p-3" style={{ backgroundColor: `rgb(163 230 53 / ${Math.max(item.count / max * .45, .06)})` }}><MapPin className="h-4 w-4 text-brand" /><p className="mt-2 truncate text-xs font-black">{item.label}</p><p className="mt-1 font-mono text-lg">{item.count}</p></div>)}</div>; }
+
+function RecentList({ title, rows }: { title: string; rows: Array<{ label: string; detail: string; at: string }> }) { return <Panel title={title} eyebrow="Tempo real"><div className="space-y-2">{rows.slice(0, 6).map((row, index) => <div key={`${row.label}-${index}`} className="border border-white/10 bg-black/30 p-3"><p className="truncate text-xs font-bold">{row.label}</p><div className="mt-2 flex justify-between gap-2 font-mono text-[10px] text-zinc-500"><span>{row.detail}</span><span>{row.at ? dateTimeFormatter.format(new Date(row.at)) : '—'}</span></div></div>)}{rows.length === 0 && <p className="text-sm text-zinc-500">Nenhum registro.</p>}</div></Panel>; }
+
+function AlertsCenterPanel({ adminKey, registrations, onOpenRegistration }: { adminKey: string; registrations: AdminRegistration[]; onOpenRegistration: (registration: AdminRegistration) => void }) {
+  const [data, setData] = useState<AdminAlertsResponse | null>(null); const [filters, setFilters] = useState({ status: '', severity: '', type: '' }); const [error, setError] = useState(''); const [draft, setDraft] = useState<{ id: string; status: 'acknowledged' | 'resolved'; resolution: string } | null>(null);
+  const load = async () => { try { setData(await getAdminAlerts(adminKey, filters)); setError(''); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Falha ao carregar alertas.'); } };
+  useEffect(() => { void load(); }, [adminKey, filters.status, filters.severity, filters.type]);
+  const submit = async () => { if (!draft) return; try { await updateAdminAlert(adminKey, draft.id, draft.status, draft.resolution); setDraft(null); await load(); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Falha ao atualizar alerta.'); } };
+  const openEntity = (id: string | null) => { const registration = registrations.find((item) => item.id === id); if (registration) onOpenRegistration(registration); };
+  return <section className="mt-4 border border-white/10 bg-zinc-950/80"><div className="border-b border-white/10 p-5"><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle</p><h2 className="mt-2 text-2xl font-black">Alertas</h2><p className="mt-2 text-sm text-zinc-400">Detecção idempotente com responsável, reconhecimento e resolução auditada.</p></div>{error && <p className="m-4 border border-red-400/20 bg-red-400/10 p-3 text-red-100">{error}</p>}<div className="grid gap-3 border-b border-white/10 p-4 sm:grid-cols-4"><SelectFilter value={filters.status} onChange={(status) => setFilters({ ...filters, status })} options={[{ value: '', label: 'Todos status' }, { value: 'open', label: 'Abertos' }, { value: 'acknowledged', label: 'Reconhecidos' }, { value: 'resolved', label: 'Resolvidos' }]} /><SelectFilter value={filters.severity} onChange={(severity) => setFilters({ ...filters, severity })} options={[{ value: '', label: 'Todas gravidades' }, { value: 'critical', label: 'Crítico' }, { value: 'warning', label: 'Atenção' }, { value: 'info', label: 'Informativo' }]} /><KpiCard label="Abertos" value={data?.totals.open || 0} icon={Bell} detail="requerem acompanhamento" trend="neutral" loading={!data} /><KpiCard label="Críticos" value={data?.totals.critical || 0} icon={Activity} detail="prioridade máxima" trend="neutral" loading={!data} /></div><div className="divide-y divide-white/10">{(data?.alerts || []).map((alert) => <div key={alert.id} className="grid gap-3 p-4 lg:grid-cols-[1fr_150px_180px_auto] lg:items-center"><div><div className="flex flex-wrap items-center gap-2"><span className={`border px-2 py-1 text-[10px] font-black uppercase ${alert.severity === 'critical' ? 'border-red-400/30 text-red-300' : alert.severity === 'warning' ? 'border-amber-400/30 text-amber-300' : 'border-white/10 text-zinc-400'}`}>{alert.severity}</span><p className="font-bold">{alert.title}</p></div><p className="mt-2 text-sm text-zinc-400">{alert.message}</p><p className="mt-2 font-mono text-[10px] text-zinc-600">{alert.alertType} · {dateTimeFormatter.format(new Date(alert.detectedAt))}</p></div><p className="text-xs font-black uppercase text-zinc-400">{alert.status}</p><p className="text-xs text-zinc-500">{alert.acknowledgedBy || 'Sem responsável'}</p><div className="flex flex-wrap gap-2">{alert.entityType === 'registration' && <button onClick={() => openEntity(alert.entityId)} className="border border-white/10 px-2 py-1 text-xs">Abrir</button>}{alert.status === 'open' && <button onClick={() => setDraft({ id: alert.id, status: 'acknowledged', resolution: '' })} className="border border-amber-400/30 px-2 py-1 text-xs text-amber-300">Assumir</button>}{alert.status !== 'resolved' && <button onClick={() => setDraft({ id: alert.id, status: 'resolved', resolution: '' })} className="border border-brand/30 px-2 py-1 text-xs text-brand">Resolver</button>}</div></div>)}{data && data.alerts.length === 0 && <p className="p-6 text-sm text-zinc-500">Nenhum alerta encontrado.</p>}</div>{draft && <ActionModal title={draft.status === 'resolved' ? 'Resolver alerta' : 'Assumir alerta'} confirmLabel="Confirmar" loading={false} confirmDisabled={draft.resolution.trim().length < 5} onConfirm={() => void submit()} onClose={() => setDraft(null)}><label className="text-xs font-bold text-zinc-400">Resolução / observação<textarea value={draft.resolution} onChange={(event) => setDraft({ ...draft, resolution: event.target.value })} className="mt-2 min-h-28 w-full border border-white/10 bg-black p-3 text-white" /></label></ActionModal>}</section>;
+}
+
+function MonitoringPanel({ adminKey }: { adminKey: string }) {
+  const [data, setData] = useState<AdminMonitoringResponse | null>(null); const [error, setError] = useState('');
+  const load = async () => { try { setData(await getAdminMonitoring(adminKey)); setError(''); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Falha ao carregar monitoramento.'); } };
+  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 20_000); return () => window.clearInterval(interval); }, [adminKey]);
+  return <section className="mt-4 space-y-4"><div className="border border-white/10 bg-zinc-950/80 p-5"><p className="text-xs font-black uppercase tracking-widest text-brand">Observabilidade</p><h2 className="mt-2 text-2xl font-black">Monitoramento</h2><p className="mt-2 text-sm text-zinc-400">Saúde dos serviços e telemetria da instância serverless atual.</p></div>{error && <StatusMessage tone="error" message={error} />}<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{(data?.services || []).map((service) => <div key={service.id} className="border border-white/10 bg-zinc-950/80 p-4"><div className="flex items-center justify-between"><p className="font-black">{service.label}</p><span className={`h-3 w-3 rounded-full ${service.status === 'operational' || service.status === 'configured' ? 'bg-brand' : service.status === 'degraded' ? 'bg-amber-400' : service.status === 'disabled' || service.status === 'local' ? 'bg-zinc-500' : 'bg-red-400'}`} /></div><p className="mt-3 text-xs font-black uppercase text-zinc-500">{service.status}</p><p className="mt-2 text-xs text-zinc-400">{service.detail}</p>{service.latencyMs !== null && <p className="mt-3 font-mono text-sm text-brand">{service.latencyMs} ms</p>}</div>)}</div><Panel title="Métricas da instância" eyebrow="Tempo real"><div className="grid grid-cols-2 gap-3 md:grid-cols-4">{data && Object.entries({ 'Resposta API': `${data.metrics.responseTimeMs} ms`, 'Consulta banco': `${data.metrics.databaseQueryMs} ms`, 'Heap': `${data.metrics.memoryUsedMb} MB`, 'RSS': `${data.metrics.memoryRssMb} MB`, 'CPU usuário': `${data.metrics.cpuUserMs} ms`, 'Erros críticos': data.metrics.errors, 'Webhooks': data.metrics.webhooks, 'E-mails': data.metrics.emailsSent }).map(([label, value]) => <div key={label} className="border border-white/10 bg-black/30 p-3"><p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">{label}</p><p className="mt-2 font-mono text-xl font-black">{value}</p></div>)}</div></Panel></section>;
 }
 
 function ReconciliationPanel({ adminKey, registrations, onOpenRegistration }: { adminKey: string; registrations: AdminRegistration[]; onOpenRegistration: (registration: AdminRegistration) => void }) {
@@ -2049,6 +2142,7 @@ function EditInput({ label, value, onChange, type = 'text', maxLength }: { label
 function ActionModal({
   title,
   description,
+  loading,
   confirmLabel,
   confirmTone = 'brand',
   confirmDisabled,
@@ -2057,7 +2151,8 @@ function ActionModal({
   children,
 }: {
   title: string;
-  description: string;
+  description?: string;
+  loading?: boolean;
   confirmLabel: string;
   confirmTone?: 'brand' | 'danger';
   confirmDisabled?: boolean;
@@ -2072,7 +2167,7 @@ function ActionModal({
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-xl font-black">{title}</h3>
-            <p className="mt-2 text-sm text-zinc-400">{description}</p>
+            {description && <p className="mt-2 text-sm text-zinc-400">{description}</p>}
           </div>
           <button type="button" onClick={onClose} className="flex h-10 w-10 items-center justify-center border border-white/10">
             <X className="h-4 w-4" />
@@ -2083,11 +2178,11 @@ function ActionModal({
           <button type="button" onClick={onClose} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300">Cancelar</button>
           <button
             type="button"
-            disabled={confirmDisabled}
+            disabled={confirmDisabled || loading}
             onClick={onConfirm}
             className={`${confirmTone === 'danger' ? 'bg-red-500 text-white' : 'bg-brand text-black'} px-4 py-3 text-xs font-black uppercase disabled:opacity-40`}
           >
-            {confirmLabel}
+            {loading ? 'Processando…' : confirmLabel}
           </button>
         </div>
       </div>
@@ -2227,24 +2322,15 @@ function AthleteDrawer({
         )}
 
         <div className="mt-5 border border-white/10 bg-white/3 p-4">
-          <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Historico completo</p>
+          <div role="tablist" aria-label="Detalhes da inscrição" className="border-b border-white/10 pb-3"><button type="button" role="tab" aria-selected="true" className="border-b-2 border-brand px-3 py-2 text-xs font-black uppercase tracking-widest text-brand">Timeline</button></div>
           <div className="mt-4 space-y-4">
-            <TimelineItem icon={Ticket} title="Inscricao criada" detail={dateTimeFormatter.format(createdAt)} />
-            <TimelineItem icon={CreditCard} title="Pagamento vinculado" detail={statusLabels[registration.paymentStatus]} />
-            <TimelineItem
-              icon={Gift}
-              title="Kit do atleta"
-              detail={registration.kitStatus === 'delivered' ? `Entregue${registration.kitDeliveredAt ? ` em ${dateTimeFormatter.format(new Date(registration.kitDeliveredAt))}` : ''}` : 'Entrega ainda nao registrada'}
-              muted={registration.kitStatus !== 'delivered'}
-            />
-            <TimelineItem
-              icon={ClipboardCheck}
-              title="Check-in"
-              detail={registration.checkInStatus === 'checked_in' ? `Realizado${registration.checkInAt ? ` em ${dateTimeFormatter.format(new Date(registration.checkInAt))}` : ''}` : 'Nao realizado'}
-              muted={registration.checkInStatus !== 'checked_in'}
-            />
-            {details?.auditLogs.map((log) => <TimelineItem key={log.id} icon={Activity} title={auditActionLabel(log.action)} detail={`${dateTimeFormatter.format(new Date(log.createdAt))} por ${log.actor}`} />)}
-            {details?.paymentEvents.map((event) => <TimelineItem key={event.id} icon={CreditCard} title={event.eventType} detail={dateTimeFormatter.format(new Date(event.receivedAt))} />)}
+            {(details?.timeline || []).map((event) => (
+              <div key={event.id} className="flex gap-3">
+                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border ${event.severity === 'critical' ? 'border-red-400/40 text-red-300' : event.severity === 'success' ? 'border-brand/30 text-brand' : 'border-white/10 text-zinc-400'}`}><Activity className="h-4 w-4" /></div>
+                <div className="min-w-0 flex-1"><p className="font-bold">{auditActionLabel(event.title)}</p><p className="mt-1 text-sm text-zinc-500">{dateTimeFormatter.format(new Date(event.occurredAt))} · {event.actor} · {event.origin}</p><details className="mt-2"><summary className="cursor-pointer text-[10px] font-black uppercase tracking-widest text-zinc-600">Logs técnicos</summary><pre className="mt-2 max-h-52 overflow-auto border border-white/10 bg-black p-2 text-[10px] text-zinc-400">{JSON.stringify(event.details, null, 2)}</pre></details></div>
+              </div>
+            ))}
+            {!details && <p className="text-sm text-zinc-500">Carregando timeline…</p>}
           </div>
         </div>
       </aside>

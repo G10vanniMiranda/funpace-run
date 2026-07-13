@@ -19,6 +19,10 @@ import {
   getDatabaseRuntimeConfig,
   markPaymentCreationFailedInPostgres,
   getReconciliationDashboardInPostgres,
+  listOperationalAlertsInPostgres,
+  synchronizeOperationalAlertsInPostgres,
+  updateOperationalAlertInPostgres,
+  createCriticalOperationalAlertInPostgres,
   persistReconciliationRunInPostgres,
   pingDatabase,
   revokeAdminSessionInPostgres,
@@ -41,10 +45,15 @@ import {
   queueCheckInGoogleSheetSync,
   queueConfirmedPaymentGoogleSheetSync,
   queueRegistrationGoogleSheetSync,
+  queueLotSummaryGoogleSheetSync,
+  queuePartnershipGoogleSheetSync,
+  queueEmailGoogleSheetSync,
 } from './google-sheets.js';
 import { checkInfinitePayPayment, createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 import { calculateLotCapacity, selectLotWithAvailability, synchronizeLotProjections } from './lot-capacity.js';
 import { detectLocalReconciliationIssues, generateReconciliationReport } from './payment-reconciliation.js';
+import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAlerts } from './operational-intelligence.js';
+import { createExcelXml, createSimplePdf } from './report-export.js';
 
 const port = Number(process.env.API_PORT || 3001);
 const defaultAllowedOrigins = [
@@ -137,7 +146,29 @@ function logServerError(req: IncomingMessage, error: unknown, errorId = createEr
     stack: error instanceof Error ? error.stack : undefined,
   }));
 
+  if (usesPostgresDatabase()) {
+    void createCriticalOperationalAlertInPostgres({
+      dedupeKey: `api-error:${errorId}`,
+      alertType: 'api_error',
+      title: 'Exceção crítica na API',
+      message: error instanceof Error ? error.message.slice(0, 500) : 'Erro desconhecido na API.',
+      payload: {
+        errorId,
+        method: req.method,
+        path: req.url?.split('?')[0],
+        requestId: Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'],
+      },
+    }).catch(() => undefined);
+  }
+
   return errorId;
+}
+
+async function recordOperationalAlert(input: Parameters<typeof synchronizeOperationalAlertsInPostgres>[0][number]) {
+  if (!usesPostgresDatabase()) return;
+  await synchronizeOperationalAlertsInPostgres([input]).catch((error) => {
+    console.error(JSON.stringify({ at: new Date().toISOString(), message: 'operational_alert_persist_failed', error: error instanceof Error ? error.message : String(error) }));
+  });
 }
 
 function csv(res: ServerResponse, filename: string, content: string) {
@@ -145,6 +176,11 @@ function csv(res: ServerResponse, filename: string, content: string) {
     'Content-Type': 'text/csv; charset=utf-8',
     'Content-Disposition': `attachment; filename="${filename}"`,
   });
+  res.end(content);
+}
+
+function binary(res: ServerResponse, filename: string, contentType: string, content: Buffer | string) {
+  res.writeHead(200, { 'Content-Type': contentType, 'Content-Disposition': `attachment; filename="${filename}"`, 'Cache-Control': 'private, no-store' });
   res.end(content);
 }
 
@@ -575,6 +611,18 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
     termsAccepted: Boolean(input.termsAccepted),
     regulationAccepted: Boolean(input.regulationAccepted),
     privacyAccepted: Boolean(input.privacyAccepted),
+    attribution: input.attribution ? {
+      source: compactText(input.attribution.source, 80),
+      medium: compactText(input.attribution.medium, 80),
+      campaign: compactText(input.attribution.campaign, 120),
+      term: compactText(input.attribution.term, 120),
+      content: compactText(input.attribution.content, 120),
+      utmSource: compactText(input.attribution.utmSource, 80),
+      utmMedium: compactText(input.attribution.utmMedium, 80),
+      utmCampaign: compactText(input.attribution.utmCampaign, 120),
+      referrer: compactText(input.attribution.referrer, 300),
+      landingPage: compactText(input.attribution.landingPage, 300),
+    } : undefined,
   };
 }
 
@@ -1204,6 +1252,13 @@ export async function processRegistrationEmail(registrationId: string, options: 
     }, { scope: 'checkout' });
   }
 
+  if (!result.ok) await recordOperationalAlert({
+    dedupeKey: `resend:${registrationId}`, severity: 'critical', alertType: 'resend_error',
+    title: 'Erro no Resend', message: result.error || 'Falha no envio do e-mail de confirmação.', entityType: 'registration', entityId: registrationId,
+  });
+  const emailSheetSync = await queueEmailGoogleSheetSync(registrationId);
+  if (emailSheetSync) await processGoogleSheetSync(emailSheetSync.id);
+
   console.log(JSON.stringify({
     at: completedAt,
     message: result.ok ? 'registration_email_sent' : 'registration_email_failed',
@@ -1572,6 +1627,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   const googleSheetSync = registrationWasCreated && response.registrationId
     ? await queueRegistrationGoogleSheetSync(response.registrationId)
     : null;
+  const lotSheetSync = registrationWasCreated ? await queueLotSummaryGoogleSheetSync() : null;
 
   logStage('response_ready', {
     statusCode,
@@ -1586,6 +1642,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   if (googleSheetSync) {
     await processGoogleSheetSync(googleSheetSync.id);
   }
+  if (lotSheetSync) await processGoogleSheetSync(lotSheetSync.id);
 }
 
 async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse) {
@@ -1653,11 +1710,13 @@ async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse
   });
 
   await notifyPartnershipTeam(lead);
+  const partnershipSync = await queuePartnershipGoogleSheetSync(lead.id);
   logRequest(req, 201, 'partnership_lead_created');
   json(res, 201, {
     id: lead.id,
     message: 'Proposta enviada com sucesso. Nossa equipe entrara em contato em breve.',
   });
+  if (partnershipSync) await processGoogleSheetSync(partnershipSync.id);
 }
 
 async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
@@ -1675,11 +1734,13 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   // the provider's server-to-server payment_check endpoint.
   if (!webhookSecret) {
     console.error(JSON.stringify({ at: new Date().toISOString(), message: 'payment_webhook_secret_missing' }));
+    await recordOperationalAlert({ dedupeKey: 'webhook:secret-missing', severity: 'critical', alertType: 'webhook_failure', title: 'Webhook indisponível', message: 'PAYMENT_WEBHOOK_SECRET não configurado.', entityType: 'system', entityId: 'webhook' });
     json(res, 503, { success: false, message: 'Webhook indisponivel.' });
     return;
   }
 
   if (!safeSecretEqual(receivedToken, webhookSecret)) {
+    await recordOperationalAlert({ dedupeKey: `webhook:unauthorized:${new Date().toISOString().slice(0, 13)}`, severity: 'warning', alertType: 'webhook_failure', title: 'Webhook não autorizado', message: 'Tentativa recebida com token inválido.', entityType: 'system', entityId: 'webhook' });
     json(res, 401, { message: 'Webhook nao autorizado.' });
     return;
   }
@@ -1697,6 +1758,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   }));
 
   if (!normalizedEvent) {
+    await recordOperationalAlert({ dedupeKey: `webhook:invalid:${createHash('sha256').update(rawBody).digest('hex').slice(0, 16)}`, severity: 'warning', alertType: 'webhook_failure', title: 'Payload de webhook inválido', message: 'InfinitePay enviou payload que não pôde ser normalizado.', entityType: 'system', entityId: 'webhook' });
     json(res, 422, { message: 'Webhook invalido.' });
     return;
   }
@@ -1723,6 +1785,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
         transactionId: normalizedEvent.providerTransactionId,
         verificationElapsedMs,
       }));
+      await recordOperationalAlert({ dedupeKey: `infinitepay:not-verified:${normalizedEvent.providerTransactionId}`, severity: 'critical', alertType: 'infinitepay_error', title: 'Pagamento não verificado', message: 'Webhook de aprovação não foi confirmado pelo payment_check.', entityType: 'registration', entityId: normalizedEvent.registrationId });
       json(res, 400, { success: false, message: 'Pagamento nao confirmado pela InfinitePay.' });
       return;
     }
@@ -1752,6 +1815,15 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     if (result.error === 'not_found') { json(res, 400, { success: false, message: 'Pedido nao encontrado.' }); return; }
     if (result.error === 'amount_mismatch') { json(res, 400, { success: false, message: 'Valor do pagamento divergente.' }); return; }
     if (result.error === 'stale_checkout') { json(res, 409, { success: false, message: 'Checkout expirado por mudanca de lote.' }); return; }
+    if (result.duplicated) {
+      await recordOperationalAlert({
+        dedupeKey: `webhook-duplicate:${normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId}`,
+        severity: 'info', alertType: 'webhook_duplicate', title: 'Webhook duplicado',
+        message: 'Evento repetido recebido e descartado pela proteção idempotente.',
+        entityType: 'registration', entityId: result.registrationId,
+        payload: { transactionId: normalizedEvent.providerTransactionId, paymentId: result.paymentId },
+      });
+    }
     const processingElapsedMs = Date.now() - processingStartedAt;
     json(res, 200, { success: true, message: null, duplicated: result.duplicated || undefined });
     console.log(JSON.stringify({
@@ -2079,6 +2151,8 @@ async function getAdminRows(url: URL) {
   const lotId = url.searchParams.get('lotId') || '';
   const distanceId = url.searchParams.get('distanceId') || '';
   const status = url.searchParams.get('status') || '';
+  const gender = url.searchParams.get('gender') || '';
+  const paymentFilter = url.searchParams.get('payment') || '';
   const reportType = url.searchParams.get('reportType') || '';
   const dateFrom = url.searchParams.get('dateFrom') || '';
   const dateTo = url.searchParams.get('dateTo') || '';
@@ -2095,6 +2169,7 @@ async function getAdminRows(url: URL) {
     .filter((registration) => !lotId || registration.lotId === lotId)
     .filter((registration) => !distanceId || registration.distanceId === distanceId)
     .filter((registration) => !status || registration.status === status)
+    .filter((registration) => !gender || registration.payload.gender === gender)
     .filter((registration) => !city || registration.payload.city?.toLowerCase().includes(city))
     .filter((registration) => !team || registration.payload.team?.toLowerCase().includes(team))
     .filter((registration) => !shirtSize || registration.payload.shirtSize === shirtSize)
@@ -2123,6 +2198,7 @@ async function getAdminRows(url: URL) {
       if (reportType === 'paid' && row.status !== 'paid') return false;
       if (reportType === 'pending' && row.status !== 'pending_payment') return false;
       if (sheetStatus === 'unsynchronized' && !['pending', 'processing', 'failed', 'not_queued'].includes(row.googleSheetsStatus)) return false;
+      if (paymentFilter && row.paymentProvider !== paymentFilter && row.paymentMethod !== paymentFilter && row.paymentStatus !== paymentFilter) return false;
       const referenceDate = reportType === 'kits'
         ? (row.kitDeliveredAt || '')
         : reportType === 'checkins'
@@ -2624,6 +2700,98 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   });
 }
 
+async function refreshOperationalAlerts(database: Database) {
+  const detected = detectOperationalAlerts(database);
+  if (usesPostgresDatabase() && detected.length) await synchronizeOperationalAlertsInPostgres(detected);
+  return usesPostgresDatabase() ? listOperationalAlertsInPostgres() : [];
+}
+
+async function handleAdminExecutiveDashboard(req: IncomingMessage, res: ServerResponse) {
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const alerts = await refreshOperationalAlerts(database);
+  const reconciliation = await getReconciliationDashboardInPostgres();
+  json(res, 200, {
+    ...buildExecutiveDashboard(database),
+    alerts: {
+      active: alerts.filter((alert) => alert.status !== 'resolved').length,
+      critical: alerts.filter((alert) => alert.status !== 'resolved' && alert.severity === 'critical').length,
+      recent: alerts.slice(0, 10),
+    },
+    reconciliation: {
+      manualReviewRequired: reconciliation.issues.filter((issue) => issue.resolutionStatus === 'manual_review_required').length,
+      lastRun: reconciliation.runs[0] || null,
+    },
+  });
+}
+
+async function handleAdminAlerts(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  await refreshOperationalAlerts(database);
+  const alerts = await listOperationalAlertsInPostgres({
+    status: url.searchParams.get('status') || '', severity: url.searchParams.get('severity') || '', type: url.searchParams.get('type') || '',
+  });
+  json(res, 200, { alerts, totals: {
+    open: alerts.filter((alert) => alert.status === 'open').length,
+    acknowledged: alerts.filter((alert) => alert.status === 'acknowledged').length,
+    resolved: alerts.filter((alert) => alert.status === 'resolved').length,
+    critical: alerts.filter((alert) => alert.status !== 'resolved' && alert.severity === 'critical').length,
+  } });
+}
+
+async function handleAdminAlertUpdate(req: IncomingMessage, res: ServerResponse, alertId: string) {
+  const session = await requireAdmin(req, res, ['administrator', 'finance']);
+  if (!session || !requireAdminDatabase(res)) return;
+  const body = parseJsonBody<{ status?: 'acknowledged' | 'resolved'; resolution?: string }>(await readBody(req));
+  if (!body || !['acknowledged', 'resolved'].includes(body.status || '') || String(body.resolution || '').trim().length < 5) {
+    json(res, 422, { message: 'Informe status e resolução com pelo menos cinco caracteres.' }); return;
+  }
+  const alert = await updateOperationalAlertInPostgres({
+    id: alertId, status: body.status!, resolution: String(body.resolution).trim(), actor: session.actor, actorRole: session.role,
+    sessionId: session.id, ipAddress: getClientIp(req), userAgent: getUserAgent(req),
+  });
+  if (!alert) { json(res, 404, { message: 'Alerta não encontrado.' }); return; }
+  json(res, 200, { alert });
+}
+
+async function handleAdminMonitoring(req: IncomingMessage, res: ServerResponse) {
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
+  const startedAt = Date.now();
+  const databaseStartedAt = Date.now();
+  const databaseHealth = await pingDatabase();
+  const databaseLatencyMs = Date.now() - databaseStartedAt;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const sheets = getGoogleSheetsConfig();
+  const lastWebhook = database.paymentEvents.filter((event) => event.eventType.includes('infinitepay')).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))[0];
+  const failedSheets = database.googleSheetSyncs.filter((sync) => sync.status === 'failed').length;
+  const emailFailures = database.registrations.filter((registration) => Boolean(registration.confirmationEmailError)).length;
+  const memory = process.memoryUsage();
+  const cpu = process.cpuUsage();
+  const alerts = await refreshOperationalAlerts(database);
+  json(res, 200, {
+    generatedAt: new Date().toISOString(),
+    services: [
+      { id: 'api', label: 'API', status: 'operational', latencyMs: Date.now() - startedAt, detail: 'FunPace API respondendo' },
+      { id: 'database', label: 'Banco / Supabase', status: databaseHealth.ok ? 'operational' : 'down', latencyMs: databaseLatencyMs, detail: databaseHealth.provider },
+      { id: 'infinitepay', label: 'InfinitePay', status: paymentProvider === 'infinitepay' && infinitePayHandle ? 'configured' : 'down', latencyMs: null, detail: 'Verificação ativa por payment_check' },
+      { id: 'resend', label: 'Resend', status: isEmailConfigured() ? emailFailures ? 'degraded' : 'configured' : 'down', latencyMs: null, detail: `${emailFailures} falha(s) registrada(s)` },
+      { id: 'google_sheets', label: 'Google Sheets', status: sheets.enabled && !sheets.configurationIssue ? failedSheets ? 'degraded' : 'configured' : sheets.enabled ? 'down' : 'disabled', latencyMs: null, detail: sheets.configurationIssue || `${failedSheets} falha(s)` },
+      { id: 'webhook', label: 'Webhook', status: webhookSecret ? 'configured' : 'down', latencyMs: null, detail: lastWebhook ? `Último evento ${lastWebhook.receivedAt}` : 'Nenhum evento registrado' },
+      { id: 'vercel', label: 'Vercel', status: process.env.VERCEL ? 'operational' : 'local', latencyMs: null, detail: process.env.VERCEL_REGION || 'ambiente local' },
+    ],
+    metrics: {
+      responseTimeMs: Date.now() - startedAt, databaseQueryMs: databaseLatencyMs,
+      memoryUsedMb: Number((memory.heapUsed / 1024 / 1024).toFixed(1)), memoryRssMb: Number((memory.rss / 1024 / 1024).toFixed(1)),
+      cpuUserMs: Number((cpu.user / 1000).toFixed(1)), cpuSystemMs: Number((cpu.system / 1000).toFixed(1)), uptimeSeconds: Math.round(process.uptime()),
+      errors: alerts.filter((alert) => alert.status !== 'resolved' && alert.severity === 'critical').length,
+      webhooks: database.paymentEvents.filter((event) => event.eventType.includes('infinitepay')).length,
+      payments: database.payments.length,
+      emailsSent: database.registrations.filter((registration) => registration.confirmationEmailSentAt).length,
+    },
+  });
+}
+
 async function handleAdminEventConfig(req: IncomingMessage, res: ServerResponse) {
   if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
   const database = await transaction((current) => current, { persist: false });
@@ -3024,6 +3192,7 @@ async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerR
     registration: toAdminRow(database, registration),
     auditLogs: database.auditLogs.filter((item) => item.entityId === registrationId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     paymentEvents: payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)) : [],
+    timeline: buildRegistrationTimeline(database, registrationId),
   });
 }
 
@@ -3170,7 +3339,7 @@ async function getFilteredAuditLogs(url: URL) {
 }
 
 async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse, url: URL) {
-  if (!await requireAdmin(req, res, ['administrator'])) {
+  if (!await requireAdmin(req, res, ['administrator', 'finance'])) {
     return;
   }
 
@@ -3185,7 +3354,7 @@ async function handleAdminAuditLogs(req: IncomingMessage, res: ServerResponse, u
 }
 
 async function handleAdminAuditLogsCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
-  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
   const logs = await getFilteredAuditLogs(url);
   const headers = ['data', 'ator', 'perfil', 'acao', 'entidade', 'id_entidade', 'sessao', 'ip', 'user_agent', 'payload'];
   const lines = logs.map((log) => [log.createdAt, log.actor, log.actorRole, log.action, log.entityType, log.entityId, log.sessionId, log.ipAddress, log.userAgent, JSON.stringify(log.payload)].map(escapeCsv).join(','));
@@ -3258,6 +3427,10 @@ async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerRes
   });
 
   json(res, result.statusCode, result.payload);
+  if (result.statusCode === 200) {
+    const task = await queuePartnershipGoogleSheetSync(partnershipId);
+    if (task) await processGoogleSheetSync(task.id);
+  }
 }
 
 function escapeCsv(value: unknown) {
@@ -3351,6 +3524,17 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
   csv(res, 'funpace-run-inscritos.csv', [headers.join(','), ...lines].join('\n'));
 }
 
+async function handleAdminReportExport(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
+  const rows = await getAdminRows(url);
+  const headers = ['ID', 'Nome', 'Status', 'Lote', 'Distância', 'Cidade', 'Estado', 'Sexo', 'Valor', 'Pagamento', 'Criada em', 'Paga em'];
+  const values = rows.map((row) => [row.id, row.fullName, row.status, row.lot, row.distance, row.city || '', row.state || '', row.gender, row.amountCents / 100, row.paymentMethod || row.paymentProvider || '', row.createdAt, row.paidAt || '']);
+  const format = url.searchParams.get('format') || 'csv';
+  if (format === 'excel') { binary(res, 'funpace-relatorio.xls', 'application/vnd.ms-excel; charset=utf-8', createExcelXml('Inscrições', headers, values)); return; }
+  if (format === 'pdf') { binary(res, 'funpace-relatorio.pdf', 'application/pdf', createSimplePdf('FunPace - Relatório Operacional', headers, values)); return; }
+  csv(res, 'funpace-relatorio.csv', [headers.map(escapeCsv).join(','), ...values.map((row) => row.map(escapeCsv).join(','))].join('\n'));
+}
+
 async function handleAdminPartnershipsCsv(req: IncomingMessage, res: ServerResponse) {
   if (!await requireAdmin(req, res)) {
     return;
@@ -3442,6 +3626,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       await handleAdminSummary(req, res);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/admin/executive-dashboard') { await handleAdminExecutiveDashboard(req, res); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/monitoring') { await handleAdminMonitoring(req, res); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/alerts') { await handleAdminAlerts(req, res, url); return; }
+    const adminAlertUpdate = url.pathname.match(/^\/api\/admin\/alerts\/([^/]+)$/);
+    if (req.method === 'PATCH' && adminAlertUpdate) { await handleAdminAlertUpdate(req, res, decodeURIComponent(adminAlertUpdate[1])); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/reconciliation') { await handleAdminReconciliation(req, res, false); return; }
     if (req.method === 'POST' && url.pathname === '/api/admin/reconciliation/run') { await handleAdminReconciliation(req, res, true); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/google-sheets/status') { await handleAdminGoogleSheetsStatus(req, res); return; }
@@ -3470,6 +3659,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       await handleAdminRegistrationsCsv(req, res, url);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/admin/reports/export') { await handleAdminReportExport(req, res, url); return; }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/audit-logs') {
       await handleAdminAuditLogs(req, res, url);

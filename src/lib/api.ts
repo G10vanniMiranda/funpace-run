@@ -13,6 +13,9 @@ import type {
   AdminPaymentsResponse,
   AdminSummaryResponse,
   AdminReconciliationDashboard,
+  AdminExecutiveDashboard,
+  AdminAlertsResponse,
+  AdminMonitoringResponse,
   AvailabilityResponse,
   CreateRegistrationResponse,
   PartnershipLeadRequest,
@@ -359,6 +362,13 @@ export function runAdminReconciliation(adminKey: string, mode: 'dry_run' | 'appl
   );
 }
 
+export function getAdminExecutiveDashboard(adminKey: string) { return adminFetch<AdminExecutiveDashboard>('/api/admin/executive-dashboard', adminKey); }
+export function getAdminAlerts(adminKey: string, filters: Record<string, string> = {}) { return adminFetch<AdminAlertsResponse>(`/api/admin/alerts${toQueryString(filters)}`, adminKey); }
+export function updateAdminAlert(adminKey: string, alertId: string, status: 'acknowledged' | 'resolved', resolution: string) {
+  return adminFetch<{ alert: import('../types/registration').AdminOperationalAlert }>(`/api/admin/alerts/${encodeURIComponent(alertId)}`, adminKey, { method: 'PATCH', body: JSON.stringify({ status, resolution }) });
+}
+export function getAdminMonitoring(adminKey: string) { return adminFetch<AdminMonitoringResponse>('/api/admin/monitoring', adminKey); }
+
 export function getAdminRegistrations(adminKey: string, filters: Record<string, string>) {
   return adminFetch<AdminRegistrationsResponse>(`/api/admin/registrations${toQueryString(filters)}`, adminKey);
 }
@@ -377,6 +387,7 @@ export function getAdminAuditLogsCsvUrl(filters: Record<string, string>) { retur
 export function getAdminCsvUrl(filters: Record<string, string>) {
   return getApiUrl(`/api/admin/registrations.csv${toQueryString(filters)}`);
 }
+export function getAdminReportExportUrl(filters: Record<string, string>, format: 'csv' | 'excel' | 'pdf') { return getApiUrl(`/api/admin/reports/export${toQueryString({ ...filters, format })}`); }
 
 export function getAdminPartnerships(adminKey: string) {
   return adminFetch<AdminPartnershipsResponse>('/api/admin/partnerships', adminKey);

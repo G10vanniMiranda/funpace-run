@@ -23,6 +23,18 @@ export type RegistrationFormData = {
   termsAccepted: boolean;
   regulationAccepted: boolean;
   privacyAccepted: boolean;
+  attribution?: {
+    source?: string;
+    medium?: string;
+    campaign?: string;
+    term?: string;
+    content?: string;
+    utmSource?: string;
+    utmMedium?: string;
+    utmCampaign?: string;
+    referrer?: string;
+    landingPage?: string;
+  };
 };
 
 export type RegistrationErrors = Partial<Record<keyof RegistrationFormData, string>>;
@@ -235,7 +247,37 @@ export type AdminRegistrationActionResponse = {
 };
 
 export type AdminRegistrationEditable = Pick<AdminRegistration, 'fullName' | 'email' | 'phone' | 'birthDate' | 'gender' | 'shirtSize' | 'emergencyContactName' | 'emergencyContactPhone' | 'city' | 'state' | 'team'>;
-export type AdminRegistrationDetailsResponse = { registration: AdminRegistration; auditLogs: AdminAuditLog[]; paymentEvents: AdminPaymentEvent[] };
+export type AdminTimelineEvent = { id: string; type: string; title: string; occurredAt: string; actor: string; origin: string; severity: 'info' | 'success' | 'warning' | 'critical'; details: Record<string, unknown> };
+export type AdminRegistrationDetailsResponse = { registration: AdminRegistration; auditLogs: AdminAuditLog[]; paymentEvents: AdminPaymentEvent[]; timeline: AdminTimelineEvent[] };
+
+export type AdminOperationalAlert = {
+  id: string; dedupeKey: string; severity: 'info' | 'warning' | 'critical'; alertType: string;
+  title: string; message: string; entityType: string | null; entityId: string | null;
+  payload: Record<string, unknown>; status: 'open' | 'acknowledged' | 'resolved'; detectedAt: string;
+  acknowledgedAt: string | null; acknowledgedBy: string | null; resolvedAt: string | null;
+};
+export type AdminAlertsResponse = { alerts: AdminOperationalAlert[]; totals: { open: number; acknowledged: number; resolved: number; critical: number } };
+
+export type DashboardChartPoint = { label: string; count: number; amountCents: number };
+export type AdminExecutiveDashboard = {
+  generatedAt: string;
+  financial: { grossRevenueCents: number; netRevenueCents: number; refundedCents: number; estimatedFeesCents: number; feeConfigurationAvailable: boolean; todayRevenueCents: number; weekRevenueCents: number; eventRevenueCents: number; averageTicketCents: number };
+  registrations: { total: number; confirmed: number; pending: number; expired: number; cancelled: number; refunded: number; conversionRate: number };
+  checkouts: { created: number; paid: number; conversionRate: number; abandonmentRate: number };
+  lots: Array<{ id: string; name: string; priceCents: number; capacityTotal: number; confirmed: number; temporaryReservations: number; occupied: number; available: number; occupancyPercent: number; level: 'normal' | 'warning' | 'critical' | 'blocked' }>;
+  charts: { daily: DashboardChartPoint[]; hourly: DashboardChartPoint[]; cumulativeRevenue: DashboardChartPoint[]; byLot: DashboardChartPoint[]; byDistance: DashboardChartPoint[]; byCity: DashboardChartPoint[]; byGender: DashboardChartPoint[] };
+  marketing: { sources: Array<DashboardChartPoint & { total: number; paid: number; conversionRate: number; cpaCents: number | null }>; campaigns: DashboardChartPoint[]; topSource: string };
+  athletes: { byCity: DashboardChartPoint[]; byState: DashboardChartPoint[]; byGender: DashboardChartPoint[]; byDistance: DashboardChartPoint[]; byShirt: DashboardChartPoint[]; byLot: DashboardChartPoint[]; byAge: DashboardChartPoint[] };
+  recent: { payments: Array<{ id: string; registrationId: string; amountCents: number; paidAt?: string | null; updatedAt: string; gatewayStatus?: string | null }>; confirmations: Array<{ id: string; confirmedAt?: string | null; amountCents: number }>; webhooks: AdminPaymentEvent[] };
+  alerts: { active: number; critical: number; recent: AdminOperationalAlert[] };
+  reconciliation: { manualReviewRequired: number; lastRun: AdminReconciliationDashboard['runs'][number] | null };
+};
+
+export type AdminMonitoringResponse = {
+  generatedAt: string;
+  services: Array<{ id: string; label: string; status: 'operational' | 'configured' | 'degraded' | 'down' | 'disabled' | 'local'; latencyMs: number | null; detail: string }>;
+  metrics: { responseTimeMs: number; databaseQueryMs: number; memoryUsedMb: number; memoryRssMb: number; cpuUserMs: number; cpuSystemMs: number; uptimeSeconds: number; errors: number; webhooks: number; payments: number; emailsSent: number };
+};
 
 export type AdminPaymentEvent = { id: string; paymentId: string; providerEventId: string; eventType: string; payload: unknown; receivedAt: string };
 export type AdminPaymentDetailsResponse = { payment: AdminRegistration; gatewayPayload: unknown; events: AdminPaymentEvent[] };

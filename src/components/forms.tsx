@@ -27,6 +27,33 @@ const initialRegistration: RegistrationFormData = {
   privacyAccepted: false,
 };
 
+function readMarketingAttribution(): RegistrationFormData['attribution'] {
+  const params = new URLSearchParams(window.location.search);
+  const previous = sessionStorage.getItem('funpace-attribution');
+  let stored: RegistrationFormData['attribution'];
+  try {
+    stored = previous ? JSON.parse(previous) as RegistrationFormData['attribution'] : undefined;
+  } catch {
+    sessionStorage.removeItem('funpace-attribution');
+  }
+  const utmSource = params.get('utm_source') || stored?.utmSource || '';
+  const utmMedium = params.get('utm_medium') || stored?.utmMedium || '';
+  const attribution = {
+    source: params.get('source') || stored?.source || utmSource || (utmMedium.toLowerCase().includes('qr') ? 'qr-code' : ''),
+    medium: params.get('medium') || stored?.medium || utmMedium,
+    campaign: params.get('campaign') || stored?.campaign || params.get('utm_campaign') || stored?.utmCampaign || '',
+    term: params.get('utm_term') || stored?.term || '',
+    content: params.get('utm_content') || stored?.content || '',
+    utmSource,
+    utmMedium,
+    utmCampaign: params.get('utm_campaign') || stored?.utmCampaign || '',
+    referrer: stored?.referrer || document.referrer,
+    landingPage: stored?.landingPage || window.location.href.slice(0, 300),
+  };
+  sessionStorage.setItem('funpace-attribution', JSON.stringify(attribution));
+  return attribution;
+}
+
 const inputClass = 'premium-input w-full min-w-0 bg-zinc-100 p-3.5 sm:p-4 border-b-2 border-black focus:outline-none focus:bg-zinc-200 transition-colors text-sm sm:text-base';
 const errorClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-wider text-red-700 leading-relaxed';
 const labelClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-widest leading-relaxed';
@@ -34,6 +61,7 @@ const labelClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-widest l
 export function RegistrationSection() {
   const [status, setStatus] = useState<null | 'submitting' | 'checkout_pending' | 'api_error'>(null);
   const [formData, setFormData] = useState<RegistrationFormData>(initialRegistration);
+  const [attribution] = useState<RegistrationFormData['attribution']>(() => readMarketingAttribution());
   const [errors, setErrors] = useState<RegistrationErrors>({});
   const [apiMessage, setApiMessage] = useState('');
   const [registrationId, setRegistrationId] = useState('');
@@ -114,7 +142,7 @@ export function RegistrationSection() {
     setStatus('submitting');
 
     try {
-      const response = await createRegistration(formData);
+      const response = await createRegistration({ ...formData, attribution });
 
       setRegistrationId(response.registrationId);
       setApiMessage(response.message);

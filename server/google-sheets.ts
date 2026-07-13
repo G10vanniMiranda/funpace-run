@@ -5,8 +5,11 @@ import {
   enqueueGoogleSheetSync,
   failGoogleSheetSync,
   snapshot,
+  synchronizeOperationalAlertsInPostgres,
+  listOperationalAlertsInPostgres,
   type Database,
   type GoogleSheetSyncRecord,
+  type GoogleSheetSyncInput,
   CheckInRecord,
   KitDeliveryRecord,
   PaymentRecord,
@@ -18,9 +21,13 @@ const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 
 export const GOOGLE_SHEET_TABS = {
   registrations: 'Inscrições',
-  payments: 'Pagamentos',
+  payments: 'Financeiro',
   shirts: 'Camisas',
   check_in: 'Check-in',
+  lots: 'Lotes',
+  alerts: 'Alertas',
+  partnerships: 'Patrocínio',
+  emails: 'Emails enviados',
 } as const;
 
 export const GOOGLE_SHEET_HEADERS = {
@@ -29,6 +36,10 @@ export const GOOGLE_SHEET_HEADERS = {
   shirts: ['Tamanho', 'Quantidade'],
   // The last column is a technical idempotency key and should be hidden operationally.
   check_in: ['Nome', 'CPF parcial', 'Distância', 'Camisa', 'Kit entregue', 'Horário', 'Responsável', 'ID da inscrição'],
+  lots: ['Lote', 'Capacidade', 'Pagas', 'Reservadas', 'Disponíveis', 'Ocupação %', 'Atualizado em'],
+  alerts: ['Gravidade', 'Tipo', 'Título', 'Status', 'Origem', 'Responsável', 'Horário', 'ID'],
+  partnerships: ['Empresa', 'Contato', 'Cargo', 'E-mail', 'Status', 'Origem', 'Criado em', 'ID'],
+  emails: ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro'],
 } as const;
 
 export type GoogleSheetsConfig = {
@@ -546,6 +557,39 @@ export async function executeGoogleSheetSyncTask(
     return { action: 'replaced' as const, rowNumber: null };
   }
 
+  if (task.entityType === 'lot_summary') {
+    const now = new Date();
+    const rows = database.lots.slice().sort((a, b) => a.orderIndex - b.orderIndex).map((lot) => {
+      const related = database.registrations.filter((registration) => registration.lotId === lot.id);
+      const confirmed = related.filter((registration) => registration.status === 'paid').length;
+      const reserved = related.filter((registration) => registration.status === 'pending_payment' && (!registration.expiresAt || new Date(registration.expiresAt) > now)).length;
+      const occupied = confirmed + reserved;
+      return [lot.name, lot.capacity, confirmed, reserved, Math.max(lot.capacity - occupied, 0), lot.capacity ? Number((occupied / lot.capacity * 100).toFixed(1)) : 0, now.toISOString()] as SheetCell[];
+    });
+    await client.replaceRows('lots', rows); return { action: 'replaced' as const, rowNumber: null };
+  }
+
+  if (task.entityType === 'partnership') {
+    const lead = database.partnershipLeads.find((item) => item.id === task.entityId);
+    if (!lead) throw new Error(`Parceria ${task.entityId} não encontrada.`);
+    const row: SheetCell[] = [sanitizeSheetText(lead.companyName), sanitizeSheetText(lead.contactName), sanitizeSheetText(lead.contactRole), sanitizeSheetText(lead.corporateEmail), lead.status, lead.source, lead.createdAt, lead.id];
+    return client.upsertRow('partnerships', row, 7, lead.id, task.rowNumber);
+  }
+
+  if (task.entityType === 'email') {
+    const registration = database.registrations.find((item) => item.id === task.entityId);
+    if (!registration) throw new Error(`Inscrição ${task.entityId} não encontrada.`);
+    const row: SheetCell[] = [registration.confirmationEmailSentAt || registration.confirmationEmailLastAttemptAt || registration.updatedAt, registration.id, sanitizeSheetText(registration.payload.email), registration.confirmationEmailSentAt ? 'enviado' : 'falhou', registration.confirmationEmailProvider || '', registration.confirmationEmailId || '', sanitizeSheetText(registration.confirmationEmailError)];
+    return client.upsertRow('emails', row, 1, registration.id, task.rowNumber);
+  }
+
+  if (task.entityType === 'alert') {
+    const alert = (await listOperationalAlertsInPostgres()).find((item) => item.id === task.entityId);
+    if (!alert) throw new Error(`Alerta ${task.entityId} não encontrado.`);
+    const row: SheetCell[] = [alert.severity, alert.alertType, sanitizeSheetText(alert.title), alert.status, alert.entityType || '', alert.acknowledgedBy || '', alert.detectedAt, alert.id];
+    return client.upsertRow('alerts', row, 7, alert.id, task.rowNumber);
+  }
+
   throw new Error(`Tipo de sincronização não suportado: ${task.entityType}.`);
 }
 
@@ -612,6 +656,7 @@ export async function queueConfirmedPaymentGoogleSheetSync(
     { entityType: 'registration', entityId: registrationId, sheetName: 'registrations', operation: 'upsert' },
     { entityType: 'payment', entityId: paymentId, sheetName: 'payments', operation: 'upsert' },
     { entityType: 'shirt_summary', entityId: 'paid-registrations', sheetName: 'shirts', operation: 'replace' },
+    { entityType: 'lot_summary', entityId: 'all-lots', sheetName: 'lots', operation: 'replace' },
   ] as const;
   const queued: GoogleSheetSyncRecord[] = [];
 
@@ -681,6 +726,16 @@ export async function queueCheckInGoogleSheetSync(
   }
 }
 
+async function queueProjection(input: GoogleSheetSyncInput, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) {
+  const config = dependencies.config || getGoogleSheetsConfig(); if (!config.enabled) return null;
+  try { return await (dependencies.enqueue || enqueueGoogleSheetSync)(input); }
+  catch (error) { console.error(JSON.stringify({ at: new Date().toISOString(), message: 'google_sheets_projection_queue_failed', ...input, error: error instanceof Error ? error.message : String(error) })); return null; }
+}
+
+export function queueLotSummaryGoogleSheetSync(dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'lot_summary', entityId: 'all-lots', sheetName: 'lots', operation: 'replace' }, dependencies); }
+export function queuePartnershipGoogleSheetSync(partnershipId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'partnership', entityId: partnershipId, sheetName: 'partnerships', operation: 'upsert' }, dependencies); }
+export function queueEmailGoogleSheetSync(registrationId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'email', entityId: registrationId, sheetName: 'emails', operation: 'upsert' }, dependencies); }
+
 export async function processQueuedGoogleSheetSyncs(tasks: ReadonlyArray<Pick<GoogleSheetSyncRecord, 'id'>>) {
   const results = [];
   for (const task of tasks) {
@@ -712,6 +767,11 @@ export async function processGoogleSheetSync(
       syncId,
       error: error instanceof Error ? error.message.slice(0, 500) : 'Unknown error',
     }));
+    await synchronizeOperationalAlertsInPostgres([{
+      dedupeKey: `google-sheets:claim:${syncId}`, severity: 'warning', alertType: 'google_sheets_error',
+      title: 'Erro no Google Sheets', message: error instanceof Error ? error.message.slice(0, 500) : 'Falha na sincronização.',
+      entityType: 'google_sheet_sync', entityId: syncId, payload: { stage: 'claim' },
+    }]).catch(() => undefined);
     return { status: 'failed' as const };
   }
   if (!task) return { status: 'skipped' as const, reason: 'not_claimable' as const };

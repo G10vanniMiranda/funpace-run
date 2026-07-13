@@ -205,11 +205,11 @@ test('creates missing tabs and initializes their headers', async () => {
 
   const result = await client.ensureSpreadsheetStructure();
 
-  assert.equal(result.createdSheets.length, 4);
+  assert.equal(result.createdSheets.length, 8);
   const batchCall = calls.find((call) => call.url.endsWith(':batchUpdate'));
   assert.ok(batchCall);
-  assert.equal(JSON.parse(String(batchCall.init?.body)).requests.length, 4);
-  assert.equal(calls.filter((call) => call.init?.method === 'PUT').length, 4);
+  assert.equal(JSON.parse(String(batchCall.init?.body)).requests.length, 8);
+  assert.equal(calls.filter((call) => call.init?.method === 'PUT').length, 8);
 });
 
 test('refuses to overwrite an unexpected header', async () => {
@@ -440,11 +440,12 @@ test('queues registration, payment and shirt summary after confirmation', async 
     },
   });
 
-  assert.equal(tasks.length, 3);
+  assert.equal(tasks.length, 4);
   assert.deepEqual(received, [
     { entityType: 'registration', entityId: registration.id, sheetName: 'registrations', operation: 'upsert' },
     { entityType: 'payment', entityId: payment.id, sheetName: 'payments', operation: 'upsert' },
     { entityType: 'shirt_summary', entityId: 'paid-registrations', sheetName: 'shirts', operation: 'replace' },
+    { entityType: 'lot_summary', entityId: 'all-lots', sheetName: 'lots', operation: 'replace' },
   ]);
 });
 
@@ -466,8 +467,8 @@ test('continues queuing remaining payment projections after one outbox failure',
     },
   });
 
-  assert.equal(attempt, 3);
-  assert.deepEqual(tasks.map((task) => task.entityType), ['registration', 'shirt_summary']);
+  assert.equal(attempt, 4);
+  assert.deepEqual(tasks.map((task) => task.entityType), ['registration', 'shirt_summary', 'lot_summary']);
 });
 
 test('queues check-in projection with registration as idempotency key', async () => {

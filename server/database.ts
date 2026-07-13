@@ -97,9 +97,9 @@ export type PaymentEventRecord = {
 
 export type GoogleSheetSyncRecord = {
   id: string;
-  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary';
+  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary' | 'lot_summary' | 'alert' | 'partnership' | 'email';
   entityId: string;
-  sheetName: 'registrations' | 'payments' | 'shirts' | 'check_in';
+  sheetName: 'registrations' | 'payments' | 'shirts' | 'check_in' | 'lots' | 'alerts' | 'partnerships' | 'emails';
   operation: 'upsert' | 'replace';
   status: 'pending' | 'processing' | 'synchronized' | 'failed';
   rowNumber: number | null;
@@ -551,9 +551,9 @@ async function ensurePostgresDatabase(client: Queryable) {
 
     create table if not exists ${table.googleSheetSyncs} (
       id text primary key,
-      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary')),
+      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email')),
       entity_id text not null,
-      sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in')),
+      sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in', 'lots', 'alerts', 'partnerships', 'emails')),
       operation text not null check (operation in ('upsert', 'replace')),
       status text not null check (status in ('pending', 'processing', 'synchronized', 'failed')),
       row_number integer,
@@ -834,6 +834,13 @@ async function expireTemporaryReservations(client: Queryable, now: string) {
         `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
          values ($1, 'system', 'lot.reservation.expired', 'registration', $2, $3, $4)`,
         [randomUUID(), row.id, { lotId: row.lot_id, releasedAt: now }, now],
+      );
+      await client.query(
+        `insert into ${table.operationalAlerts}
+         (id, dedupe_key, severity, alert_type, title, message, entity_type, entity_id, payload, status, detected_at)
+         values ($1,$2,'info','checkout_expired','Checkout expirado','A reserva temporária foi liberada automaticamente.','registration',$3,$4,'open',$5)
+         on conflict (dedupe_key) do nothing`,
+        [randomUUID(), `checkout-expired:${row.id}`, row.id, { lotId: row.lot_id, releasedAt: now }, now],
       );
     }
   }
@@ -2175,6 +2182,115 @@ export async function getReconciliationDashboardInPostgres() {
       resolvedAt: row.resolved_at, resolutionNotes: row.resolution_notes,
     })),
   };
+}
+
+export type OperationalAlertRecord = {
+  id: string;
+  dedupeKey: string;
+  severity: 'info' | 'warning' | 'critical';
+  alertType: string;
+  title: string;
+  message: string;
+  entityType: string | null;
+  entityId: string | null;
+  payload: Record<string, unknown>;
+  status: 'open' | 'acknowledged' | 'resolved';
+  detectedAt: string;
+  acknowledgedAt: string | null;
+  acknowledgedBy: string | null;
+  resolvedAt: string | null;
+};
+
+function mapOperationalAlert(row: Record<string, unknown>): OperationalAlertRecord {
+  return {
+    id: String(row.id), dedupeKey: String(row.dedupe_key), severity: row.severity as OperationalAlertRecord['severity'],
+    alertType: String(row.alert_type), title: String(row.title), message: String(row.message),
+    entityType: row.entity_type ? String(row.entity_type) : null, entityId: row.entity_id ? String(row.entity_id) : null,
+    payload: (row.payload || {}) as Record<string, unknown>, status: row.status as OperationalAlertRecord['status'],
+    detectedAt: String(row.detected_at), acknowledgedAt: row.acknowledged_at ? String(row.acknowledged_at) : null,
+    acknowledgedBy: row.acknowledged_by ? String(row.acknowledged_by) : null, resolvedAt: row.resolved_at ? String(row.resolved_at) : null,
+  };
+}
+
+export async function synchronizeOperationalAlertsInPostgres(alerts: Array<{
+  dedupeKey: string; severity: 'info' | 'warning' | 'critical'; alertType: string; title: string; message: string;
+  entityType?: string | null; entityId?: string | null; payload?: Record<string, unknown>;
+}>) {
+  const client = await requirePool().connect();
+  const now = new Date().toISOString();
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    for (const alert of alerts) {
+      const persisted = await client.query(
+        `insert into ${table.operationalAlerts}
+         (id, dedupe_key, severity, alert_type, title, message, entity_type, entity_id, payload, status, detected_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'open',$10)
+         on conflict (dedupe_key) do update set
+           severity = excluded.severity, title = excluded.title, message = excluded.message,
+           payload = excluded.payload,
+           status = case when ${table.operationalAlerts}.status = 'resolved' then 'resolved' else ${table.operationalAlerts}.status end
+         returning id`,
+        [randomUUID(), alert.dedupeKey, alert.severity, alert.alertType, alert.title, alert.message, alert.entityType || null, alert.entityId || null, alert.payload || {}, now],
+      );
+      if (process.env.GOOGLE_SHEETS_ENABLED === 'true' && persisted.rows[0]?.id) {
+        await client.query(
+          `insert into ${table.googleSheetSyncs}
+           (id,entity_type,entity_id,sheet_name,operation,status,row_number,attempts,last_attempt_at,synchronized_at,last_error,created_at,updated_at)
+           values ($1,'alert',$2,'alerts','upsert','pending',null,0,null,null,null,$3,$3)
+           on conflict (entity_type,entity_id,sheet_name) do update set status=case when ${table.googleSheetSyncs}.status='processing' then 'processing' else 'pending' end, updated_at=excluded.updated_at`,
+          [randomUUID(), persisted.rows[0].id, now],
+        );
+      }
+    }
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally { client.release(); }
+}
+
+export async function listOperationalAlertsInPostgres(filters: { status?: string; severity?: string; type?: string } = {}) {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `select * from ${table.operationalAlerts}
+     where ($1 = '' or status = $1) and ($2 = '' or severity = $2) and ($3 = '' or alert_type = $3)
+     order by case severity when 'critical' then 1 when 'warning' then 2 else 3 end, detected_at desc limit 500`,
+    [filters.status || '', filters.severity || '', filters.type || ''],
+  );
+  return result.rows.map(mapOperationalAlert);
+}
+
+export async function updateOperationalAlertInPostgres(input: {
+  id: string; status: 'acknowledged' | 'resolved'; actor: string; actorRole: string;
+  sessionId: string; ipAddress: string | null; userAgent: string | null; resolution: string;
+}) {
+  const client = await requirePool().connect();
+  const now = new Date().toISOString();
+  try {
+    await ensurePostgresReady(); await client.query('begin');
+    const result = await client.query(
+      `update ${table.operationalAlerts} set status=$1,
+       acknowledged_at=coalesce(acknowledged_at,$2), acknowledged_by=coalesce(acknowledged_by,$3),
+       resolved_at=case when $1='resolved' then $2 else resolved_at end,
+       payload=payload || $4::jsonb where id=$5 returning *`,
+      [input.status, now, input.actor, JSON.stringify({ resolution: input.resolution }), input.id],
+    );
+    if (!result.rows[0]) { await client.query('rollback'); return null; }
+    await client.query(
+      `insert into ${table.auditLogs} (id,actor,actor_role,action,entity_type,entity_id,payload,session_id,ip_address,user_agent,created_at)
+       values ($1,$2,$3,'alert.updated','alert',$4,$5,$6,$7,$8,$9)`,
+      [randomUUID(), input.actor, input.actorRole, input.id, { status: input.status, resolution: input.resolution }, input.sessionId, input.ipAddress, input.userAgent, now],
+    );
+    await client.query('commit'); return mapOperationalAlert(result.rows[0]);
+  } catch (error) { await client.query('rollback').catch(() => undefined); throw error; }
+  finally { client.release(); }
+}
+
+export async function createCriticalOperationalAlertInPostgres(input: {
+  dedupeKey: string; alertType: string; title: string; message: string; payload?: Record<string, unknown>;
+}) {
+  return synchronizeOperationalAlertsInPostgres([{ ...input, severity: 'critical', entityType: 'system', entityId: input.dedupeKey }]);
 }
 
 function findPaymentMethod(value: unknown, depth = 0): string | null {
