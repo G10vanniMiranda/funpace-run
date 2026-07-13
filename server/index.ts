@@ -14,9 +14,12 @@ import {
   createPendingRegistrationInPostgres,
   findAdminSessionInPostgres,
   findAdminUserInPostgres,
+  expireTemporaryReservationsInPostgres,
   getDatabaseConfigurationIssue,
   getDatabaseRuntimeConfig,
   markPaymentCreationFailedInPostgres,
+  getReconciliationDashboardInPostgres,
+  persistReconciliationRunInPostgres,
   pingDatabase,
   revokeAdminSessionInPostgres,
   selectLotForRegistrationNumber,
@@ -40,6 +43,8 @@ import {
   queueRegistrationGoogleSheetSync,
 } from './google-sheets.js';
 import { checkInfinitePayPayment, createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
+import { calculateLotCapacity, selectLotWithAvailability, synchronizeLotProjections } from './lot-capacity.js';
+import { detectLocalReconciliationIssues, generateReconciliationReport } from './payment-reconciliation.js';
 
 const port = Number(process.env.API_PORT || 3001);
 const defaultAllowedOrigins = [
@@ -716,31 +721,13 @@ function getRegistrationExpiresAt(registration: RegistrationRecord) {
 }
 
 function releaseRegistrationCapacity(database: Database, registration: RegistrationRecord) {
-  const lot = database.lots.find((item) => item.id === registration.lotId);
-
-  if (lot && lot.soldCount > 0) {
-    lot.soldCount -= 1;
-
-    if (lot.status === 'sold_out' && lot.soldCount < lot.capacity) {
-      lot.status = 'active';
-    }
-  }
+  void registration;
+  synchronizeLotProjections(database);
 }
 
 function claimRegistrationCapacity(database: Database, registration: RegistrationRecord) {
-  const lot = database.lots.find((item) => item.id === registration.lotId);
-
-  if (!lot) {
-    return;
-  }
-
-  lot.soldCount += 1;
-
-  if (lot.soldCount >= lot.capacity && !lot.continuesAfterCapacity) {
-    lot.status = 'sold_out';
-  } else {
-    lot.status = 'active';
-  }
+  void registration;
+  synchronizeLotProjections(database);
 }
 
 function ensureRegistrationBibNumber(database: Database, registration: RegistrationRecord) {
@@ -1336,7 +1323,6 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         || existingPayment.amountCents !== existingLot.priceCents;
 
       if (isStalePending) {
-        releaseRegistrationCapacity(database, existing);
         existing.status = 'expired';
         existing.updatedAt = new Date().toISOString();
         existing.expiresAt ||= existing.updatedAt;
@@ -1348,6 +1334,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
           existingPayment.updatedAt = existing.updatedAt;
           existingPayment.expiresAt ||= existing.updatedAt;
         }
+        releaseRegistrationCapacity(database, existing);
       }
     }
 
@@ -1387,12 +1374,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     }
 
     const distance = database.distances.find((item) => item.eventId === event.id && item.name === payload.distance && item.status === 'active');
-    const configuredLots = database.lots.filter((item) => item.eventId === event.id && ['active', 'sold_out'].includes(item.status));
-    const eventPaid = database.registrations.filter((item) => (
-      item.eventId === event.id && item.status === 'paid'
-    )).length;
-    const previousLot = eventPaid > 0 ? selectLotForRegistrationNumber(configuredLots, eventPaid) : null;
-    const activeLot = selectLotForRegistrationNumber(configuredLots, eventPaid + 1);
+    const activeLot = selectLotWithAvailability(database.lots, database.registrations, event.id);
 
     if (!distance || !activeLot) {
       return {
@@ -1463,25 +1445,13 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       gatewayPayload: null,
     };
 
-    claimRegistrationCapacity(database, registration);
     database.registrations.push(registration);
     database.payments.push(payment);
-    if (previousLot && previousLot.id !== activeLot.id) {
-      database.auditLogs.push(createAuditLog(req, null, {
-        action: 'lot.changed',
-        entityType: 'lot',
-        entityId: activeLot.id,
-        payload: {
-          previousLotId: previousLot.id,
-          previousLotName: previousLot.name,
-          newLotId: activeLot.id,
-          newLotName: activeLot.name,
-          registrationNumber: eventPaid + 1,
-          registrationId: registration.id,
-        },
-        createdAt: now,
-      }));
-    }
+    claimRegistrationCapacity(database, registration);
+    database.auditLogs.push(createAuditLog(req, null, {
+      action: 'lot.reservation.created', entityType: 'registration', entityId: registration.id,
+      payload: { lotId: activeLot.id, lotName: activeLot.name, expiresAt }, createdAt: now,
+    }));
 
     return {
       statusCode: 201,
@@ -1895,12 +1865,6 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     }
 
     const previousStatus = registration.status;
-    const wasExpired = previousStatus === 'expired';
-    const shouldReleaseCapacity = (
-      ['pending_payment', 'paid'].includes(previousStatus)
-      && ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(nextStatus)
-    );
-
     registration.status = nextStatus;
     registration.updatedAt = now;
 
@@ -1910,11 +1874,6 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       registration.confirmedAt = registration.confirmedAt || now;
       ensureRegistrationBibNumber(database, registration);
 
-      if (wasExpired) {
-        claimRegistrationCapacity(database, registration);
-      }
-    } else if (shouldReleaseCapacity) {
-      releaseRegistrationCapacity(database, registration);
     }
 
     if (payment) {
@@ -1928,6 +1887,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       payment.gatewayTransactionId = normalizedEvent.providerTransactionId || payment.gatewayTransactionId || null;
       payment.gatewayPayload = event;
     }
+    synchronizeLotProjections(database);
 
     if (!isDuplicatedEvent) {
       database.paymentEvents.push({
@@ -2028,25 +1988,24 @@ async function handleGetAvailability(_req: IncomingMessage, res: ServerResponse)
     return;
   }
 
-  const paidRegistrations = database.registrations.filter((registration) => (
-    registration.eventId === event.id && registration.status === 'paid'
-  ));
-  const commercialLots = database.lots
-    .filter((lot) => lot.eventId === event.id && ['active', 'sold_out'].includes(lot.status))
-    .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0));
-  const currentLot = selectLotForRegistrationNumber(commercialLots, paidRegistrations.length + 1);
   const lots = database.lots
     .filter((item) => item.eventId === event.id)
     .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0))
-    .map((lot) => ({
+    .map((lot) => {
+      const capacity = calculateLotCapacity(lot, database.registrations);
+      return ({
       id: lot.id,
       name: lot.name,
       priceCents: lot.priceCents,
       capacity: lot.capacity,
-      soldCount: lot.soldCount,
-      remaining: Math.max(lot.capacity - lot.soldCount, 0),
-      status: lot.id === currentLot?.id ? 'active' : lot.status === 'active' ? 'inactive' : lot.status,
-    }));
+      soldCount: capacity.confirmed,
+      confirmed: capacity.confirmed,
+      temporaryReservations: capacity.temporaryReservations,
+      occupied: capacity.occupied,
+      remaining: capacity.available,
+      available: capacity.available,
+      status: capacity.available === 0 ? 'sold_out' : lot.status,
+    }); });
   const distances = database.distances
     .filter((item) => item.eventId === event.id)
     .map((distance) => {
@@ -2431,9 +2390,9 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
     if (check.amountCents !== null && check.amountCents !== registration.amountCents) return { statusCode: 409, payload: { message: 'Valor do pagamento divergente.' } };
     const now = new Date().toISOString();
     const previousStatus = registration.status;
-    if (['payment_failed', 'expired', 'cancelled', 'refunded'].includes(previousStatus)) claimRegistrationCapacity(database, registration);
     registration.status = 'paid'; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null; ensureRegistrationBibNumber(database, registration); registration.updatedAt = now;
     payment.status = 'paid'; payment.provider = 'infinitepay'; payment.providerPaymentId = slug; payment.gatewayTransactionId = transactionNsu; payment.gatewayStatus = 'verified_paid'; payment.gatewayPayload = check.raw; payment.paidAt ||= now; payment.expiresAt = null; payment.updatedAt = now;
+    claimRegistrationCapacity(database, registration);
     database.auditLogs.push({ id: randomUUID(), actor: 'system', action: 'payment.redirect_reconciled', entityType: 'registration', entityId: orderNsu, payload: { previousStatus, transactionNsu, invoiceSlug: slug }, createdAt: now });
     return { statusCode: 200, status: 'paid', registrationId: orderNsu, paymentId: payment.id, payload: { status: 'paid' } };
   }, { scope: 'checkout' });
@@ -2455,6 +2414,41 @@ function isAuthorizedCron(req: IncomingMessage) {
   return Boolean(cronSecret && authorization && safeSecretEqual(authorization, `Bearer ${cronSecret}`));
 }
 
+async function persistCurrentReconciliation(triggerSource: string, mode: 'dry_run' | 'apply', createdBy: string) {
+  const startedAt = new Date().toISOString();
+  const database = await transaction((current) => current, { persist: false, scope: 'checkout' });
+  const issues = detectLocalReconciliationIssues(database);
+  const report = generateReconciliationReport(issues);
+  const completedAt = new Date().toISOString();
+  if (usesPostgresDatabase()) {
+    await persistReconciliationRunInPostgres({
+      id: randomUUID(), triggerSource, mode,
+      checkedCount: database.payments.length,
+      correctedCount: 0,
+      manualReviewCount: report.manualReviewRequired,
+      errorCount: 0,
+      summary: report,
+      startedAt, completedAt, createdBy, issues,
+    });
+  }
+  return { ...report, checkedCount: database.payments.length, startedAt, completedAt };
+}
+
+async function handleAdminReconciliation(req: IncomingMessage, res: ServerResponse, execute: boolean) {
+  const session = await requireAdmin(req, res, ['administrator', 'finance']);
+  if (!session || !requireAdminDatabase(res)) return;
+  if (!execute) {
+    json(res, 200, await getReconciliationDashboardInPostgres());
+    return;
+  }
+  const body = parseJsonBody<{ mode?: 'dry_run' | 'apply' }>(await readBody(req)) || {};
+  const mode = body.mode === 'apply' ? 'apply' : 'dry_run';
+  // Only gateway-proven changes are ever applied by the recovery flow. This run
+  // classifies ambiguous history and deliberately leaves it untouched.
+  const report = await persistCurrentReconciliation('admin', mode, session.actor);
+  json(res, 200, { success: true, mode, correctedCount: 0, ...report });
+}
+
 async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) {
   if (!isAuthorizedCron(req)) {
     json(res, cronSecret ? 401 : 503, { message: cronSecret ? 'Nao autorizado.' : 'CRON_SECRET nao configurado.' });
@@ -2462,6 +2456,7 @@ async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) 
   }
 
   const startedAt = Date.now();
+  const expiredReservations = usesPostgresDatabase() ? await expireTemporaryReservationsInPostgres() : 0;
   const database = await transaction((current) => current, { persist: false, scope: 'checkout' });
   const recoverable = database.payments.filter((payment) => {
     const registration = database.registrations.find((item) => item.id === payment.registrationId);
@@ -2472,7 +2467,7 @@ async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) 
       && payment.provider === 'infinitepay';
   }).slice(0, 5);
 
-  const summary = { checked: 0, confirmed: 0, alreadyPending: 0, errors: 0, emailsRecovered: 0 };
+  const summary = { checked: 0, confirmed: 0, alreadyPending: 0, errors: 0, emailsRecovered: 0, expiredReservations };
 
   for (const payment of recoverable) {
     const registration = database.registrations.find((item) => item.id === payment.registrationId)!;
@@ -2532,7 +2527,8 @@ async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) 
   }
 
   console.log(JSON.stringify({ at: new Date().toISOString(), message: 'payment_recovery_completed', ...summary, elapsedMs: Date.now() - startedAt }));
-  json(res, 200, { success: true, ...summary, elapsedMs: Date.now() - startedAt });
+  const reconciliation = await persistCurrentReconciliation('cron', 'apply', 'system:cron');
+  json(res, 200, { success: true, ...summary, reconciliation, elapsedMs: Date.now() - startedAt });
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -2584,22 +2580,24 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     accumulator[registration.payload.shirtSize] = (accumulator[registration.payload.shirtSize] || 0) + 1;
     return accumulator;
   }, {})).map(([size, total]) => ({ size, total }));
-  const commercialLots = database.lots
-    .filter((lot) => ['active', 'sold_out'].includes(lot.status))
-    .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0));
-  const currentLot = selectLotForRegistrationNumber(commercialLots, paid.length + 1);
   const lots = database.lots
     .slice()
     .sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0))
-    .map((lot) => ({
+    .map((lot) => {
+      const capacity = calculateLotCapacity(lot, database.registrations);
+      return ({
       id: lot.id,
       name: lot.name,
       capacity: lot.capacity,
-      soldCount: lot.soldCount,
-      remaining: Math.max(lot.capacity - lot.soldCount, 0),
+      soldCount: capacity.confirmed,
+      confirmed: capacity.confirmed,
+      temporaryReservations: capacity.temporaryReservations,
+      occupied: capacity.occupied,
+      remaining: capacity.available,
+      available: capacity.available,
       priceCents: lot.priceCents,
-      status: lot.id === currentLot?.id ? 'active' : lot.status === 'active' ? 'inactive' : lot.status,
-    }));
+      status: capacity.available === 0 ? 'sold_out' : lot.status,
+    }); });
 
   json(res, 200, {
     totals: {
@@ -2949,9 +2947,9 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
     const now = new Date().toISOString(); const actor = adminSession.actor;
     if (action === 'cancel') {
       if (['cancelled', 'refunded'].includes(registration.status)) return { statusCode: 409, payload: { message: 'Inscricao ja encerrada.' } };
-      if (['pending_payment', 'paid'].includes(registration.status)) releaseRegistrationCapacity(database, registration);
       registration.status = 'cancelled'; registration.updatedAt = now;
       const payment = database.payments.find((item) => item.registrationId === registrationId); if (payment) { payment.status = 'cancelled'; payment.updatedAt = now; }
+      releaseRegistrationCapacity(database, registration);
     } else if (action === 'undo-check-in') {
       const undoCheckInMessage = canUndoCheckIn(database.checkIns.some((item) => item.registrationId === registrationId));
       if (undoCheckInMessage) {
@@ -3444,6 +3442,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       await handleAdminSummary(req, res);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/admin/reconciliation') { await handleAdminReconciliation(req, res, false); return; }
+    if (req.method === 'POST' && url.pathname === '/api/admin/reconciliation/run') { await handleAdminReconciliation(req, res, true); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/google-sheets/status') { await handleAdminGoogleSheetsStatus(req, res); return; }
     if (req.method === 'POST' && url.pathname === '/api/admin/google-sheets/check') { await handleAdminGoogleSheetsCheck(req, res); return; }
     if (req.method === 'POST' && url.pathname === '/api/admin/google-sheets/retry') { await handleAdminGoogleSheetsRetry(req, res); return; }

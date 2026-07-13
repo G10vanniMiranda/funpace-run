@@ -4,6 +4,7 @@ import { loadEnvFile } from 'node:process';
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
+import { selectAvailableLotCandidate } from './lot-capacity.js';
 
 const { Pool } = pg;
 
@@ -301,6 +302,9 @@ const table = {
   adminSessions: '"run-admin-sessions"',
   adminUsers: '"run-admin-users"',
   partnershipLeads: '"run-partnership-leads"',
+  reconciliationRuns: '"run-reconciliation-runs"',
+  paymentReconciliations: '"run-payment-reconciliations"',
+  operationalAlerts: '"run-operational-alerts"',
 } as const;
 
 const initialDatabase: Database = {
@@ -629,6 +633,58 @@ async function ensurePostgresDatabase(client: Queryable) {
       updated_at text not null
     );
 
+    create table if not exists ${table.reconciliationRuns} (
+      id text primary key,
+      trigger_source text not null,
+      mode text not null check (mode in ('dry_run', 'apply')),
+      status text not null check (status in ('running', 'completed', 'failed')),
+      checked_count integer not null default 0,
+      corrected_count integer not null default 0,
+      manual_review_count integer not null default 0,
+      error_count integer not null default 0,
+      summary jsonb not null default '{}'::jsonb,
+      started_at text not null,
+      completed_at text,
+      created_by text not null
+    );
+
+    create table if not exists ${table.paymentReconciliations} (
+      id text primary key,
+      run_id text references ${table.reconciliationRuns}(id),
+      issue_key text not null unique,
+      issue_code text not null,
+      severity text not null check (severity in ('info', 'warning', 'critical')),
+      resolution_status text not null check (resolution_status in ('consistent', 'automatically_corrected', 'manual_review_required', 'resolved')),
+      registration_id text references ${table.registrations}(id),
+      payment_id text references ${table.payments}(id),
+      gateway_transaction_id text,
+      expected_amount_cents integer,
+      gateway_amount_cents integer,
+      details jsonb not null default '{}'::jsonb,
+      first_detected_at text not null,
+      last_detected_at text not null,
+      resolved_at text,
+      resolved_by text,
+      resolution_notes text
+    );
+
+    create table if not exists ${table.operationalAlerts} (
+      id text primary key,
+      dedupe_key text not null unique,
+      severity text not null check (severity in ('info', 'warning', 'critical')),
+      alert_type text not null,
+      title text not null,
+      message text not null,
+      entity_type text,
+      entity_id text,
+      payload jsonb not null default '{}'::jsonb,
+      status text not null check (status in ('open', 'acknowledged', 'resolved')),
+      detected_at text not null,
+      acknowledged_at text,
+      acknowledged_by text,
+      resolved_at text
+    );
+
     create index if not exists "run-registrations_cpf_hash_idx" on ${table.registrations}(cpf_hash);
     create index if not exists "run-registrations_status_idx" on ${table.registrations}(status);
     create index if not exists "run-payments_registration_id_idx" on ${table.payments}(registration_id);
@@ -643,6 +699,9 @@ async function ensurePostgresDatabase(client: Queryable) {
     create unique index if not exists "run-admin-users_email_idx" on ${table.adminUsers}(email);
     create index if not exists "run-partnership-leads_status_idx" on ${table.partnershipLeads}(status);
     create index if not exists "run-partnership-leads_created_at_idx" on ${table.partnershipLeads}(created_at);
+    create index if not exists "run-reconciliation-runs_started_idx" on ${table.reconciliationRuns}(started_at desc);
+    create index if not exists "run-payment-reconciliations_status_idx" on ${table.paymentReconciliations}(resolution_status, severity);
+    create index if not exists "run-operational-alerts_status_idx" on ${table.operationalAlerts}(status, severity, detected_at desc);
   `);
 
   await client.query(`alter table ${table.registrations} add column if not exists expires_at text`);
@@ -746,6 +805,56 @@ async function ensurePostgresReady() {
   }
 
   await postgresReady;
+}
+
+async function expireTemporaryReservations(client: Queryable, now: string) {
+  const expired = await client.query(
+    `update ${table.registrations} registration
+     set status = 'expired', updated_at = $1
+     from ${table.payments} payment
+     where payment.registration_id = registration.id
+       and registration.status = 'pending_payment'
+       and registration.expires_at is not null
+       and registration.expires_at::timestamptz <= $1::timestamptz
+       and payment.status <> 'paid'
+       and payment.paid_at is null
+     returning registration.id, registration.lot_id`,
+    [now],
+  );
+  if (expired.rows.length) {
+    const ids = expired.rows.map((row) => String(row.id));
+    await client.query(
+      `update ${table.payments}
+       set status = 'expired', updated_at = $1
+       where registration_id = any($2::text[]) and status <> 'paid' and paid_at is null`,
+      [now, ids],
+    );
+    for (const row of expired.rows) {
+      await client.query(
+        `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+         values ($1, 'system', 'lot.reservation.expired', 'registration', $2, $3, $4)`,
+        [randomUUID(), row.id, { lotId: row.lot_id, releasedAt: now }, now],
+      );
+    }
+  }
+  return expired.rows.length;
+}
+
+export async function expireTemporaryReservationsInPostgres() {
+  const client = await requirePool().connect();
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
+    const expiredCount = await expireTemporaryReservations(client, new Date().toISOString());
+    await client.query('commit');
+    return expiredCount;
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope = 'all'): Promise<Database> {
@@ -1347,6 +1456,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
     await client.query("set local lock_timeout = '5s'");
     await client.query("set local statement_timeout = '15s'");
+    await expireTemporaryReservations(client, new Date().toISOString());
 
     const eventResult = await client.query(
       `select id from ${table.events} where slug = $1 and status = $2 limit 1`,
@@ -1389,12 +1499,6 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     if (stalePendingResult.rows.length > 0) {
       const now = new Date().toISOString();
       const staleIds = stalePendingResult.rows.map((row) => String(row.id));
-      const staleLotCounts = stalePendingResult.rows.reduce<Record<string, number>>((accumulator, row) => {
-        const lotId = String(row.lot_id);
-        accumulator[lotId] = (accumulator[lotId] || 0) + 1;
-        return accumulator;
-      }, {});
-
       await client.query(
         `update ${table.registrations}
          set status = 'expired',
@@ -1413,15 +1517,6 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
          where registration_id = any($2::text[])`,
         [now, staleIds],
       );
-
-      for (const [lotId, total] of Object.entries(staleLotCounts)) {
-        await client.query(
-          `update ${table.lots}
-           set sold_count = greatest(sold_count - $1::int, 0)
-           where id = $2`,
-          [total, lotId],
-        );
-      }
     }
 
     const existingResult = await client.query(
@@ -1492,16 +1587,30 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     }
 
     const distanceSoldResult = await client.query(
-      `select count(*)::int as count from ${table.registrations} where distance_id = $1 and status = any($2)`,
-      [distance.id, ['pending_payment', 'paid']],
+      `select count(*)::int as count from ${table.registrations}
+       where distance_id = $1
+         and (status = 'paid' or (status = 'pending_payment' and (expires_at is null or expires_at::timestamptz > now())))`,
+      [distance.id],
     );
     const distanceSold = Number(distanceSoldResult.rows[0]?.count || 0);
 
-    const eventPaidResult = await client.query(
-      `select count(*)::int as count from ${table.registrations} where event_id = $1 and status = $2`,
-      [event.id, 'paid'],
+    const lotOccupancyResult = await client.query(
+      `select lot.id,
+              count(registration.id) filter (where registration.status = 'paid')::int as confirmed,
+              count(registration.id) filter (
+                where registration.status = 'pending_payment'
+                  and (registration.expires_at is null or registration.expires_at::timestamptz > now())
+              )::int as temporary_reservations
+       from ${table.lots} lot
+       left join ${table.registrations} registration on registration.lot_id = lot.id
+       where lot.event_id = $1
+       group by lot.id`,
+      [event.id],
     );
-    const eventPaid = Number(eventPaidResult.rows[0]?.count || 0);
+    const occupancyByLot = new Map(lotOccupancyResult.rows.map((row) => [String(row.id), {
+      confirmed: Number(row.confirmed || 0),
+      temporaryReservations: Number(row.temporary_reservations || 0),
+    }]));
     const configuredLots = lotResult.rows.map((row) => ({
       id: String(row.id),
       eventId: String(event.id),
@@ -1514,28 +1623,10 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       endsAt: String(row.ends_at),
       orderIndex: Number(row.order_index || 0),
       continuesAfterCapacity: Boolean(row.continues_after_capacity),
+      confirmed: occupancyByLot.get(String(row.id))?.confirmed || 0,
+      temporaryReservations: occupancyByLot.get(String(row.id))?.temporaryReservations || 0,
     }));
-    const previousLot = eventPaid > 0 ? selectLotForRegistrationNumber(configuredLots, eventPaid) : null;
-    const selectedLotResult = await client.query(
-      `select id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity
-       from public.run_select_lot_for_registration_number($1, $2)
-       limit 1`,
-      [event.id, eventPaid + 1],
-    );
-    const selectedLot = selectedLotResult.rows[0];
-    const lot = selectedLot ? {
-      id: String(selectedLot.id),
-      eventId: String(event.id),
-      name: String(selectedLot.name),
-      priceCents: Number(selectedLot.price_cents),
-      capacity: Number(selectedLot.capacity),
-      soldCount: Number(selectedLot.sold_count),
-      status: selectedLot.status as LotRecord['status'],
-      startsAt: String(selectedLot.starts_at),
-      endsAt: String(selectedLot.ends_at),
-      orderIndex: Number(selectedLot.order_index || 0),
-      continuesAfterCapacity: Boolean(selectedLot.continues_after_capacity),
-    } : null;
+    const lot = selectAvailableLotCandidate(configuredLots);
 
     if (distanceSold >= Number(distance.capacity) || !lot) {
       await client.query('commit');
@@ -1570,30 +1661,17 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       [paymentId, registrationId, input.paymentProvider || 'not_configured', 'pending_payment', amountCents, now, input.expiresAt],
     );
     await client.query(
-      `update ${table.lots}
-       set sold_count = sold_count + 1,
-           status = case
-             when continues_after_capacity then 'active'
-             when sold_count + 1 >= capacity then 'sold_out'
-             else 'active'
-           end
-       where id = $1`,
-      [lot.id],
+      `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+       values ($1, 'system', 'lot.reservation.created', 'registration', $2, $3, $4)`,
+      [randomUUID(), registrationId, {
+        lotId: lot.id,
+        lotName: lot.name,
+        expiresAt: input.expiresAt,
+        capacityTotal: lot.capacity,
+        confirmedBefore: lot.confirmed,
+        temporaryReservationsBefore: lot.temporaryReservations,
+      }, now],
     );
-    if (previousLot && previousLot.id !== lot.id) {
-      await client.query(
-        `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
-         values ($1, 'system', 'lot.changed', 'lot', $2, $3, $4)`,
-        [randomUUID(), lot.id, {
-          previousLotId: previousLot.id,
-          previousLotName: previousLot.name,
-          newLotId: lot.id,
-          newLotName: lot.name,
-          registrationNumber: eventPaid + 1,
-          registrationId,
-        }, now],
-      );
-    }
     await client.query('commit');
 
     return {
@@ -1671,6 +1749,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
   try {
     await ensurePostgresReady();
     await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
     await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-payment-confirmation'))");
     await client.query("set local lock_timeout = '5s'");
     await client.query("set local statement_timeout = '15s'");
@@ -1721,7 +1800,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
       await client.query('commit');
       return { statusCode: 200, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, duplicated: true };
     }
-    const wasClosed = ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(row.status);
+    const wasAlreadyPaid = row.status === 'paid' && row.payment_status === 'paid';
 
     const bibResult = await client.query(
       `select lpad((coalesce(max(nullif(regexp_replace(bib_number, '\\D', '', 'g'), '')::int), 0) + 1)::text, 4, '0') as next_bib_number
@@ -1749,11 +1828,10 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
        where id = $6`,
       [now, input.providerPaymentId, input.providerTransactionId, input.gatewayStatus || 'paid', input.payload, row.payment_id],
     );
-    if (wasClosed) {
+    if (!wasAlreadyPaid) {
       await client.query(
         `update ${table.lots} set sold_count = sold_count + 1,
            status = case
-             when continues_after_capacity then 'active'
              when sold_count + 1 >= capacity then 'sold_out'
              else 'active'
            end where id = $1`,
@@ -1804,26 +1882,10 @@ export async function markPaymentCreationFailedInPostgres(registrationId: string
        returning lot_id`,
       ['payment_failed', now, registrationId, 'pending_payment'],
     );
-    const lotId = registrationResult.rows[0]?.lot_id;
-
     await client.query(
       `update ${table.payments} set status = $1, updated_at = $2 where registration_id = $3`,
       ['payment_failed', now, registrationId],
     );
-
-    if (lotId) {
-      await client.query(
-        `update ${table.lots}
-         set sold_count = greatest(sold_count - 1, 0),
-             status = case
-               when continues_after_capacity then 'active'
-               when status = 'sold_out' and greatest(sold_count - 1, 0) < capacity then 'active'
-               else status
-             end
-         where id = $1`,
-        [lotId],
-      );
-    }
 
     await client.query('commit');
   } catch (error) {
@@ -1960,6 +2022,7 @@ export async function cancelRegistrationInPostgres(input: {
 
   try {
     await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
     const registrationResult = await client.query(
       `select status, lot_id from ${table.registrations} where id = $1 for update`,
       [input.registrationId],
@@ -1990,12 +2053,11 @@ export async function cancelRegistrationInPostgres(input: {
       [now, input.registrationId],
     );
 
-    if (['pending_payment', 'paid'].includes(registration.status)) {
+    if (registration.status === 'paid') {
       await client.query(
         `update ${table.lots}
          set sold_count = greatest(sold_count - 1, 0),
              status = case
-               when continues_after_capacity then 'active'
                when status = 'sold_out' and greatest(sold_count - 1, 0) < capacity then 'active'
                else status
              end
@@ -2021,6 +2083,98 @@ export async function cancelRegistrationInPostgres(input: {
   } finally {
     client.release();
   }
+}
+
+export async function persistReconciliationRunInPostgres(input: {
+  id: string;
+  triggerSource: string;
+  mode: 'dry_run' | 'apply';
+  checkedCount: number;
+  correctedCount: number;
+  manualReviewCount: number;
+  errorCount: number;
+  summary: unknown;
+  startedAt: string;
+  completedAt: string;
+  createdBy: string;
+  issues: Array<{
+    issueKey: string;
+    issueCode: string;
+    severity: 'info' | 'warning' | 'critical';
+    resolutionStatus: 'consistent' | 'automatically_corrected' | 'manual_review_required';
+    registrationId: string;
+    paymentId: string | null;
+    details: unknown;
+  }>;
+}) {
+  const client = await requirePool().connect();
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    await client.query(
+      `insert into ${table.reconciliationRuns}
+       (id, trigger_source, mode, status, checked_count, corrected_count, manual_review_count, error_count, summary, started_at, completed_at, created_by)
+       values ($1, $2, $3, 'completed', $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [input.id, input.triggerSource, input.mode, input.checkedCount, input.correctedCount, input.manualReviewCount, input.errorCount, input.summary, input.startedAt, input.completedAt, input.createdBy],
+    );
+    for (const issue of input.issues) {
+      await client.query(
+        `insert into ${table.paymentReconciliations}
+         (id, run_id, issue_key, issue_code, severity, resolution_status, registration_id, payment_id, details, first_detected_at, last_detected_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+         on conflict (issue_key) do update set
+           run_id = excluded.run_id,
+           severity = excluded.severity,
+           resolution_status = case
+             when ${table.paymentReconciliations}.resolution_status = 'resolved' then 'resolved'
+             else excluded.resolution_status
+           end,
+           details = excluded.details,
+           last_detected_at = excluded.last_detected_at`,
+        [randomUUID(), input.id, issue.issueKey, issue.issueCode, issue.severity, issue.resolutionStatus, issue.registrationId, issue.paymentId, issue.details, input.completedAt],
+      );
+    }
+    const activeFinancialIssueKeys = input.issues
+      .filter((issue) => issue.issueCode === 'local_paid_without_real_transaction')
+      .map((issue) => issue.issueKey);
+    await client.query(
+      `update ${table.paymentReconciliations}
+       set resolution_status = 'resolved', resolved_at = $1, resolved_by = $2,
+           resolution_notes = 'Classificacao anterior substituida por evidencia de transacao presente no payload do gateway.'
+       where issue_code = 'local_paid_without_real_transaction'
+         and resolution_status = 'manual_review_required'
+         and not (issue_key = any($3::text[]))`,
+      [input.completedAt, input.createdBy, activeFinancialIssueKeys],
+    );
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getReconciliationDashboardInPostgres() {
+  await ensurePostgresReady();
+  const [runs, issues] = await Promise.all([
+    requirePool().query(`select * from ${table.reconciliationRuns} order by started_at desc limit 30`),
+    requirePool().query(`select * from ${table.paymentReconciliations} order by last_detected_at desc limit 500`),
+  ]);
+  return {
+    runs: runs.rows.map((row) => ({
+      id: row.id, triggerSource: row.trigger_source, mode: row.mode, status: row.status,
+      checkedCount: Number(row.checked_count), correctedCount: Number(row.corrected_count),
+      manualReviewCount: Number(row.manual_review_count), errorCount: Number(row.error_count),
+      summary: row.summary, startedAt: row.started_at, completedAt: row.completed_at, createdBy: row.created_by,
+    })),
+    issues: issues.rows.map((row) => ({
+      id: row.id, issueKey: row.issue_key, issueCode: row.issue_code, severity: row.severity,
+      resolutionStatus: row.resolution_status, registrationId: row.registration_id, paymentId: row.payment_id,
+      details: row.details, firstDetectedAt: row.first_detected_at, lastDetectedAt: row.last_detected_at,
+      resolvedAt: row.resolved_at, resolutionNotes: row.resolution_notes,
+    })),
+  };
 }
 
 function findPaymentMethod(value: unknown, depth = 0): string | null {

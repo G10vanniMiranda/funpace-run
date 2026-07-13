@@ -12,6 +12,7 @@ import type {
   AdminPaymentDetailsResponse,
   AdminPaymentsResponse,
   AdminSummaryResponse,
+  AdminReconciliationDashboard,
   AvailabilityResponse,
   CreateRegistrationResponse,
   PartnershipLeadRequest,
@@ -346,6 +347,16 @@ export function logoutAdmin() {
 
 export function getAdminSummary(adminKey: string) {
   return adminFetch<AdminSummaryResponse>('/api/admin/summary', adminKey);
+}
+
+export function getAdminReconciliation(adminKey: string) {
+  return adminFetch<AdminReconciliationDashboard>('/api/admin/reconciliation', adminKey);
+}
+
+export function runAdminReconciliation(adminKey: string, mode: 'dry_run' | 'apply' = 'dry_run') {
+  return adminFetch<{ success: boolean; mode: string; checkedCount: number; correctedCount: number; manualReviewRequired: number }>(
+    '/api/admin/reconciliation/run', adminKey, { method: 'POST', body: JSON.stringify({ mode }) },
+  );
 }
 
 export function getAdminRegistrations(adminKey: string, filters: Record<string, string>) {

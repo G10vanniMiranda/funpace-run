@@ -76,7 +76,11 @@ export type AvailabilityResponse = {
     priceCents: number;
     capacity: number;
     soldCount: number;
+    confirmed: number;
+    temporaryReservations: number;
+    occupied: number;
     remaining: number;
+    available: number;
     status: string;
   }>;
   distances: Array<{
@@ -120,7 +124,11 @@ export type AdminSummaryResponse = {
     name: string;
     capacity: number;
     soldCount: number;
+    confirmed: number;
+    temporaryReservations: number;
+    occupied: number;
     remaining: number;
+    available: number;
     priceCents: number;
     status: string;
   }>;
@@ -181,6 +189,19 @@ export type AdminRegistrationsResponse = {
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
 export type AdminGoogleSheetsStatus = { enabled: boolean; configured: boolean; configurationIssue: string | null; counts: { pending: number; processing: number; synchronized: number; failed: number }; lastSynchronizedAt: string | null };
+export type AdminReconciliationDashboard = {
+  runs: Array<{
+    id: string; triggerSource: string; mode: 'dry_run' | 'apply'; status: string;
+    checkedCount: number; correctedCount: number; manualReviewCount: number; errorCount: number;
+    summary: Record<string, unknown>; startedAt: string; completedAt: string | null; createdBy: string;
+  }>;
+  issues: Array<{
+    id: string; issueKey: string; issueCode: string; severity: 'info' | 'warning' | 'critical';
+    resolutionStatus: 'consistent' | 'automatically_corrected' | 'manual_review_required' | 'resolved';
+    registrationId: string | null; paymentId: string | null; details: Record<string, unknown>;
+    firstDetectedAt: string; lastDetectedAt: string; resolvedAt: string | null; resolutionNotes: string | null;
+  }>;
+};
 export type AdminOperationResponse = { registrations: AdminRegistration[]; pagination: { page: number; pageSize: number; total: number; totalPages: number }; totals: { paid: number; kitPending: number; checkInPending: number; completed: number } };
 export type AdminEventConfig = {
   event: { id: string; name: string; slug: string; status: string; date: string; startTime: string; locationName: string; city: string; state: string };

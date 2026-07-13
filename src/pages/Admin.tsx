@@ -58,6 +58,8 @@ import {
   updateAdminDistance,
   updateAdminLot,
   getAdminSummary,
+  getAdminReconciliation,
+  runAdminReconciliation,
   getAdminSession,
   getAdminOperation,
   loginAdmin,
@@ -68,7 +70,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAuditLog, AdminEventConfig, AdminGoogleSheetsStatus, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
+import type { AdminAuditLog, AdminEventConfig, AdminGoogleSheetsStatus, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, RegistrationStatus } from '../types/registration';
 
 type AdminFilters = {
   status: string;
@@ -86,7 +88,7 @@ type AdminFilters = {
   sheetStatus: string;
 };
 
-type AdminNavKey = 'registrations' | 'payments' | 'operation' | 'reports' | 'audit' | 'event';
+type AdminNavKey = 'registrations' | 'payments' | 'reconciliation' | 'operation' | 'reports' | 'audit' | 'event';
 type AdminRole = AdminSession['role'];
 
 const currencyFormatter = new Intl.NumberFormat('pt-BR', {
@@ -117,6 +119,7 @@ const statusOptions = [
 const navItems: Array<{ key: AdminNavKey; label: string; icon: LucideIcon; status?: 'soon' }> = [
   { key: 'registrations', label: 'Inscrições', icon: Ticket },
   { key: 'payments', label: 'Pagamentos', icon: CreditCard },
+  { key: 'reconciliation', label: 'Reconciliação', icon: ShieldCheck },
   { key: 'operation', label: 'Operação', icon: ClipboardCheck },
   { key: 'reports', label: 'Relatórios', icon: FileBarChart },
   { key: 'audit', label: 'Auditoria', icon: Activity },
@@ -126,6 +129,7 @@ const navItems: Array<{ key: AdminNavKey; label: string; icon: LucideIcon; statu
 const navPermissions: Record<AdminNavKey, AdminRole[]> = {
   registrations: ['administrator', 'finance', 'operation'],
   payments: ['administrator', 'finance'],
+  reconciliation: ['administrator', 'finance'],
   operation: ['administrator', 'operation'],
   reports: ['administrator', 'finance'],
   audit: ['administrator'],
@@ -567,6 +571,10 @@ function AdminSection({
         <PaymentControlPanel registrations={registrations} dashboard={dashboard} adminKey={adminKey} onRegistrationUpdated={onRegistrationUpdated} onRefreshAdminData={onRefreshAdminData} />
       </>
     );
+  }
+
+  if (activeNav === 'reconciliation') {
+    return <ReconciliationPanel adminKey={adminKey} onOpenRegistration={onOpenRegistration} registrations={registrations} />;
   }
 
   if (activeNav === 'operation') {
@@ -1553,6 +1561,61 @@ function ReportList({
   );
 }
 
+function ReconciliationPanel({ adminKey, registrations, onOpenRegistration }: { adminKey: string; registrations: AdminRegistration[]; onOpenRegistration: (registration: AdminRegistration) => void }) {
+  const [dashboard, setDashboard] = useState<AdminReconciliationDashboard | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const load = async () => {
+    setLoading(true);
+    try { setDashboard(await getAdminReconciliation(adminKey)); setError(''); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível carregar a reconciliação.'); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { void load(); }, [adminKey]);
+  const run = async () => {
+    setRunning(true); setMessage(''); setError('');
+    try {
+      const result = await runAdminReconciliation(adminKey, 'dry_run');
+      setMessage(`Dry-run concluído: ${result.checkedCount} pagamentos verificados, ${result.manualReviewRequired} em revisão manual, ${result.correctedCount} alterações.`);
+      await load();
+    } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Falha ao executar a reconciliação.'); }
+    finally { setRunning(false); }
+  };
+  const openIssue = async (registrationId: string | null) => {
+    if (!registrationId) return;
+    const local = registrations.find((registration) => registration.id === registrationId);
+    if (local) { onOpenRegistration(local); return; }
+    try { onOpenRegistration((await getAdminRegistrationDetails(adminKey, registrationId)).registration); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível abrir a inscrição.'); }
+  };
+  const activeIssues = dashboard?.issues.filter((issue) => issue.resolutionStatus === 'manual_review_required') || [];
+  const lastRun = dashboard?.runs[0];
+  return (
+    <section className="mt-4 border border-white/10 bg-zinc-950/80">
+      <div className="flex flex-col gap-4 border-b border-white/10 p-5 lg:flex-row lg:items-center lg:justify-between">
+        <div><p className="text-xs font-black uppercase tracking-widest text-brand">Governança financeira</p><h2 className="mt-2 text-2xl font-black">Central de reconciliação</h2><p className="mt-2 text-sm text-zinc-400">Casos ambíguos permanecem bloqueados para revisão; nenhuma confirmação é feita sem prova do gateway.</p></div>
+        <button type="button" disabled={running} onClick={() => void run()} className="min-h-11 border border-brand px-4 text-xs font-black uppercase text-brand disabled:opacity-40"><RefreshCcw className={`mr-2 inline h-4 w-4 ${running ? 'animate-spin' : ''}`} />Executar dry-run</button>
+      </div>
+      {error && <p className="m-4 border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">{error}</p>}
+      {message && <p className="m-4 border border-brand/20 bg-brand/10 p-3 text-sm text-brand">{message}</p>}
+      <div className="grid gap-3 border-b border-white/10 p-4 sm:grid-cols-2 xl:grid-cols-4">
+        <KpiCard label="Revisão manual" value={loading ? '—' : String(activeIssues.length)} icon={ShieldCheck} detail="casos históricos preservados" trend="neutral" loading={loading} />
+        <KpiCard label="Críticos" value={loading ? '—' : String(activeIssues.filter((issue) => issue.severity === 'critical').length)} icon={Activity} detail="exigem ação imediata" trend="neutral" loading={loading} />
+        <KpiCard label="Última varredura" value={lastRun ? String(lastRun.checkedCount) : '—'} detail="pagamentos analisados" icon={Search} trend="neutral" loading={loading} />
+        <KpiCard label="Correções automáticas" value={lastRun ? String(lastRun.correctedCount) : '0'} detail="somente com evidência inequívoca" icon={BadgeCheck} trend="up" loading={loading} />
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-230 text-left"><thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500"><tr><th className="p-4">Problema</th><th className="p-4">Inscrição</th><th className="p-4">Gravidade</th><th className="p-4">Situação</th><th className="p-4">Detectado</th><th className="p-4 text-right">Ação</th></tr></thead>
+          <tbody>{activeIssues.map((issue) => <tr key={issue.id} className="border-t border-white/10"><td className="p-4"><p className="font-bold">{issue.issueCode}</p><p className="mt-1 text-xs text-zinc-500">Preservado sem mutação financeira</p></td><td className="p-4 font-mono text-xs text-zinc-400">{issue.registrationId}</td><td className="p-4"><span className="border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-xs uppercase text-amber-200">{issue.severity}</span></td><td className="p-4 text-xs font-bold uppercase text-zinc-300">Revisão manual obrigatória</td><td className="p-4 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(issue.lastDetectedAt))}</td><td className="p-4 text-right"><button type="button" onClick={() => void openIssue(issue.registrationId)} className="border border-brand/30 px-3 py-2 text-xs font-black uppercase text-brand">Abrir timeline</button></td></tr>)}</tbody>
+        </table>
+        {!loading && activeIssues.length === 0 && <p className="p-6 text-sm text-zinc-500">Nenhuma revisão manual pendente.</p>}
+      </div>
+    </section>
+  );
+}
+
 function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: { auditLogs: AdminAuditLog[]; adminKey: string; registrations: AdminRegistration[]; onOpenRegistration: (registration: AdminRegistration) => void }) {
   const [logs, setLogs] = useState(auditLogs);
   const [filters, setFilters] = useState({ q: '', action: '', actor: '', entityType: '', dateFrom: '', dateTo: '', page: '1', pageSize: '50' });
@@ -2259,7 +2322,7 @@ function LotDistancePanel({ summary }: { summary: AdminSummaryResponse | null })
             <div key={lot.id}>
               <div className="mb-2 flex justify-between gap-3 text-sm">
                 <span className="font-bold">{lot.name}</span>
-                <span className="font-mono text-zinc-400">{lot.soldCount}/{lot.capacity}</span>
+                <span className="font-mono text-zinc-400">{lot.confirmed} confirmadas + {lot.temporaryReservations} reservas / {lot.capacity}</span>
               </div>
               <div className="h-2 bg-white/10">
                 <div className="h-full bg-brand" style={{ width: `${percentage}%` }} />
