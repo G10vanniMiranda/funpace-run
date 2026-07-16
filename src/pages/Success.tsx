@@ -115,9 +115,11 @@ export function SuccessPage() {
         <h1 className="mb-6 font-display text-[clamp(2.6rem,12vw,4.5rem)] font-black uppercase leading-none tracking-tighter">
           {status ? statusLabels[status] : 'Pagamento em confirmação'}.
         </h1>
-        <p className="mb-8 font-mono leading-relaxed text-zinc-400">
-          {message}
-        </p>
+        {status !== 'paid' && (
+          <p className="mb-8 font-mono leading-relaxed text-zinc-400">
+            {message}
+          </p>
+        )}
         {registrationId && (
           <p className="wrap-break-word text-sm font-bold uppercase tracking-widest text-brand">Inscrição: {registrationId}</p>
         )}
