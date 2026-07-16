@@ -73,6 +73,17 @@ export function Hero() {
 
   return (
     <section className="relative flex flex-col justify-start overflow-hidden px-4 pb-10 pt-10 sm:px-6 sm:pb-16 sm:pt-20 md:min-h-[92svh] md:justify-end md:pb-24">
+      <video
+        className="pointer-events-none absolute inset-0 h-full w-full object-cover grayscale contrast-125 brightness-50"
+        src="/video.mp4"
+        autoPlay
+        muted
+        loop
+        playsInline
+        preload="metadata"
+        aria-hidden="true"
+      />
+      <div className="pointer-events-none absolute inset-0 bg-black/45" aria-hidden="true" />
       <div className="premium-aurora" />
       <div className="premium-grid" />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_18%,rgba(215,255,0,0.14),transparent_24rem),linear-gradient(to_bottom,transparent,rgba(0,0,0,0.78))]" />

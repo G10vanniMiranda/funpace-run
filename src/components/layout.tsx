@@ -1,15 +1,19 @@
-import { Instagram } from 'lucide-react';
+import { Instagram, PartyPopper } from 'lucide-react';
 import { eventInfo } from '../config/event';
 
 export function Marquee() {
-  const marqueeText = 'FUNPACE RUN EXPERIENCE - 10KM - 5KM';
+  const marqueeText = 'FUNPACE RUN EXPERIENCE - 10KM - 5KM -';
   const marqueeItems = Array.from({ length: 8 }, (_, index) => index);
 
   return (
     <div className="relative z-10 flex w-full overflow-hidden whitespace-nowrap border-y border-black bg-brand py-2.5 text-black shadow-[0_0_40px_rgba(215,255,0,0.18)] sm:py-3">
       <div className="marquee-track flex w-max shrink-0 gap-8 font-display text-base font-bold uppercase tracking-tighter sm:text-xl">
         {[...marqueeItems, ...marqueeItems].map((_, index) => (
-          <span key={index}>{marqueeText}</span>
+          <span key={index} className="inline-flex items-center gap-2">
+            <span>{marqueeText}</span>
+            <PartyPopper className="h-[1em] w-[1em] shrink-0 text-black" strokeWidth={2.75} aria-hidden="true" />
+            <span>1 ANO DE MOVIMENTO</span>
+          </span>
         ))}
       </div>
     </div>
