@@ -35,7 +35,8 @@ function MarqueeGroup({ ariaHidden = false }: { ariaHidden?: boolean }) {
       <span aria-hidden="true">•</span>
       <span>Funpace Run 2026</span>
       <span aria-hidden="true">•</span>
-      <span>10K 5K</span>
+      <span>10K - 5K</span>
+      <span aria-hidden="true">•</span>
     </div>
   );
 }
