@@ -443,10 +443,16 @@ const initialDatabase: Database = {
   partners: [],
 };
 
+const configuredDatabasePoolMax = Number.parseInt(process.env.DATABASE_POOL_MAX || '5', 10);
+const databasePoolMax = Number.isInteger(configuredDatabasePoolMax) && configuredDatabasePoolMax > 0
+  ? configuredDatabasePoolMax
+  : 5;
+
 const pool = databaseUrl
   ? new Pool({
     connectionString: databaseUrl,
     ssl: databaseSsl ? { rejectUnauthorized: false } : false,
+    max: databasePoolMax,
   })
   : null;
 
