@@ -53,6 +53,7 @@ import {
   type PartnerAnalyticsFilters,
 } from './database.js';
 import { normalizePartnerSlug, partnerTypes, validatePartnerInput } from './partner-management.js';
+import { getPartnerAuditEventTitle } from './partner-audit-labels.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, type RegistrationEmailContext } from './email.js';
 import {
   processGoogleSheetSync,
@@ -1958,6 +1959,13 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
 
     if (gatewayCheck.amountCents !== null && normalizedEvent.amountCents !== null
       && gatewayCheck.amountCents !== normalizedEvent.amountCents) {
+      await recordOperationalAlert({
+        dedupeKey: `payment-amount-mismatch:${normalizedEvent.registrationId}:${normalizedEvent.providerTransactionId}`,
+        severity: 'critical', alertType: 'payment_amount_mismatch', title: 'Divergencia no valor do pagamento',
+        message: 'O valor recebido no webhook diverge do valor confirmado pelo payment_check.',
+        entityType: 'registration', entityId: normalizedEvent.registrationId,
+        payload: { providerTransactionId: normalizedEvent.providerTransactionId },
+      });
       json(res, 400, { success: false, message: 'Valor do webhook diverge da InfinitePay.' });
       return;
     }
@@ -1979,7 +1987,16 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       },
     });
     if (result.error === 'not_found') { json(res, 400, { success: false, message: 'Pedido nao encontrado.' }); return; }
-    if (result.error === 'amount_mismatch') { json(res, 400, { success: false, message: 'Valor do pagamento divergente.' }); return; }
+    if (result.error === 'amount_mismatch') {
+      await recordOperationalAlert({
+        dedupeKey: `payment-amount-mismatch:${result.registrationId || normalizedEvent.registrationId}:${normalizedEvent.providerTransactionId}`,
+        severity: 'critical', alertType: 'payment_amount_mismatch', title: 'Divergencia no valor do pagamento',
+        message: 'O valor verificado nao coincide com o pagamento e o snapshot financeiro persistidos.',
+        entityType: 'registration', entityId: result.registrationId || normalizedEvent.registrationId,
+        payload: { paymentId: result.paymentId || null, providerTransactionId: normalizedEvent.providerTransactionId },
+      });
+      json(res, 400, { success: false, message: 'Valor do pagamento divergente.' }); return;
+    }
     if (result.error === 'stale_checkout') { json(res, 409, { success: false, message: 'Checkout expirado por mudanca de lote.' }); return; }
     if (result.duplicated) {
       await recordOperationalAlert({
@@ -2632,7 +2649,10 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
       auditAction: 'payment.redirect_reconciled',
     });
     if (confirmed.error === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
-    if (confirmed.error === 'amount_mismatch') { json(res, 409, { message: 'Valor do pagamento divergente.' }); return; }
+    if (confirmed.error === 'amount_mismatch') {
+      await recordOperationalAlert({ dedupeKey: `payment-amount-mismatch:${orderNsu}:${transactionNsu}`, severity: 'critical', alertType: 'payment_amount_mismatch', title: 'Divergencia no valor do pagamento', message: 'A confirmacao de retorno diverge do snapshot financeiro persistido.', entityType: 'registration', entityId: orderNsu, payload: { paymentId: confirmed.paymentId || null, providerTransactionId: transactionNsu } });
+      json(res, 409, { message: 'Valor do pagamento divergente.' }); return;
+    }
     if (confirmed.error === 'stale_checkout') { json(res, 409, { message: 'Checkout expirado por mudanca de lote.' }); return; }
     const googleSheetSyncs = confirmed.registrationId && confirmed.paymentId
       ? await queueConfirmedPaymentGoogleSheetSync(confirmed.registrationId, confirmed.paymentId)
@@ -3377,7 +3397,11 @@ async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerR
   if (!registration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
   const payment = database.payments.find((item) => item.registrationId === registrationId);
   const partnerAuditLogs = session.role === 'administrator' ? await getRegistrationPartnerAuditInPostgres(registrationId) : [];
-  const partnerTimeline = partnerAuditLogs.map((log) => ({ id: `partner:${log.id}`, type: log.action, title: log.action, occurredAt: log.createdAt, actor: log.userId || 'system', origin: 'partner_audit', severity: /failed|declined|rejected|issue/i.test(log.action) ? 'critical' as const : /approved|applied/i.test(log.action) ? 'success' as const : 'info' as const, details: { partnerName: log.partnerName, oldData: log.oldData, newData: log.newData, ...(log.metadata as Record<string, unknown>) } }));
+  const partnerTimeline = partnerAuditLogs.map((log) => {
+    const metadata = log.metadata as Record<string, unknown>;
+    const partnerType = (metadata.partnerType || metadata.partner_type || registration.partnerType) as PartnerType | null;
+    return { id: `partner:${log.id}`, type: log.action, title: getPartnerAuditEventTitle(log.action, partnerType), occurredAt: log.createdAt, actor: log.userId || 'system', origin: 'partner_audit', severity: /failed|declined|rejected|issue|mismatch/i.test(log.action) ? 'critical' as const : /approved|applied/i.test(log.action) ? 'success' as const : 'info' as const, details: { partnerName: log.partnerName, partnerType, oldData: log.oldData, newData: log.newData, ...metadata } };
+  });
   json(res, 200, {
     registration: toAdminRow(database, registration),
     auditLogs: database.auditLogs.filter((item) => item.entityId === registrationId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),

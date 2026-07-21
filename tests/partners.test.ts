@@ -4,6 +4,7 @@ import { normalizePartnerSlug, validatePartnerInput } from '../server/partner-ma
 import { buildPartnerLink, copyPartnerLink, partnerTypeBenefitLabels, partnerTypeLabels, slugifyPartnerName } from '../src/lib/partners.js';
 import { calculatePartnerPricing } from '../server/partner-discount.js';
 import { signPartnerSession, verifyPartnerSession } from '../server/partner-session.js';
+import { getPartnerAuditEventTitle, getPartnerEntityLabel } from '../server/partner-audit-labels.js';
 
 test('generates a URL-safe partner slug from the name', () => {
   assert.equal(normalizePartnerSlug('  Assessoria São João Running  '), 'assessoria-sao-joao-running');
@@ -82,6 +83,13 @@ test('centralizes contextual labels for both supported partner types', () => {
   assert.equal(partnerTypeLabels.influencer, 'Influenciador');
   assert.equal(partnerTypeBenefitLabels.sports_advisory, 'Inscricao atraves da assessoria');
   assert.equal(partnerTypeBenefitLabels.influencer, 'Beneficio do influenciador');
+});
+
+test('labels payment audit events with the persisted attribution type', () => {
+  assert.equal(getPartnerEntityLabel('influencer'), 'influenciador');
+  assert.equal(getPartnerEntityLabel('sports_advisory'), 'assessoria');
+  assert.equal(getPartnerAuditEventTitle('partner.link_accessed', 'influencer'), 'Link do influenciador acessado');
+  assert.equal(getPartnerAuditEventTitle('consistency.issue_detected', 'sports_advisory'), 'Inconsistencia de assessoria detectada');
 });
 
 test('builds and copies the exclusive partner link', async () => {

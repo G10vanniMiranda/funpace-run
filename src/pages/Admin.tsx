@@ -2288,9 +2288,9 @@ function AthleteDrawer({
         </div>
 
         {details?.partnerHistory && <div className="mt-5 border border-brand/25 bg-brand/5 p-4">
-          <p className="text-xs font-black uppercase tracking-widest text-brand">Historico da Assessoria</p>
+          <p className="text-xs font-black uppercase tracking-widest text-brand">Historico do {details.partnerHistory.partnerType === 'influencer' ? 'Influenciador' : 'Parceiro'}</p>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <Detail label="Assessoria responsavel" value={details.partnerHistory.partnerName} />
+            <Detail label={details.partnerHistory.partnerType === 'influencer' ? 'Influenciador responsavel' : 'Assessoria responsavel'} value={details.partnerHistory.partnerName} />
             <Detail label="Percentual aplicado" value={`${details.partnerHistory.discountPercentage}%`} />
             <Detail label="Link utilizado" value={details.partnerHistory.partnerLink || 'Nao registrado'} />
             <Detail label="Identificada em" value={dateTimeFormatter.format(new Date(details.partnerHistory.identifiedAt))} />

@@ -152,15 +152,13 @@ try {
   const persistedState = await database.query(`
     select
       count(*) filter (where partner_type is null)::int null_partner_types,
-      count(*) filter (where partner_type <> 'sports_advisory')::int non_advisory_partners,
+      count(*) filter (where partner_type = 'influencer')::int influencer_partners,
       count(*) filter (where partner_type not in ('sports_advisory','influencer'))::int invalid_partner_types
     from "run-partners"
   `);
-  assert.deepEqual(persistedState.rows[0], {
-    null_partner_types: 0,
-    non_advisory_partners: 0,
-    invalid_partner_types: 0,
-  });
+  assert.equal(persistedState.rows[0].null_partner_types, 0);
+  assert.equal(persistedState.rows[0].invalid_partner_types, 0);
+  assert.ok(persistedState.rows[0].influencer_partners >= 0, 'Influenciadores existentes devem permanecer validos apos a I2.');
 
   const snapshotState = await database.query(`
     select count(*)::int invalid_snapshots

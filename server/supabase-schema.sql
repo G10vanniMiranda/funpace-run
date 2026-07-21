@@ -256,6 +256,7 @@ create index if not exists "run-partner-audit_partner_created_idx" on "run-partn
 create index if not exists "run-partner-audit_registration_created_idx" on "run-partner-audit-logs"(registration_id, created_at asc);
 create index if not exists "run-partner-audit_action_created_idx" on "run-partner-audit-logs"(action, created_at desc);
 create index if not exists "run-partner-audit_event_created_idx" on "run-partner-audit-logs"(event_id, created_at desc);
+create index if not exists "run-partner-audit_correlation_idx" on "run-partner-audit-logs"((metadata->>'correlationId')) where coalesce(metadata->>'correlationId','')<>'';
 
 create or replace function prevent_partner_audit_mutation()
 returns trigger language plpgsql as $$ begin raise exception 'partner audit logs are immutable'; end; $$;
@@ -279,6 +280,8 @@ drop trigger if exists "run-registrations_partner_snapshot_immutable" on "run-re
 create trigger "run-registrations_partner_snapshot_immutable" before update on "run-registrations"
 for each row execute function protect_confirmed_partner_snapshot();
 create index if not exists "run-payments_registration_id_idx" on "run-payments"(registration_id);
+create index if not exists "run-payments_status_updated_idx" on "run-payments"(status, updated_at desc);
+create index if not exists "run-payment-events_payment_received_idx" on "run-payment-events"(payment_id, received_at asc);
 create unique index if not exists "run-payments_gateway_transaction_idx"
   on "run-payments"(gateway_transaction_id)
   where gateway_transaction_id is not null and gateway_transaction_id not like 'manual_reconcile_%';
