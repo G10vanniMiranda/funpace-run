@@ -24,6 +24,7 @@ import type {
   RegistrationStatus,
   RegistrationStatusResponse,
 } from '../types/registration';
+import type { AdminPartnerDashboardResponse, AdminPartnerDetailResponse, AdminPartnerResponse, AdminPartnersResponse, PartnerAuditResponse, PartnerDashboardFilters, PartnerInput, PartnerMonitoringResponse, PartnerSlugAvailabilityResponse, PartnerStatus, PublicPartnerSessionResponse } from '../types/partner';
 
 const configuredApiUrl = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 const configuredLocalApiUrl = (import.meta.env.VITE_API_URL_LOCAL || '').replace(/\/$/, '');
@@ -288,6 +289,16 @@ export function getAvailability() {
   });
 }
 
+export function activatePartnerLink(slug: string) {
+  return apiFetch<PublicPartnerSessionResponse>(`/api/partners/resolve/${encodeURIComponent(slug)}`, {
+    method: 'POST', retry: false,
+  });
+}
+
+export function getPartnerSession() {
+  return apiFetch<PublicPartnerSessionResponse>('/api/partner-session', { cache: 'no-store', retry: false });
+}
+
 export function getRegistrationStatus(registrationId: string) {
   return apiFetch<RegistrationStatusResponse>(`/api/registrations/${encodeURIComponent(registrationId)}`, {
     retry: true,
@@ -409,6 +420,79 @@ export function updateAdminPartnershipStatus(adminKey: string, partnershipId: st
       body: JSON.stringify({ status }),
     },
   );
+}
+
+export function getAdminPartners(adminKey: string, filters: Record<string, string> = {}) {
+  return adminFetch<AdminPartnersResponse>(`/api/admin/partners${toQueryString(filters)}`, adminKey);
+}
+
+export function getAdminPartner(adminKey: string, partnerId: string) {
+  return adminFetch<AdminPartnerResponse>(`/api/admin/partners/${encodeURIComponent(partnerId)}`, adminKey);
+}
+
+export function checkAdminPartnerSlug(adminKey: string, slug: string, excludeId = '') {
+  return adminFetch<PartnerSlugAvailabilityResponse>(
+    `/api/admin/partners/slug-availability${toQueryString({ slug, excludeId })}`,
+    adminKey,
+  );
+}
+
+export function createAdminPartner(adminKey: string, input: PartnerInput) {
+  return adminFetch<AdminPartnerResponse>('/api/admin/partners', adminKey, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+    retry: false,
+  });
+}
+
+export function updateAdminPartner(adminKey: string, partnerId: string, input: PartnerInput) {
+  return adminFetch<AdminPartnerResponse>(`/api/admin/partners/${encodeURIComponent(partnerId)}`, adminKey, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+    retry: false,
+  });
+}
+
+export function updateAdminPartnerStatus(adminKey: string, partnerId: string, status: PartnerStatus) {
+  return adminFetch<AdminPartnerResponse>(`/api/admin/partners/${encodeURIComponent(partnerId)}/status`, adminKey, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+    retry: false,
+  });
+}
+
+export function deleteAdminPartner(adminKey: string, partnerId: string) {
+  return adminFetch<{ ok: boolean }>(`/api/admin/partners/${encodeURIComponent(partnerId)}`, adminKey, {
+    method: 'DELETE',
+    retry: false,
+  });
+}
+
+export function getAdminPartnerDashboard(adminKey: string, filters: PartnerDashboardFilters & { page?: string; pageSize?: string } = {}) {
+  return adminFetch<AdminPartnerDashboardResponse>(`/api/admin/partner-dashboard${toQueryString(filters as Record<string, string>)}`, adminKey);
+}
+
+export function getAdminPartnerDashboardDetail(adminKey: string, partnerId: string, filters: PartnerDashboardFilters & { page?: string; pageSize?: string } = {}) {
+  return adminFetch<AdminPartnerDetailResponse>(`/api/admin/partner-dashboard/${encodeURIComponent(partnerId)}${toQueryString(filters as Record<string, string>)}`, adminKey);
+}
+
+export function getAdminPartnerDashboardExportUrl(filters: PartnerDashboardFilters, format: 'csv' | 'excel') {
+  return getApiUrl(`/api/admin/partner-dashboard/export${toQueryString({ ...(filters as Record<string, string>), format })}`);
+}
+
+export function getAdminPartnerAudit(adminKey: string, filters: Record<string, string> = {}) {
+  return adminFetch<PartnerAuditResponse>(`/api/admin/partner-audit${toQueryString(filters)}`, adminKey);
+}
+
+export function getAdminPartnerMonitoring(adminKey: string, page = 1, pageSize = 25) {
+  return adminFetch<PartnerMonitoringResponse>(`/api/admin/partner-monitoring${toQueryString({ page: String(page), pageSize: String(pageSize) })}`, adminKey);
+}
+
+export function runAdminPartnerConsistency(adminKey: string) {
+  return adminFetch<{ runId: string; checkedAt: string; issues: number }>('/api/admin/partner-consistency/run', adminKey, { method: 'POST', retry: false });
 }
 
 function postAdminRegistrationAction(adminKey: string, registrationId: string, action: 'check-in' | 'kit', notes = '') {

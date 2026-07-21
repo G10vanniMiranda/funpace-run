@@ -18,7 +18,7 @@ const database = (overrides: Partial<Database> = {}): Database => ({
   events: [{ id: 'event', name: 'Funpace', slug: 'funpace', status: 'published', date: '2026-08-01', startTime: '06:00', locationName: 'Arena', city: 'Manaus', state: 'AM' }],
   distances: [{ id: 'distance', eventId: 'event', name: '5K', distanceKm: 5, capacity: 100, status: 'active' }],
   lots: [{ id: 'lot', eventId: 'event', name: 'Lote 1', priceCents: 10_000, capacity: 2, soldCount: 0, status: 'active', startsAt: '2026-01-01T00:00:00.000Z', endsAt: '2026-12-31T00:00:00.000Z', orderIndex: 1, continuesAfterCapacity: false }],
-  registrations: [], payments: [], paymentEvents: [], googleSheetSyncs: [], checkIns: [], kitDeliveries: [], auditLogs: [], adminSessions: [], adminUsers: [], partnershipLeads: [], ...overrides,
+  registrations: [], payments: [], paymentEvents: [], googleSheetSyncs: [], checkIns: [], kitDeliveries: [], auditLogs: [], adminSessions: [], adminUsers: [], partnershipLeads: [], partners: [], ...overrides,
 });
 
 test('executive dashboard calculates finance, conversion and four-state lot capacity', () => {

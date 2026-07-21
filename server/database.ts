@@ -5,6 +5,7 @@ import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
 import { selectAvailableLotCandidate } from './lot-capacity.js';
+import { calculatePartnerPricing } from './partner-discount.js';
 
 const { Pool } = pg;
 
@@ -67,6 +68,14 @@ export type RegistrationRecord = {
   confirmationEmailProvider?: string | null;
   confirmationEmailId?: string | null;
   confirmationEmailError?: string | null;
+  partnerId?: string | null;
+  partnerName?: string | null;
+  partnerLink?: string | null;
+  partnerIdentifiedAt?: string | null;
+  discountPercentage?: number;
+  discountAmountCents?: number;
+  originalPriceCents?: number;
+  finalPriceCents?: number;
 };
 
 export type PaymentRecord = {
@@ -182,6 +191,20 @@ export type PartnershipLeadRecord = {
   updatedAt: string;
 };
 
+export type PartnerStatus = 'active' | 'inactive';
+
+export type PartnerRecord = {
+  id: string;
+  name: string;
+  slug: string;
+  discountPercentage: number;
+  status: PartnerStatus;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+};
+
 export type Database = {
   events: EventRecord[];
   distances: DistanceRecord[];
@@ -196,6 +219,7 @@ export type Database = {
   adminSessions: AdminSessionRecord[];
   adminUsers: AdminUserRecord[];
   partnershipLeads: PartnershipLeadRecord[];
+  partners: PartnerRecord[];
 };
 
 export type PendingRegistrationInput = {
@@ -204,6 +228,11 @@ export type PendingRegistrationInput = {
   paymentProvider: string;
   expiresAt: string;
   description: (distanceName: string, lotName: string) => string;
+  partnerId?: string | null;
+  partnerSlug?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  accessAuditId?: string | null;
 };
 
 export type PendingRegistrationResult = CreateRegistrationResponse & {
@@ -279,7 +308,8 @@ type DatabaseReadScope =
   | 'admin-registrations'
   | 'admin-auth'
   | 'audit'
-  | 'partnerships';
+  | 'partnerships'
+  | 'partners';
 
 const databasePath = resolve(process.env.DATABASE_FILE || 'data/funpace-db.json');
 const databaseUrl = process.env.DATABASE_URL || '';
@@ -302,6 +332,8 @@ const table = {
   adminSessions: '"run-admin-sessions"',
   adminUsers: '"run-admin-users"',
   partnershipLeads: '"run-partnership-leads"',
+  partners: '"run-partners"',
+  partnerAuditLogs: '"run-partner-audit-logs"',
   reconciliationRuns: '"run-reconciliation-runs"',
   paymentReconciliations: '"run-payment-reconciliations"',
   operationalAlerts: '"run-operational-alerts"',
@@ -403,6 +435,7 @@ const initialDatabase: Database = {
   adminSessions: [],
   adminUsers: [],
   partnershipLeads: [],
+  partners: [],
 };
 
 const pool = databaseUrl
@@ -448,6 +481,7 @@ function normalizeDatabase(database: Partial<Database>): Database {
     adminSessions: database.adminSessions || [],
     adminUsers: database.adminUsers || [],
     partnershipLeads: database.partnershipLeads || [],
+    partners: database.partners || [],
   };
 }
 
@@ -520,7 +554,15 @@ async function ensurePostgresDatabase(client: Queryable) {
       confirmation_email_provider text,
       confirmation_email_id text,
       confirmation_email_error text
-      ,bib_number text
+      ,bib_number text,
+      partner_id uuid,
+      partner_name text,
+      partner_link text,
+      partner_identified_at text,
+      discount_percentage numeric(5, 2) not null default 0,
+      discount_amount integer not null default 0,
+      original_price integer not null,
+      final_price integer not null
     );
 
     create table if not exists ${table.payments} (
@@ -633,6 +675,36 @@ async function ensurePostgresDatabase(client: Queryable) {
       updated_at text not null
     );
 
+    create table if not exists ${table.partners} (
+      id uuid primary key default gen_random_uuid(),
+      name text not null,
+      slug text not null,
+      discount_percentage numeric(5, 2) not null,
+      status text not null default 'active',
+      description text,
+      created_at text not null default (now()::text),
+      updated_at text not null default (now()::text),
+      deleted_at text,
+      constraint "run-partners_slug_key" unique (slug),
+      constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage <= 100),
+      constraint "run-partners_status_check" check (status in ('active', 'inactive'))
+    );
+
+    create table if not exists ${table.partnerAuditLogs} (
+      id uuid primary key default gen_random_uuid(),
+      partner_id uuid references ${table.partners}(id),
+      action text not null,
+      user_id text,
+      registration_id text references ${table.registrations}(id),
+      event_id text references ${table.events}(id),
+      old_data jsonb,
+      new_data jsonb,
+      metadata jsonb not null default '{}'::jsonb,
+      ip_address text,
+      user_agent text,
+      created_at text not null default (now()::text)
+    );
+
     create table if not exists ${table.reconciliationRuns} (
       id text primary key,
       trigger_source text not null,
@@ -687,6 +759,7 @@ async function ensurePostgresDatabase(client: Queryable) {
 
     create index if not exists "run-registrations_cpf_hash_idx" on ${table.registrations}(cpf_hash);
     create index if not exists "run-registrations_status_idx" on ${table.registrations}(status);
+    create index if not exists "run-registrations_partner_id_idx" on ${table.registrations}(partner_id) where partner_id is not null;
     create index if not exists "run-payments_registration_id_idx" on ${table.payments}(registration_id);
     create index if not exists "run-google-sheet-sync_status_idx" on ${table.googleSheetSyncs}(status);
     create index if not exists "run-google-sheet-sync_entity_idx" on ${table.googleSheetSyncs}(entity_type, entity_id);
@@ -699,6 +772,11 @@ async function ensurePostgresDatabase(client: Queryable) {
     create unique index if not exists "run-admin-users_email_idx" on ${table.adminUsers}(email);
     create index if not exists "run-partnership-leads_status_idx" on ${table.partnershipLeads}(status);
     create index if not exists "run-partnership-leads_created_at_idx" on ${table.partnershipLeads}(created_at);
+    create index if not exists "run-partners_status_idx" on ${table.partners}(status);
+    create index if not exists "run-partners_deleted_at_idx" on ${table.partners}(deleted_at) where deleted_at is null;
+    create index if not exists "run-partner-audit_partner_created_idx" on ${table.partnerAuditLogs}(partner_id, created_at desc);
+    create index if not exists "run-partner-audit_registration_created_idx" on ${table.partnerAuditLogs}(registration_id, created_at asc);
+    create index if not exists "run-partner-audit_action_created_idx" on ${table.partnerAuditLogs}(action, created_at desc);
     create index if not exists "run-reconciliation-runs_started_idx" on ${table.reconciliationRuns}(started_at desc);
     create index if not exists "run-payment-reconciliations_status_idx" on ${table.paymentReconciliations}(resolution_status, severity);
     create index if not exists "run-operational-alerts_status_idx" on ${table.operationalAlerts}(status, severity, detected_at desc);
@@ -713,9 +791,39 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_id text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_error text`);
   await client.query(`alter table ${table.registrations} add column if not exists bib_number text`);
+  await client.query(`alter table ${table.registrations} add column if not exists partner_id uuid`);
+  await client.query(`alter table ${table.registrations} add column if not exists partner_name text`);
+  await client.query(`alter table ${table.registrations} add column if not exists partner_link text`);
+  await client.query(`alter table ${table.registrations} add column if not exists partner_identified_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists discount_percentage numeric(5, 2) default 0`);
+  await client.query(`alter table ${table.registrations} add column if not exists discount_amount integer default 0`);
+  await client.query(`alter table ${table.registrations} add column if not exists original_price integer`);
+  await client.query(`alter table ${table.registrations} add column if not exists final_price integer`);
+  await client.query(`update ${table.registrations} set discount_percentage = coalesce(discount_percentage, 0), discount_amount = coalesce(discount_amount, 0), original_price = coalesce(original_price, amount_cents), final_price = coalesce(final_price, amount_cents)`);
+  await client.query(`alter table ${table.registrations} alter column discount_percentage set not null`);
+  await client.query(`alter table ${table.registrations} alter column discount_amount set not null`);
+  await client.query(`alter table ${table.registrations} alter column original_price set not null`);
+  await client.query(`alter table ${table.registrations} alter column final_price set not null`);
+  await client.query(`
+    do $$ begin
+      if not exists (select 1 from pg_constraint where conname = 'run-registrations_partner_id_fkey') then
+        alter table "run-registrations" add constraint "run-registrations_partner_id_fkey" foreign key (partner_id) references "run-partners"(id);
+      end if;
+      if not exists (select 1 from pg_constraint where conname = 'run-registrations_partner_pricing_check') then
+        alter table "run-registrations" add constraint "run-registrations_partner_pricing_check" check (original_price > 0 and final_price > 0 and discount_amount >= 0 and discount_percentage >= 0 and discount_percentage < 100 and original_price - discount_amount = final_price and amount_cents = final_price);
+      end if;
+      if not exists (select 1 from pg_constraint where conname = 'run-registrations_partner_metadata_check') then
+        alter table "run-registrations" add constraint "run-registrations_partner_metadata_check" check ((partner_id is null and partner_name is null and discount_percentage = 0 and discount_amount = 0) or (partner_id is not null and partner_name is not null and discount_percentage > 0 and discount_amount > 0));
+      end if;
+    end $$;
+    create or replace function public.run_registration_pricing_defaults() returns trigger language plpgsql set search_path = public as $$ begin new.discount_percentage := coalesce(new.discount_percentage, 0); new.discount_amount := coalesce(new.discount_amount, 0); new.original_price := coalesce(new.original_price, new.amount_cents); new.final_price := coalesce(new.final_price, new.amount_cents); return new; end; $$;
+    drop trigger if exists "run-registrations_pricing_defaults" on "run-registrations";
+    create trigger "run-registrations_pricing_defaults" before insert on "run-registrations" for each row execute function public.run_registration_pricing_defaults();
+  `);
   await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
   await client.query(`alter table ${table.lots} add column if not exists order_index integer not null default 0`);
   await client.query(`alter table ${table.lots} add column if not exists continues_after_capacity boolean not null default false`);
+  await client.query(`alter table ${table.partners} add column if not exists deleted_at text`);
   await client.query(`create index if not exists "run-lots_event_order_idx" on ${table.lots}(event_id, order_index, starts_at)`);
   await client.query(`
     create or replace function public.run_select_lot_for_registration_number(
@@ -901,6 +1009,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
         disabledAt: row.disabled_at,
       })),
       partnershipLeads: [],
+      partners: [],
     };
   }
 
@@ -918,6 +1027,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     adminSessions: ['all', 'admin-auth'].includes(scope),
     adminUsers: ['all'].includes(scope),
     partnershipLeads: ['all', 'partnerships'].includes(scope),
+    partners: ['all', 'partners', 'availability', 'checkout'].includes(scope),
   };
   const emptyRows = { rows: [] };
   // node-postgres serializes a client; issuing Promise.all on one client is
@@ -925,7 +1035,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
   const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
   const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`) : emptyRows;
-  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number from ${table.registrations}`) : emptyRows;
+  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
@@ -935,6 +1045,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const adminSessions = include.adminSessions ? await client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`) : emptyRows;
   const adminUsers = include.adminUsers ? await client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`) : emptyRows;
   const partnershipLeads = include.partnershipLeads ? await client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`) : emptyRows;
+  const partners = include.partners ? await client.query(`select id, name, slug, discount_percentage, status, description, created_at, updated_at, deleted_at from ${table.partners}`) : emptyRows;
 
   return {
     events: events.rows.map((row) => ({
@@ -989,6 +1100,14 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       confirmationEmailId: row.confirmation_email_id,
       confirmationEmailError: row.confirmation_email_error,
       bibNumber: row.bib_number,
+      partnerId: row.partner_id,
+      partnerName: row.partner_name,
+      partnerLink: row.partner_link,
+      partnerIdentifiedAt: row.partner_identified_at,
+      discountPercentage: Number(row.discount_percentage || 0),
+      discountAmountCents: Number(row.discount_amount || 0),
+      originalPriceCents: Number(row.original_price ?? row.amount_cents),
+      finalPriceCents: Number(row.final_price ?? row.amount_cents),
     })),
     payments: payments.rows.map((row) => ({
       id: row.id,
@@ -1076,6 +1195,17 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     })),
+    partners: partners.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      discountPercentage: Number(row.discount_percentage),
+      status: row.status,
+      description: row.description,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      deletedAt: row.deleted_at,
+    })),
   };
 }
 
@@ -1144,8 +1274,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -1163,7 +1293,15 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          confirmation_email_provider = excluded.confirmation_email_provider,
          confirmation_email_id = excluded.confirmation_email_id,
          confirmation_email_error = excluded.confirmation_email_error,
-         bib_number = excluded.bib_number`,
+         bib_number = excluded.bib_number,
+         partner_id = excluded.partner_id,
+         partner_name = excluded.partner_name,
+         partner_link = excluded.partner_link,
+         partner_identified_at = excluded.partner_identified_at,
+         discount_percentage = excluded.discount_percentage,
+         discount_amount = excluded.discount_amount,
+         original_price = excluded.original_price,
+         final_price = excluded.final_price`,
       [
         item.id,
         item.eventId,
@@ -1184,6 +1322,14 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.confirmationEmailId || null,
         item.confirmationEmailError || null,
         item.bibNumber || null,
+        item.partnerId || null,
+        item.partnerName || null,
+        item.partnerLink || null,
+        item.partnerIdentifiedAt || null,
+        item.discountPercentage || 0,
+        item.discountAmountCents || 0,
+        item.originalPriceCents ?? item.amountCents,
+        item.finalPriceCents ?? item.amountCents,
       ],
     );
   }
@@ -1373,6 +1519,22 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
       ],
     );
   }
+
+  for (const item of database.partners) {
+    await client.query(
+      `insert into ${table.partners} (id, name, slug, discount_percentage, status, description, created_at, updated_at, deleted_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       on conflict (id) do update set
+         name = excluded.name,
+         slug = excluded.slug,
+         discount_percentage = excluded.discount_percentage,
+         status = excluded.status,
+         description = excluded.description,
+         updated_at = excluded.updated_at,
+         deleted_at = excluded.deleted_at`,
+      [item.id, item.name, item.slug, item.discountPercentage, item.status, item.description, item.createdAt, item.updatedAt, item.deletedAt],
+    );
+  }
 }
 
 function shouldUsePostgres() {
@@ -1495,9 +1657,10 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
          and registration.status = $3
          and (
            lot.status <> 'active'
-           or registration.amount_cents <> lot.price_cents
+           or registration.original_price <> lot.price_cents
+           or registration.amount_cents <> registration.final_price
            or payment.id is null
-           or payment.amount_cents <> lot.price_cents
+           or payment.amount_cents <> registration.final_price
          )
        for update of registration`,
       [event.id, input.cpfHash, 'pending_payment'],
@@ -1528,7 +1691,10 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
 
     const existingResult = await client.query(
       `select registration.id, registration.status, registration.expires_at,
-              registration.amount_cents, payment.id as payment_id, payment.checkout_url,
+              registration.amount_cents, registration.partner_id, registration.partner_name,
+              registration.discount_percentage, registration.discount_amount,
+              registration.original_price, registration.final_price,
+              payment.id as payment_id, payment.checkout_url,
               distance.name as distance_name, lot.name as lot_name
        from ${table.registrations} registration
        left join ${table.payments} payment on payment.registration_id = registration.id
@@ -1562,6 +1728,14 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         amountCents: shouldCreateCheckout ? Number(existing.amount_cents) : undefined,
         description: shouldCreateCheckout ? input.description(existing.distance_name, existing.lot_name) : undefined,
         shouldCreateCheckout,
+        partner: existing.partner_id ? {
+          id: existing.partner_id,
+          name: existing.partner_name,
+          discountPercentage: Number(existing.discount_percentage),
+          discountAmountCents: Number(existing.discount_amount),
+          originalPriceCents: Number(existing.original_price),
+          finalPriceCents: Number(existing.final_price),
+        } : null,
       };
     }
 
@@ -1655,12 +1829,27 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     const now = new Date().toISOString();
     const registrationId = randomUUID();
     const paymentId = randomUUID();
-    const amountCents = Number(lot.priceCents);
+    const originalPriceCents = Number(lot.priceCents);
+    const partnerResult = input.partnerId
+      ? await client.query(
+        `select id, name, discount_percentage, status, deleted_at from ${table.partners} where id = $1 limit 1`,
+        [input.partnerId],
+      )
+      : { rows: [] };
+    const partnerRow = partnerResult.rows[0];
+    const partnerPricing = partnerRow ? calculatePartnerPricing(originalPriceCents, {
+      id: String(partnerRow.id), name: String(partnerRow.name),
+      discountPercentage: Number(partnerRow.discount_percentage), status: partnerRow.status,
+      deletedAt: partnerRow.deleted_at,
+    }) : null;
+    const amountCents = partnerPricing?.finalPriceCents ?? originalPriceCents;
 
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null, null, null, null)`,
-      [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now, input.expiresAt],
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null, null, null, null, $11, $12, $13, $14, $15, $16, $17, $18)`,
+      [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now, input.expiresAt,
+        partnerPricing?.partnerId || null, partnerPricing?.partnerName || null, partnerPricing ? `/p/${input.partnerSlug || ''}` : null, partnerPricing ? now : null,
+        partnerPricing?.discountPercentage || 0, partnerPricing?.discountAmountCents || 0, originalPriceCents, amountCents],
     );
     await client.query(
       `insert into ${table.payments} (id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload)
@@ -1679,6 +1868,10 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         temporaryReservationsBefore: lot.temporaryReservations,
       }, now],
     );
+    if (partnerPricing) {
+      await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'registration.started', registrationId, eventId: event.id, newData: { partnerName: partnerPricing.partnerName, partnerLink: `/p/${input.partnerSlug || ''}` }, metadata: { status: 'pending_payment', accessAuditId: input.accessAuditId || null }, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+      await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'discount.applied', registrationId, eventId: event.id, newData: { discountPercentage: partnerPricing.discountPercentage, discountAmountCents: partnerPricing.discountAmountCents, originalPriceCents, finalPriceCents: amountCents }, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+    }
     await client.query('commit');
 
     return {
@@ -1696,6 +1889,14 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       amountCents,
       description: input.description(distance.name, lot.name),
       shouldCreateCheckout: true,
+      partner: partnerPricing ? {
+        id: partnerPricing.partnerId,
+        name: partnerPricing.partnerName,
+        discountPercentage: partnerPricing.discountPercentage,
+        discountAmountCents: partnerPricing.discountAmountCents,
+        originalPriceCents: partnerPricing.originalPriceCents,
+        finalPriceCents: partnerPricing.finalPriceCents,
+      } : null,
     };
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
@@ -1722,7 +1923,7 @@ export async function attachCheckoutToPaymentInPostgres(input: {
       `update ${table.payments}
        set provider = $1, provider_payment_id = $2, checkout_url = $3, updated_at = $4
        where registration_id = $5
-       returning id`,
+       returning id, registration_id`,
       ['infinitepay', input.providerPaymentId, input.checkoutUrl, now, input.registrationId],
     );
     const paymentId = paymentResult.rows[0]?.id || '';
@@ -1740,6 +1941,8 @@ export async function attachCheckoutToPaymentInPostgres(input: {
         now,
       ],
     );
+    const registration = await client.query(`select partner_id,event_id from ${table.registrations} where id=$1`, [input.registrationId]);
+    if (registration.rows[0]?.partner_id) await insertPartnerAudit(client, { partnerId: registration.rows[0].partner_id, action: 'payment.started', registrationId: input.registrationId, eventId: registration.rows[0].event_id, newData: { provider: 'infinitepay', providerPaymentId: input.providerPaymentId }, createdAt: now });
     await client.query('commit');
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
@@ -1762,7 +1965,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
     await client.query("set local statement_timeout = '15s'");
 
     const result = await client.query(
-      `select registration.id, registration.status, registration.amount_cents, registration.lot_id,
+      `select registration.id, registration.status, registration.amount_cents, registration.lot_id, registration.partner_id, registration.event_id,
               payment.id as payment_id, payment.status as payment_status,
               payment.gateway_transaction_id as existing_gateway_transaction_id,
               lot.status as lot_status, lot.price_cents as lot_price_cents
@@ -1791,6 +1994,10 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
          where id = $4`,
         [input.providerTransactionId, input.payload, now, row.payment_id],
       );
+      if (row.partner_id) {
+        await insertPartnerAudit(client, { partnerId: row.partner_id, action: 'webhook.received', registrationId: row.id, eventId: row.event_id, metadata: { eventType: input.eventType, providerEventId: input.providerEventId }, createdAt: now });
+        await insertPartnerAudit(client, { partnerId: row.partner_id, action: 'payment.declined', registrationId: row.id, eventId: row.event_id, oldData: { expectedAmountCents: Number(row.amount_cents) }, newData: { receivedAmountCents: input.amountCents }, metadata: { reason: 'amount_mismatch' }, createdAt: now });
+      }
       await client.query('commit');
       return { statusCode: 409, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, error: 'amount_mismatch' };
     }
@@ -1864,6 +2071,10 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
         ...(input.auditMetadata || {}),
       }, now],
     );
+    if (row.partner_id && !duplicate) {
+      await insertPartnerAudit(client, { partnerId: row.partner_id, action: 'webhook.received', registrationId: row.id, eventId: row.event_id, metadata: { eventType: input.eventType, providerEventId: input.providerEventId, gatewayStatus: input.gatewayStatus }, createdAt: now });
+      await insertPartnerAudit(client, { partnerId: row.partner_id, action: 'payment.approved', registrationId: row.id, eventId: row.event_id, oldData: { status: row.status }, newData: { status: 'paid', amountCents: Number(row.amount_cents) }, metadata: { providerTransactionId: input.providerTransactionId }, createdAt: now });
+    }
     await client.query('commit');
     return { statusCode: 200, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, duplicated: duplicate };
   } catch (error) {
@@ -1886,13 +2097,14 @@ export async function markPaymentCreationFailedInPostgres(registrationId: string
       `update ${table.registrations}
        set status = $1, updated_at = $2
        where id = $3 and status = $4
-       returning lot_id`,
+       returning lot_id,partner_id,event_id`,
       ['payment_failed', now, registrationId, 'pending_payment'],
     );
     await client.query(
       `update ${table.payments} set status = $1, updated_at = $2 where registration_id = $3`,
       ['payment_failed', now, registrationId],
     );
+    if (registrationResult.rows[0]?.partner_id) await insertPartnerAudit(client, { partnerId: registrationResult.rows[0].partner_id, action: 'payment.declined', registrationId, eventId: registrationResult.rows[0].event_id, newData: { status: 'payment_failed' }, metadata: { reason: 'checkout_creation_failed' }, createdAt: now });
 
     await client.query('commit');
   } catch (error) {
@@ -2031,7 +2243,7 @@ export async function cancelRegistrationInPostgres(input: {
     await client.query('begin');
     await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
     const registrationResult = await client.query(
-      `select status, lot_id from ${table.registrations} where id = $1 for update`,
+      `select status, lot_id, partner_id, event_id from ${table.registrations} where id = $1 for update`,
       [input.registrationId],
     );
     const registration = registrationResult.rows[0];
@@ -2082,6 +2294,7 @@ export async function cancelRegistrationInPostgres(input: {
         previousStatus: registration.status,
       }, input.sessionId, input.ipAddress, input.userAgent, now],
     );
+    if (registration.partner_id) await insertPartnerAudit(client, { partnerId: registration.partner_id, action: 'registration.cancelled', userId: input.actor, registrationId: input.registrationId, eventId: registration.event_id, oldData: { status: registration.status }, newData: { status: 'cancelled' }, metadata: { reason: input.reason }, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
     await client.query('commit');
     return { status: 'cancelled', previousStatus: registration.status };
   } catch (error) {
@@ -2182,6 +2395,351 @@ export async function getReconciliationDashboardInPostgres() {
       resolvedAt: row.resolved_at, resolutionNotes: row.resolution_notes,
     })),
   };
+}
+
+export type PartnerAnalyticsFilters = {
+  eventId?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  paymentStatus?: string;
+  partnerId?: string;
+  city?: string;
+};
+
+function partnerAnalyticsFilter(filters: PartnerAnalyticsFilters) {
+  const values: unknown[] = [];
+  const conditions = ['r.partner_id is not null'];
+  const add = (value: unknown) => { values.push(value); return `$${values.length}`; };
+  if (filters.eventId) conditions.push(`r.event_id = ${add(filters.eventId)}`);
+  if (filters.dateFrom) conditions.push(`r.created_at::timestamptz >= ${add(filters.dateFrom)}::date`);
+  if (filters.dateTo) conditions.push(`r.created_at::timestamptz < (${add(filters.dateTo)}::date + interval '1 day')`);
+  if (filters.paymentStatus) conditions.push(`r.status = ${add(filters.paymentStatus)}`);
+  if (filters.partnerId) conditions.push(`r.partner_id = ${add(filters.partnerId)}::uuid`);
+  if (filters.city) conditions.push(`lower(coalesce(r.payload->>'city', '')) = lower(${add(filters.city)}::text)`);
+  return { sql: conditions.join(' and '), values };
+}
+
+function mapPartnerMetric(row: Record<string, unknown>) {
+  return {
+    label: String(row.label || ''),
+    registrations: Number(row.registrations || 0),
+    grossRevenueCents: Number(row.gross_revenue_cents || 0),
+    discountAmountCents: Number(row.discount_amount_cents || 0),
+    netRevenueCents: Number(row.net_revenue_cents || 0),
+    ...(row.share_percentage === undefined ? {} : { sharePercentage: Number(row.share_percentage || 0) }),
+  };
+}
+
+function mapPartnerRanking(row: Record<string, unknown>) {
+  return {
+    partnerId: String(row.partner_id), name: String(row.name), slug: String(row.slug), status: row.status as PartnerRecord['status'],
+    paidRegistrations: Number(row.paid_registrations || 0), averageTicketCents: Number(row.average_ticket_cents || 0),
+    ...mapPartnerMetric({ ...row, label: row.name }),
+  };
+}
+
+export async function getPartnerDashboardInPostgres(filters: PartnerAnalyticsFilters, page = 1, pageSize = 20) {
+  await ensurePostgresReady();
+  const pool = requirePool();
+  const filtered = partnerAnalyticsFilter(filters);
+  const offset = (page - 1) * pageSize;
+  const partnerScope = filters.partnerId ? 'and p.id = $1::uuid' : '';
+  const partnerScopeValues = filters.partnerId ? [filters.partnerId] : [];
+  const financial = `filter (where status = 'paid')`;
+  const [summaryResult, rankingResult, monthlyResult, comparisonResult, emptyResult, inactiveResult, growthResult, optionsResult] = await Promise.all([
+    pool.query(
+      `with filtered as (select * from ${table.registrations} r where ${filtered.sql}),
+       partner_totals as (
+         select partner_id, max(partner_name) name, count(*) registrations
+         from filtered group by partner_id order by registrations desc, name asc limit 1
+       )
+       select count(*)::int total_registrations,
+         count(*) filter (where status = 'paid')::int paid_registrations,
+         coalesce(sum(original_price) ${financial}, 0)::bigint gross_revenue_cents,
+         coalesce(sum(discount_amount) ${financial}, 0)::bigint discount_amount_cents,
+         coalesce(sum(final_price) ${financial}, 0)::bigint net_revenue_cents,
+         coalesce(round(avg(final_price) ${financial}), 0)::bigint average_ticket_cents,
+         (select partner_id from partner_totals) leader_id,
+         (select name from partner_totals) leader_name,
+         coalesce((select registrations from partner_totals), 0)::int leader_registrations
+       from filtered`, filtered.values),
+    pool.query(
+      `with filtered as (select * from ${table.registrations} r where ${filtered.sql}), ranked as (
+         select p.id partner_id, p.name, p.slug, p.status, count(f.id)::int registrations,
+           count(f.id) filter (where f.status='paid')::int paid_registrations,
+           coalesce(sum(f.original_price) filter (where f.status='paid'),0)::bigint gross_revenue_cents,
+           coalesce(sum(f.discount_amount) filter (where f.status='paid'),0)::bigint discount_amount_cents,
+           coalesce(sum(f.final_price) filter (where f.status='paid'),0)::bigint net_revenue_cents,
+           coalesce(round(avg(f.final_price) filter (where f.status='paid')),0)::bigint average_ticket_cents
+         from ${table.partners} p left join filtered f on f.partner_id=p.id
+         where p.deleted_at is null ${filters.partnerId ? `and p.id = $${filtered.values.length + 1}::uuid` : ''}
+         group by p.id, p.name, p.slug, p.status
+       ) select *, count(*) over()::int total_count from ranked
+         order by registrations desc, name asc limit $${filtered.values.length + (filters.partnerId ? 2 : 1)} offset $${filtered.values.length + (filters.partnerId ? 3 : 2)}`,
+      [...filtered.values, ...(filters.partnerId ? [filters.partnerId] : []), pageSize, offset]),
+    pool.query(
+      `with filtered as (select * from ${table.registrations} r where ${filtered.sql})
+       select to_char(date_trunc('month', created_at::timestamptz), 'YYYY-MM') label,
+         count(*)::int registrations, count(*) filter (where status='paid')::int paid_registrations,
+         coalesce(sum(original_price) filter (where status='paid'),0)::bigint gross_revenue_cents,
+         coalesce(sum(discount_amount) filter (where status='paid'),0)::bigint discount_amount_cents,
+         coalesce(sum(final_price) filter (where status='paid'),0)::bigint net_revenue_cents
+       from filtered group by date_trunc('month', created_at::timestamptz) order by date_trunc('month', created_at::timestamptz) asc`, filtered.values),
+    pool.query(
+      `with filtered as (select * from ${table.registrations} r where ${filtered.sql}), aggregate as (
+         select p.id partner_id, p.name, p.slug, p.status, count(f.id)::int registrations,
+           count(f.id) filter (where f.status='paid')::int paid_registrations,
+           coalesce(sum(f.original_price) filter (where f.status='paid'),0)::bigint gross_revenue_cents,
+           coalesce(sum(f.discount_amount) filter (where f.status='paid'),0)::bigint discount_amount_cents,
+           coalesce(sum(f.final_price) filter (where f.status='paid'),0)::bigint net_revenue_cents,
+           coalesce(round(avg(f.final_price) filter (where f.status='paid')),0)::bigint average_ticket_cents
+         from ${table.partners} p left join filtered f on f.partner_id=p.id
+         where p.deleted_at is null ${filters.partnerId ? `and p.id = $${filtered.values.length + 1}::uuid` : ''}
+         group by p.id, p.name, p.slug, p.status
+       ), totals as (select coalesce(sum(registrations),0) total from aggregate)
+       select aggregate.*, case when totals.total=0 then 0 else round(aggregate.registrations::numeric * 100 / totals.total, 2) end share_percentage
+       from aggregate cross join totals order by registrations desc, name asc limit 12`,
+      [...filtered.values, ...(filters.partnerId ? [filters.partnerId] : [])]),
+    pool.query(
+      `select p.id partner_id, p.name from ${table.partners} p
+       where p.deleted_at is null and not exists (select 1 from ${table.registrations} r where r.partner_id=p.id)
+       ${partnerScope} order by p.name asc limit 100`, partnerScopeValues),
+    pool.query(
+      `select p.id partner_id, p.name from ${table.partners} p where p.deleted_at is null and p.status='inactive'
+       ${partnerScope} order by p.name asc limit 100`, partnerScopeValues),
+    pool.query(
+      `with counts as (
+         select p.id partner_id, p.name,
+           count(r.id) filter (where r.created_at::timestamptz >= date_trunc('month', now()))::int current_count,
+           count(r.id) filter (where r.created_at::timestamptz >= date_trunc('month', now()) - interval '1 month' and r.created_at::timestamptz < date_trunc('month', now()))::int previous_count
+         from ${table.partners} p left join ${table.registrations} r on r.partner_id=p.id
+         where p.deleted_at is null ${partnerScope} group by p.id,p.name
+       ) select *, case when previous_count=0 then case when current_count>0 then 100 else 0 end
+         else round((current_count-previous_count)::numeric*100/previous_count,2) end change_percentage
+       from counts where current_count<>previous_count order by change_percentage desc, name asc`, partnerScopeValues),
+    pool.query(
+      `select jsonb_build_object(
+        'events', (select coalesce(jsonb_agg(jsonb_build_object('id',id,'name',name) order by name),'[]') from ${table.events}),
+        'partners', (select coalesce(jsonb_agg(jsonb_build_object('id',id,'name',name) order by name),'[]') from ${table.partners} where deleted_at is null),
+        'cities', (select coalesce(jsonb_agg(city order by city),'[]') from (select distinct payload->>'city' city from ${table.registrations} where partner_id is not null and coalesce(payload->>'city','')<>'') c)
+       ) options`),
+  ]);
+  const summary = summaryResult.rows[0] || {};
+  const ranking = rankingResult.rows.map(mapPartnerRanking);
+  const total = Number(rankingResult.rows[0]?.total_count || 0);
+  const growth = growthResult.rows.map((row) => ({ partnerId: String(row.partner_id), name: String(row.name), current: Number(row.current_count), previous: Number(row.previous_count), changePercentage: Number(row.change_percentage) }));
+  const totalRegistrations = Number(summary.total_registrations || 0);
+  const paidRegistrations = Number(summary.paid_registrations || 0);
+  const options = optionsResult.rows[0]?.options || {};
+  return {
+    generatedAt: new Date().toISOString(),
+    summary: {
+      totalPartners: total, totalRegistrations, paidRegistrations,
+      grossRevenueCents: Number(summary.gross_revenue_cents || 0), discountAmountCents: Number(summary.discount_amount_cents || 0),
+      netRevenueCents: Number(summary.net_revenue_cents || 0), averageTicketCents: Number(summary.average_ticket_cents || 0),
+      leader: summary.leader_id ? { partnerId: String(summary.leader_id), name: String(summary.leader_name), registrations: Number(summary.leader_registrations) } : null,
+      conversionRate: totalRegistrations ? Number(((paidRegistrations * 100) / totalRegistrations).toFixed(2)) : 0,
+      conversionDefinition: 'Inscricoes pagas divididas pelo total de inscricoes atribuidas a parceiros.',
+    },
+    ranking,
+    rankingPagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
+    charts: { monthly: monthlyResult.rows.map(mapPartnerMetric), comparison: comparisonResult.rows.map(mapPartnerRanking) },
+    indicators: {
+      leader: comparisonResult.rows[0] ? mapPartnerRanking(comparisonResult.rows[0]) : null,
+      withoutRegistrations: emptyResult.rows.map((row) => ({ partnerId: String(row.partner_id), name: String(row.name) })),
+      inactive: inactiveResult.rows.map((row) => ({ partnerId: String(row.partner_id), name: String(row.name) })),
+      fastestGrowing: growth.filter((item) => item.changePercentage > 0).slice(0, 5),
+      declining: growth.filter((item) => item.changePercentage < 0).reverse().slice(0, 5),
+    },
+    options: { events: options.events || [], partners: options.partners || [], cities: options.cities || [], paymentStatuses: ['pending_payment','paid','payment_failed','expired','cancelled','refunded'] },
+  };
+}
+
+export async function getPartnerDetailInPostgres(partnerId: string, filters: PartnerAnalyticsFilters, page = 1, pageSize = 25) {
+  await ensurePostgresReady();
+  const pool = requirePool();
+  const scopedFilters = { ...filters, partnerId };
+  const filtered = partnerAnalyticsFilter(scopedFilters);
+  const offset = (page - 1) * pageSize;
+  const [partnerResult, metricsResult, monthlyResult, registrationsResult] = await Promise.all([
+    pool.query(`select * from ${table.partners} where id=$1::uuid and deleted_at is null limit 1`, [partnerId]),
+    pool.query(`with filtered as (select * from ${table.registrations} r where ${filtered.sql}) select
+      count(*)::int registrations, count(*) filter(where status='paid')::int paid_registrations,
+      coalesce(sum(original_price) filter(where status='paid'),0)::bigint gross_revenue_cents,
+      coalesce(sum(discount_amount) filter(where status='paid'),0)::bigint discount_amount_cents,
+      coalesce(sum(final_price) filter(where status='paid'),0)::bigint net_revenue_cents,
+      coalesce(round(avg(final_price) filter(where status='paid')),0)::bigint average_ticket_cents,
+      max(created_at) last_registration_at from filtered`, filtered.values),
+    pool.query(`with filtered as (select * from ${table.registrations} r where ${filtered.sql}) select
+      to_char(date_trunc('month',created_at::timestamptz),'YYYY-MM') label, count(*)::int registrations,
+      coalesce(sum(original_price) filter(where status='paid'),0)::bigint gross_revenue_cents,
+      coalesce(sum(discount_amount) filter(where status='paid'),0)::bigint discount_amount_cents,
+      coalesce(sum(final_price) filter(where status='paid'),0)::bigint net_revenue_cents
+      from filtered group by date_trunc('month',created_at::timestamptz) order by date_trunc('month',created_at::timestamptz)`, filtered.values),
+    pool.query(`with filtered as (select * from ${table.registrations} r where ${filtered.sql}) select
+      r.id, coalesce(r.payload->>'fullName','Atleta') athlete_name, e.name event_name, coalesce(r.payload->>'city','') city,
+      r.created_at, r.original_price, r.discount_amount, r.final_price, r.status, count(*) over()::int total_count
+      from filtered r join ${table.events} e on e.id=r.event_id order by r.created_at desc
+      limit $${filtered.values.length + 1} offset $${filtered.values.length + 2}`, [...filtered.values, pageSize, offset]),
+  ]);
+  if (!partnerResult.rows[0]) return null;
+  const partner = partnerResult.rows[0];
+  const metrics = metricsResult.rows[0] || {};
+  const total = Number(registrationsResult.rows[0]?.total_count || 0);
+  return {
+    generatedAt: new Date().toISOString(),
+    partner: { id: String(partner.id), name: String(partner.name), slug: String(partner.slug), discountPercentage: Number(partner.discount_percentage), status: partner.status, description: partner.description || null, createdAt: String(partner.created_at), updatedAt: String(partner.updated_at) },
+    metrics: { registrations: Number(metrics.registrations || 0), paidRegistrations: Number(metrics.paid_registrations || 0), grossRevenueCents: Number(metrics.gross_revenue_cents || 0), discountAmountCents: Number(metrics.discount_amount_cents || 0), netRevenueCents: Number(metrics.net_revenue_cents || 0), averageTicketCents: Number(metrics.average_ticket_cents || 0), lastRegistrationAt: metrics.last_registration_at ? String(metrics.last_registration_at) : null },
+    monthly: monthlyResult.rows.map(mapPartnerMetric),
+    registrations: registrationsResult.rows.map((row) => ({ id: String(row.id), athleteName: String(row.athlete_name), eventName: String(row.event_name), city: String(row.city), createdAt: String(row.created_at), originalPriceCents: Number(row.original_price), discountAmountCents: Number(row.discount_amount), finalPriceCents: Number(row.final_price), paymentStatus: String(row.status) })),
+    pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
+  };
+}
+
+export async function exportPartnerRegistrationsInPostgres(filters: PartnerAnalyticsFilters) {
+  await ensurePostgresReady();
+  const filtered = partnerAnalyticsFilter(filters);
+  const result = await requirePool().query(`select r.id, coalesce(r.payload->>'fullName','Atleta') athlete_name,
+    e.name event_name, p.name partner_name, coalesce(r.payload->>'city','') city, r.created_at,
+    r.original_price, r.discount_amount, r.final_price, r.discount_percentage, r.status
+    from ${table.registrations} r join ${table.events} e on e.id=r.event_id join ${table.partners} p on p.id=r.partner_id
+    where ${filtered.sql} order by r.created_at desc limit 100000`, filtered.values);
+  return result.rows.map((row) => ({ id: String(row.id), athleteName: String(row.athlete_name), eventName: String(row.event_name), partnerName: String(row.partner_name), city: String(row.city), createdAt: String(row.created_at), originalPriceCents: Number(row.original_price), discountAmountCents: Number(row.discount_amount), finalPriceCents: Number(row.final_price), discountPercentage: Number(row.discount_percentage), paymentStatus: String(row.status) }));
+}
+
+export type PartnerAuditAction =
+  | 'partner.created' | 'partner.updated' | 'partner.activated' | 'partner.inactivated' | 'partner.deleted'
+  | 'partner.link_accessed' | 'partner.link_rejected' | 'registration.started' | 'discount.applied'
+  | 'payment.started' | 'webhook.received' | 'payment.approved' | 'payment.declined'
+  | 'registration.cancelled' | 'payment.refunded' | 'consistency.issue_detected' | 'partner.persistence_failed';
+
+export type PartnerAuditInput = {
+  partnerId?: string | null; action: PartnerAuditAction; userId?: string | null; registrationId?: string | null;
+  eventId?: string | null; oldData?: unknown; newData?: unknown; metadata?: Record<string, unknown>;
+  ipAddress?: string | null; userAgent?: string | null; createdAt?: string;
+};
+
+async function insertPartnerAudit(client: Queryable, input: PartnerAuditInput) {
+  const id = randomUUID();
+  await client.query(
+    `insert into ${table.partnerAuditLogs}
+     (id,partner_id,action,user_id,registration_id,event_id,old_data,new_data,metadata,ip_address,user_agent,created_at)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [id, input.partnerId || null, input.action, input.userId || null, input.registrationId || null, input.eventId || null,
+      input.oldData ?? null, input.newData ?? null, input.metadata || {}, input.ipAddress || null, input.userAgent || null, input.createdAt || new Date().toISOString()],
+  );
+  return id;
+}
+
+export async function appendPartnerAuditLogInPostgres(input: PartnerAuditInput) {
+  await ensurePostgresReady();
+  return insertPartnerAudit(requirePool(), input);
+}
+
+export async function appendPartnerPaymentStatusAuditInPostgres(registrationId: string, status: RegistrationStatus, metadata: Record<string, unknown> = {}) {
+  await ensurePostgresReady(); const client = await requirePool().connect();
+  try { await client.query('begin'); const row = (await client.query(`select partner_id,event_id from ${table.registrations} where id=$1`, [registrationId])).rows[0];
+    if (row?.partner_id) { const now=new Date().toISOString(); await insertPartnerAudit(client,{partnerId:row.partner_id,action:'webhook.received',registrationId,eventId:row.event_id,metadata,createdAt:now}); const action:PartnerAuditAction=status==='refunded'?'payment.refunded':'payment.declined'; await insertPartnerAudit(client,{partnerId:row.partner_id,action,registrationId,eventId:row.event_id,newData:{status},metadata,createdAt:now}); }
+    await client.query('commit');
+  } catch(error){await client.query('rollback').catch(()=>undefined);throw error;} finally{client.release();}
+}
+
+function mapPartnerRow(row: Record<string, unknown>): PartnerRecord {
+  return { id: String(row.id), name: String(row.name), slug: String(row.slug), discountPercentage: Number(row.discount_percentage), status: row.status as PartnerRecord['status'], description: row.description ? String(row.description) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at), deletedAt: row.deleted_at ? String(row.deleted_at) : null };
+}
+
+export async function mutatePartnerWithAuditInPostgres(input: {
+  mode: 'create' | 'update' | 'status' | 'delete'; partnerId?: string; partner?: Pick<PartnerRecord, 'name' | 'slug' | 'discountPercentage' | 'status' | 'description'>;
+  status?: PartnerRecord['status']; actor: string; actorRole: string; sessionId: string; ipAddress: string | null; userAgent: string | null;
+}) {
+  const client = await requirePool().connect();
+  try {
+    await ensurePostgresReady(); await client.query('begin');
+    const now = new Date().toISOString();
+    let before: PartnerRecord | null = null; let after: PartnerRecord | null = null; let action: PartnerAuditAction;
+    if (input.mode === 'create') {
+      const id = randomUUID(); const partner = input.partner!;
+      const result = await client.query(`insert into ${table.partners} (id,name,slug,discount_percentage,status,description,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$7,null) returning *`, [id,partner.name,partner.slug,partner.discountPercentage,partner.status,partner.description,now]);
+      after = mapPartnerRow(result.rows[0]); action = 'partner.created';
+    } else {
+      const current = await client.query(`select * from ${table.partners} where id=$1::uuid and deleted_at is null for update`, [input.partnerId]);
+      if (!current.rows[0]) { await client.query('rollback'); return null; }
+      before = mapPartnerRow(current.rows[0]);
+      if (input.mode === 'update') {
+        const partner = input.partner!;
+        const result = await client.query(`update ${table.partners} set name=$1,slug=$2,discount_percentage=$3,status=$4,description=$5,updated_at=$6 where id=$7::uuid returning *`, [partner.name,partner.slug,partner.discountPercentage,partner.status,partner.description,now,input.partnerId]);
+        after = mapPartnerRow(result.rows[0]); action = 'partner.updated';
+      } else if (input.mode === 'status') {
+        const result = await client.query(`update ${table.partners} set status=$1,updated_at=$2 where id=$3::uuid returning *`, [input.status,now,input.partnerId]);
+        after = mapPartnerRow(result.rows[0]); action = input.status === 'active' ? 'partner.activated' : 'partner.inactivated';
+      } else {
+        const active = await client.query(`select count(*)::int count from ${table.registrations} where partner_id=$1::uuid and status in ('pending_payment','paid')`, [input.partnerId]);
+        const result = await client.query(`update ${table.partners} set status='inactive',deleted_at=$1,updated_at=$1 where id=$2::uuid returning *`, [now,input.partnerId]);
+        after = mapPartnerRow(result.rows[0]); action = 'partner.deleted';
+        if (Number(active.rows[0]?.count || 0) > 0) await client.query(`insert into ${table.operationalAlerts} (id,dedupe_key,severity,alert_type,title,message,entity_type,entity_id,payload,status,detected_at) values ($1,$2,'critical','partner_removed_with_active_registrations','Parceiro removido com inscricoes ativas',$3,'partner',$4,$5,'open',$6) on conflict (dedupe_key) do update set payload=excluded.payload,detected_at=excluded.detected_at,status='open',resolved_at=null`, [randomUUID(),`partner-removed-active:${input.partnerId}`,`${before.name} foi removido com inscricoes pendentes ou pagas.`,input.partnerId,{ activeRegistrations: Number(active.rows[0].count) },now]);
+      }
+    }
+    await insertPartnerAudit(client, { partnerId: after!.id, action, userId: input.actor, oldData: before, newData: after, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+    await client.query(`insert into ${table.auditLogs} (id,actor,actor_role,action,entity_type,entity_id,payload,session_id,ip_address,user_agent,created_at) values ($1,$2,$3,$4,'partner',$5,$6,$7,$8,$9,$10)`, [randomUUID(),input.actor,input.actorRole,action,after!.id,{before,after},input.sessionId,input.ipAddress,input.userAgent,now]);
+    await client.query('commit'); return after;
+  } catch (error) { await client.query('rollback').catch(() => undefined); throw error; }
+  finally { client.release(); }
+}
+
+function mapPartnerAuditRow(row: Record<string, unknown>) {
+  return { id: String(row.id), partnerId: row.partner_id ? String(row.partner_id) : null, partnerName: row.partner_name ? String(row.partner_name) : null, action: String(row.action), userId: row.user_id ? String(row.user_id) : null, registrationId: row.registration_id ? String(row.registration_id) : null, athleteName: row.athlete_name ? String(row.athlete_name) : null, eventId: row.event_id ? String(row.event_id) : null, eventName: row.event_name ? String(row.event_name) : null, oldData: row.old_data || null, newData: row.new_data || null, metadata: row.metadata || {}, ipAddress: row.ip_address ? String(row.ip_address) : null, userAgent: row.user_agent ? String(row.user_agent) : null, createdAt: String(row.created_at) };
+}
+
+export async function listPartnerAuditLogsInPostgres(filters: { partnerId?: string; registrationId?: string; action?: string; dateFrom?: string; dateTo?: string }, page = 1, pageSize = 25) {
+  await ensurePostgresReady(); const values: unknown[] = []; const where: string[] = ['1=1']; const add = (value: unknown) => { values.push(value); return `$${values.length}`; };
+  if (filters.partnerId) where.push(`log.partner_id=${add(filters.partnerId)}::uuid`);
+  if (filters.registrationId) where.push(`log.registration_id=${add(filters.registrationId)}`);
+  if (filters.action) where.push(`log.action=${add(filters.action)}`);
+  if (filters.dateFrom) where.push(`log.created_at::timestamptz>=${add(filters.dateFrom)}::date`);
+  if (filters.dateTo) where.push(`log.created_at::timestamptz<(${add(filters.dateTo)}::date+interval '1 day')`);
+  const result = await requirePool().query(`select log.*,p.name partner_name,r.payload->>'fullName' athlete_name,e.name event_name,count(*) over()::int total_count from ${table.partnerAuditLogs} log left join ${table.partners} p on p.id=log.partner_id left join ${table.registrations} r on r.id=log.registration_id left join ${table.events} e on e.id=log.event_id where ${where.join(' and ')} order by log.created_at desc limit $${values.length+1} offset $${values.length+2}`, [...values,pageSize,(page-1)*pageSize]);
+  const total = Number(result.rows[0]?.total_count || 0); return { logs: result.rows.map(mapPartnerAuditRow), pagination: { page,pageSize,total,totalPages: Math.ceil(total/pageSize) } };
+}
+
+export async function getRegistrationPartnerAuditInPostgres(registrationId: string) {
+  await ensurePostgresReady();
+  const result = await requirePool().query(`with access_ids as (select metadata->>'accessAuditId' id from ${table.partnerAuditLogs} where registration_id=$1 and action='registration.started') select log.*,p.name partner_name,r.payload->>'fullName' athlete_name,e.name event_name from ${table.partnerAuditLogs} log left join ${table.partners} p on p.id=log.partner_id left join ${table.registrations} r on r.id=log.registration_id left join ${table.events} e on e.id=log.event_id where log.registration_id=$1 or log.id::text in (select id from access_ids where id is not null) order by log.created_at asc`, [registrationId]);
+  return result.rows.map(mapPartnerAuditRow);
+}
+
+export async function getPartnerMonitoringInPostgres(page = 1, pageSize = 25) {
+  await ensurePostgresReady();
+  const result = await requirePool().query(`with linked as (select distinct partner_id,registration_id from ${table.partnerAuditLogs} where action='registration.started' and coalesce(metadata->>'accessAuditId','')<>''), audit as (
+    select log.partner_id,count(*) filter(where action='partner.link_accessed')::int accesses,count(distinct log.registration_id) filter(where action='registration.started')::int started,count(distinct log.registration_id) filter(where action='payment.approved')::int completed,count(distinct log.registration_id) filter(where action='payment.approved' and exists(select 1 from linked where linked.partner_id=log.partner_id and linked.registration_id=log.registration_id))::int converted,count(*) filter(where action in ('partner.link_rejected','payment.declined','partner.persistence_failed','consistency.issue_detected'))::int failures from ${table.partnerAuditLogs} log group by log.partner_id
+  ), rows as (select p.id partner_id,p.name,p.status,coalesce(a.accesses,0)::int accesses,coalesce(a.started,0)::int started,coalesce(a.completed,0)::int completed,coalesce(a.failures,0)::int failures,
+    case when coalesce(a.accesses,0)=0 then 0 else round(a.converted::numeric*100/a.accesses,2) end conversion_rate,
+    greatest(coalesce(a.started,0)-coalesce(a.completed,0),0)::int abandoned,
+    case when coalesce(a.started,0)=0 then 0 else round(greatest(a.started-a.completed,0)::numeric*100/a.started,2) end abandonment_rate
+    from ${table.partners} p left join audit a on a.partner_id=p.id where p.deleted_at is null)
+    select *,count(*) over()::int total_count from rows order by accesses desc,name asc limit $1 offset $2`, [pageSize,(page-1)*pageSize]);
+  const total = Number(result.rows[0]?.total_count || 0); const rows = result.rows.map((row) => ({ partnerId:String(row.partner_id),name:String(row.name),status:row.status,accesses:Number(row.accesses),started:Number(row.started),completed:Number(row.completed),conversionRate:Number(row.conversion_rate),abandoned:Number(row.abandoned),abandonmentRate:Number(row.abandonment_rate),failures:Number(row.failures) }));
+  const totals = await requirePool().query(`with linked as (select distinct registration_id from ${table.partnerAuditLogs} where action='registration.started' and coalesce(metadata->>'accessAuditId','')<>'') select count(*) filter(where action='partner.link_accessed')::int accesses,count(distinct registration_id) filter(where action='registration.started')::int started,count(distinct registration_id) filter(where action='payment.approved')::int completed,count(distinct registration_id) filter(where action='payment.approved' and registration_id in(select registration_id from linked))::int converted,count(*) filter(where action in ('partner.link_rejected','payment.declined','partner.persistence_failed','consistency.issue_detected'))::int failures from ${table.partnerAuditLogs}`);
+  const t=totals.rows[0]||{}; const accesses=Number(t.accesses||0),started=Number(t.started||0),completed=Number(t.completed||0),converted=Number(t.converted||0);
+  return { generatedAt:new Date().toISOString(),totals:{accesses,started,completed,conversionRate:accesses?Number((converted*100/accesses).toFixed(2)):0,abandoned:Math.max(started-completed,0),abandonmentRate:started?Number((Math.max(started-completed,0)*100/started).toFixed(2)):0,failures:Number(t.failures||0)},partners:rows,pagination:{page,pageSize,total,totalPages:Math.ceil(total/pageSize)} };
+}
+
+export async function runPartnerConsistencyCheckInPostgres(actor = 'system:cron') {
+  await ensurePostgresReady(); const client = await requirePool().connect(); const runId=randomUUID(); const now=new Date().toISOString();
+  try { await client.query('begin');
+    const issues = await client.query(`select * from (
+      select r.partner_id,r.id registration_id,r.event_id,'partner_without_discount' issue_code,'Parceiro vinculado sem desconto positivo' message from ${table.registrations} r where r.partner_id is not null and (r.discount_percentage<=0 or r.discount_amount<=0)
+      union all select r.partner_id,r.id,r.event_id,'pending_discount_mismatch','Desconto da inscricao pendente diverge do parceiro' from ${table.registrations} r join ${table.partners} p on p.id=r.partner_id where r.status='pending_payment' and r.discount_percentage<>p.discount_percentage
+      union all select r.partner_id,r.id,r.event_id,'payment_amount_mismatch','Pagamento diverge do valor final da inscricao' from ${table.registrations} r join ${table.payments} pay on pay.registration_id=r.id where r.partner_id is not null and pay.amount_cents<>r.final_price
+      union all select null::uuid,r.id,r.event_id,'approved_without_partner','Pagamento aprovado com evidencia de parceiro sem partner_id persistido' from ${table.registrations} r where r.status='paid' and r.partner_id is null and exists(select 1 from ${table.partnerAuditLogs} l where l.registration_id=r.id and l.action='discount.applied')
+      union all select r.partner_id,r.id,r.event_id,'partner_snapshot_incomplete','Snapshot de parceiro incompleto' from ${table.registrations} r where r.partner_id is not null and (r.partner_name is null or r.partner_link is null or r.partner_identified_at is null)
+    ) issues`);
+    for (const issue of issues.rows) {
+      const key=`partner-consistency:${issue.issue_code}:${issue.registration_id}`;
+      await client.query(`insert into ${table.operationalAlerts} (id,dedupe_key,severity,alert_type,title,message,entity_type,entity_id,payload,status,detected_at) values ($1,$2,'critical',$3,'Inconsistencia no sistema de parceiros',$4,'registration',$5,$6,'open',$7) on conflict(dedupe_key) do update set payload=excluded.payload,detected_at=excluded.detected_at,status=case when ${table.operationalAlerts}.status='resolved' then 'open' else ${table.operationalAlerts}.status end,resolved_at=null`, [randomUUID(),key,issue.issue_code,issue.message,issue.registration_id,{runId,partnerId:issue.partner_id},now]);
+      await insertPartnerAudit(client,{partnerId:issue.partner_id,action:'consistency.issue_detected',userId:actor,registrationId:issue.registration_id,eventId:issue.event_id,metadata:{runId,issueCode:issue.issue_code,message:issue.message},createdAt:now});
+    }
+    await client.query('commit'); return {runId,checkedAt:now,issues:issues.rows.length};
+  } catch(error){await client.query('rollback').catch(()=>undefined);throw error;} finally{client.release();}
 }
 
 export type OperationalAlertRecord = {

@@ -11,11 +11,17 @@ import { AdminPage } from "./pages/Admin";
 import { PaymentErrorPage } from "./pages/PaymentError";
 import { PrivacyPage, TermsPage } from "./pages/Privacy";
 import { SuccessPage } from "./pages/Success";
+import { PartnerLandingPage } from "./pages/PartnerLanding";
 
 const showCourseMap = false;
 
 export default function SiteApp() {
   const pathname = window.location.pathname;
+  const partnerPath = pathname.match(/^\/p\/([^/]+)\/?$/);
+
+  if (partnerPath) {
+    return <PublicPage><PartnerLandingPage slug={decodeURIComponent(partnerPath[1])} /></PublicPage>;
+  }
 
   if (pathname === '/sucesso') {
     return (

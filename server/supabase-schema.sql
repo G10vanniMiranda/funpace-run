@@ -52,7 +52,24 @@ create table if not exists "run-registrations" (
   confirmation_email_provider text,
   confirmation_email_id text,
   confirmation_email_error text
-  ,bib_number text
+  ,bib_number text,
+  partner_id uuid,
+  partner_name text,
+  partner_link text,
+  partner_identified_at text,
+  discount_percentage numeric(5, 2) not null default 0,
+  discount_amount integer not null default 0,
+  original_price integer not null,
+  final_price integer not null,
+  constraint "run-registrations_partner_pricing_check" check (
+    original_price > 0 and final_price > 0 and discount_amount >= 0
+    and discount_percentage >= 0 and discount_percentage < 100
+    and original_price - discount_amount = final_price and amount_cents = final_price
+  ),
+  constraint "run-registrations_partner_metadata_check" check (
+    (partner_id is null and partner_name is null and discount_percentage = 0 and discount_amount = 0)
+    or (partner_id is not null and partner_name is not null and discount_percentage > 0 and discount_amount > 0)
+  )
 );
 
 create table if not exists "run-payments" (
@@ -165,8 +182,77 @@ create table if not exists "run-partnership-leads" (
   updated_at text not null
 );
 
+create table if not exists "run-partners" (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  slug text not null,
+  discount_percentage numeric(5, 2) not null,
+  status text not null default 'active',
+  description text,
+  created_at text not null default (now()::text),
+  updated_at text not null default (now()::text),
+  deleted_at text,
+  constraint "run-partners_slug_key" unique (slug),
+  constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage <= 100),
+  constraint "run-partners_status_check" check (status in ('active', 'inactive'))
+);
+
+create table if not exists "run-partner-audit-logs" (
+  id uuid primary key default gen_random_uuid(),
+  partner_id uuid references "run-partners"(id),
+  action text not null,
+  user_id text,
+  registration_id text references "run-registrations"(id),
+  event_id text references "run-events"(id),
+  old_data jsonb,
+  new_data jsonb,
+  metadata jsonb not null default '{}'::jsonb,
+  ip_address text,
+  user_agent text,
+  created_at text not null default (now()::text)
+);
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'run-registrations_partner_id_fkey') then
+    alter table "run-registrations" add constraint "run-registrations_partner_id_fkey"
+      foreign key (partner_id) references "run-partners"(id);
+  end if;
+end;
+$$;
+
 create index if not exists "run-registrations_cpf_hash_idx" on "run-registrations"(cpf_hash);
 create index if not exists "run-registrations_status_idx" on "run-registrations"(status);
+create index if not exists "run-registrations_partner_id_idx" on "run-registrations"(partner_id) where partner_id is not null;
+create index if not exists "run-registrations_partner_created_idx" on "run-registrations"(partner_id, created_at desc) where partner_id is not null;
+create index if not exists "run-registrations_partner_status_created_idx" on "run-registrations"(partner_id, status, created_at desc) where partner_id is not null;
+create index if not exists "run-registrations_partner_event_created_idx" on "run-registrations"(partner_id, event_id, created_at desc) where partner_id is not null;
+create index if not exists "run-registrations_partner_city_idx" on "run-registrations"(lower((payload->>'city'))) where partner_id is not null and coalesce(payload->>'city', '') <> '';
+create index if not exists "run-partner-audit_partner_created_idx" on "run-partner-audit-logs"(partner_id, created_at desc);
+create index if not exists "run-partner-audit_registration_created_idx" on "run-partner-audit-logs"(registration_id, created_at asc);
+create index if not exists "run-partner-audit_action_created_idx" on "run-partner-audit-logs"(action, created_at desc);
+create index if not exists "run-partner-audit_event_created_idx" on "run-partner-audit-logs"(event_id, created_at desc);
+
+create or replace function prevent_partner_audit_mutation()
+returns trigger language plpgsql as $$ begin raise exception 'partner audit logs are immutable'; end; $$;
+drop trigger if exists "run-partner-audit-immutable" on "run-partner-audit-logs";
+create trigger "run-partner-audit-immutable" before update or delete on "run-partner-audit-logs"
+for each row execute function prevent_partner_audit_mutation();
+
+create or replace function protect_confirmed_partner_snapshot()
+returns trigger language plpgsql as $$
+begin
+  if old.confirmed_at is not null and (
+    new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name
+    or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at
+    or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount
+    or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price
+  ) then raise exception 'confirmed partner snapshot is immutable'; end if;
+  return new;
+end; $$;
+drop trigger if exists "run-registrations_partner_snapshot_immutable" on "run-registrations";
+create trigger "run-registrations_partner_snapshot_immutable" before update on "run-registrations"
+for each row execute function protect_confirmed_partner_snapshot();
 create index if not exists "run-payments_registration_id_idx" on "run-payments"(registration_id);
 create unique index if not exists "run-payments_gateway_transaction_idx"
   on "run-payments"(gateway_transaction_id)
@@ -182,6 +268,8 @@ create index if not exists "run-admin-sessions_expires_at_idx" on "run-admin-ses
 create unique index if not exists "run-admin-users_email_idx" on "run-admin-users"(email);
 create index if not exists "run-partnership-leads_status_idx" on "run-partnership-leads"(status);
 create index if not exists "run-partnership-leads_created_at_idx" on "run-partnership-leads"(created_at);
+create index if not exists "run-partners_status_idx" on "run-partners"(status);
+create index if not exists "run-partners_deleted_at_idx" on "run-partners"(deleted_at) where deleted_at is null;
 
 alter table "run-registrations" add column if not exists expires_at text;
 alter table "run-registrations" add column if not exists paid_at text;
@@ -192,6 +280,20 @@ alter table "run-registrations" add column if not exists confirmation_email_prov
 alter table "run-registrations" add column if not exists confirmation_email_id text;
 alter table "run-registrations" add column if not exists confirmation_email_error text;
 alter table "run-registrations" add column if not exists bib_number text;
+alter table "run-registrations" add column if not exists partner_id uuid references "run-partners"(id);
+alter table "run-registrations" add column if not exists partner_name text;
+alter table "run-registrations" add column if not exists discount_percentage numeric(5, 2) default 0;
+alter table "run-registrations" add column if not exists discount_amount integer default 0;
+alter table "run-registrations" add column if not exists original_price integer;
+alter table "run-registrations" add column if not exists final_price integer;
+update "run-registrations" set discount_percentage = coalesce(discount_percentage, 0), discount_amount = coalesce(discount_amount, 0), original_price = coalesce(original_price, amount_cents), final_price = coalesce(final_price, amount_cents);
+alter table "run-registrations" alter column discount_percentage set not null;
+alter table "run-registrations" alter column discount_amount set not null;
+alter table "run-registrations" alter column original_price set not null;
+alter table "run-registrations" alter column final_price set not null;
+create or replace function public.run_registration_pricing_defaults() returns trigger language plpgsql set search_path = public as $$ begin new.discount_percentage := coalesce(new.discount_percentage, 0); new.discount_amount := coalesce(new.discount_amount, 0); new.original_price := coalesce(new.original_price, new.amount_cents); new.final_price := coalesce(new.final_price, new.amount_cents); return new; end; $$;
+drop trigger if exists "run-registrations_pricing_defaults" on "run-registrations";
+create trigger "run-registrations_pricing_defaults" before insert on "run-registrations" for each row execute function public.run_registration_pricing_defaults();
 create unique index if not exists "run-registrations_event_bib_idx" on "run-registrations"(event_id, bib_number) where bib_number is not null;
 alter table "run-lots" add column if not exists order_index integer not null default 0;
 alter table "run-lots" add column if not exists continues_after_capacity boolean not null default false;
@@ -316,6 +418,17 @@ on conflict (id) do update set
   order_index = excluded.order_index,
   continues_after_capacity = excluded.continues_after_capacity;
 
+insert into "run-partners" (name, slug, discount_percentage, status)
+values
+  ('Runners Club', 'runners', 10, 'active'),
+  ('Pace Team', 'pace', 10, 'active'),
+  ('Alpha Running', 'alpha', 10, 'active')
+on conflict (slug) do update set
+  name = excluded.name,
+  discount_percentage = excluded.discount_percentage,
+  status = excluded.status,
+  updated_at = now()::text;
+
 with stale_pending as (
   select registration.id, registration.lot_id
   from "run-registrations" registration
@@ -324,9 +437,10 @@ with stale_pending as (
   where registration.status = 'pending_payment'
     and (
       lot.status <> 'active'
-      or registration.amount_cents <> lot.price_cents
+      or registration.original_price <> lot.price_cents
+      or registration.amount_cents <> registration.final_price
       or payment.id is null
-      or payment.amount_cents <> lot.price_cents
+      or payment.amount_cents <> registration.final_price
     )
 ),
 expired_registrations as (

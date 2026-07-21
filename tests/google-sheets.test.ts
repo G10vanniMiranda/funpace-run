@@ -91,6 +91,7 @@ const database: Database = {
   adminSessions: [],
   adminUsers: [],
   partnershipLeads: [],
+  partners: [],
 };
 
 function syncTask(overrides: Partial<GoogleSheetSyncRecord> = {}): GoogleSheetSyncRecord {

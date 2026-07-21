@@ -1,11 +1,12 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
-import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, XCircle } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, ShieldCheck, Users, XCircle } from 'lucide-react';
 import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
-import { ApiError, createRegistration, getAvailability } from '../lib/api';
+import { ApiError, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
 import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
+import type { PublicPartnerContext } from '../types/partner';
 import { Reveal } from './premium';
 
 const initialRegistration: RegistrationFormData = {
@@ -66,6 +67,7 @@ export function RegistrationSection() {
   const [apiMessage, setApiMessage] = useState('');
   const [registrationId, setRegistrationId] = useState('');
   const [availability, setAvailability] = useState<AvailabilityResponse | null>(null);
+  const [partnerContext, setPartnerContext] = useState<PublicPartnerContext | null>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [showSlowCheckoutHint, setShowSlowCheckoutHint] = useState(false);
   const activeLot = availability?.lots.find((lot) => lot.name === eventInfo.currentLot)
@@ -93,6 +95,14 @@ export function RegistrationSection() {
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    getPartnerSession()
+      .then((response) => { if (isMounted) setPartnerContext(response.partner); })
+      .catch(() => { if (isMounted) setPartnerContext(null); });
+    return () => { isMounted = false; };
   }, []);
 
   useEffect(() => {
@@ -190,8 +200,9 @@ export function RegistrationSection() {
             <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
               <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Valor atual</p>
               <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
-                {(lotPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                {((partnerContext?.finalPriceCents ?? lotPriceCents) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
               </p>
+              {partnerContext && <p className="mt-1 text-xs font-bold opacity-60">Valor original: {(partnerContext.originalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</p>}
             </div>
           </div>
 
@@ -203,6 +214,24 @@ export function RegistrationSection() {
           </h3>
 
           <form onSubmit={handleSubmit} className="space-y-5 sm:space-y-6">
+            {partnerContext && (
+              <div className="border-2 border-black bg-brand/20 p-4 sm:p-5">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center bg-black text-brand"><Users className="h-5 w-5" /></div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] opacity-60">Inscricao atraves da assessoria</p>
+                    <p className="mt-1 text-lg font-black">{partnerContext.name}</p>
+                  </div>
+                  <ShieldCheck className="h-5 w-5 shrink-0" />
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-black/15 pt-4 text-sm sm:grid-cols-4">
+                  <PriceItem label="Desconto aplicado" value={`${partnerContext.discountPercentage}%`} />
+                  <PriceItem label="Valor original" value={(partnerContext.originalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} />
+                  <PriceItem label="Desconto" value={`- ${(partnerContext.discountAmountCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`} />
+                  <PriceItem label="Total" value={(partnerContext.finalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} strong />
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
               <Field label="Nome Completo" error={errors.fullName}>
                 <input required type="text" value={formData.fullName} onChange={(event) => updateField('fullName', event.target.value)} className={inputClass} placeholder="Nome e sobrenome" aria-invalid={Boolean(errors.fullName)} />
@@ -326,6 +355,10 @@ export function RegistrationSection() {
       </div>
     </section>
   );
+}
+
+function PriceItem({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
+  return <div><p className="text-[10px] font-black uppercase tracking-wider opacity-55">{label}</p><p className={`mt-1 font-mono ${strong ? 'text-lg font-black' : 'font-bold'}`}>{value}</p></div>;
 }
 
 function Field({ label, error, children }: { label: string; error?: string; children: ReactNode }) {

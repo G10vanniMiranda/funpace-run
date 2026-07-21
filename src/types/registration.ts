@@ -49,6 +49,15 @@ export type RegistrationStatus =
 
 export type CheckoutStatus = 'not_configured' | 'created';
 
+export type RegistrationPartnerPricing = {
+  id: string;
+  name: string;
+  discountPercentage: number;
+  discountAmountCents: number;
+  originalPriceCents: number;
+  finalPriceCents: number;
+};
+
 export type CreateRegistrationResponse = {
   success: boolean;
   registrationId: string;
@@ -58,6 +67,7 @@ export type CreateRegistrationResponse = {
   checkoutUrl: string | null;
   message: string;
   expiresAt?: string | null;
+  partner?: RegistrationPartnerPricing | null;
 };
 
 export type RegistrationStatusResponse = {
@@ -70,6 +80,7 @@ export type RegistrationStatusResponse = {
   expiresAt: string | null;
   paidAt?: string | null;
   confirmedAt?: string | null;
+  partner?: RegistrationPartnerPricing | null;
   gatewayStatus?: string | null;
   gatewayTransactionId?: string | null;
   confirmationEmailSentAt?: string | null;
@@ -179,6 +190,14 @@ export type AdminRegistration = {
   paymentProvider: string | null;
   providerPaymentId: string | null;
   amountCents: number;
+  partnerId?: string | null;
+  partnerName?: string | null;
+  partnerLink?: string | null;
+  partnerIdentifiedAt?: string | null;
+  discountPercentage?: number;
+  discountAmountCents?: number;
+  originalPriceCents?: number;
+  finalPriceCents?: number;
   createdAt: string;
   updatedAt: string;
   expiresAt: string | null;
@@ -248,7 +267,14 @@ export type AdminRegistrationActionResponse = {
 
 export type AdminRegistrationEditable = Pick<AdminRegistration, 'fullName' | 'email' | 'phone' | 'birthDate' | 'gender' | 'shirtSize' | 'emergencyContactName' | 'emergencyContactPhone' | 'city' | 'state' | 'team'>;
 export type AdminTimelineEvent = { id: string; type: string; title: string; occurredAt: string; actor: string; origin: string; severity: 'info' | 'success' | 'warning' | 'critical'; details: Record<string, unknown> };
-export type AdminRegistrationDetailsResponse = { registration: AdminRegistration; auditLogs: AdminAuditLog[]; paymentEvents: AdminPaymentEvent[]; timeline: AdminTimelineEvent[] };
+export type AdminRegistrationDetailsResponse = {
+  registration: AdminRegistration;
+  auditLogs: AdminAuditLog[];
+  paymentEvents: AdminPaymentEvent[];
+  timeline: AdminTimelineEvent[];
+  partnerAuditLogs: Array<{ id: string; partnerId: string | null; partnerName: string | null; action: string; userId: string | null; registrationId: string | null; eventId: string | null; oldData: unknown; newData: unknown; metadata: Record<string, unknown>; ipAddress: string | null; userAgent: string | null; createdAt: string }>;
+  partnerHistory: { partnerId: string; partnerName: string; partnerLink: string; discountPercentage: number; identifiedAt: string; paidAt: string | null; responsibleUser: string | null } | null;
+};
 
 export type AdminOperationalAlert = {
   id: string; dedupeKey: string; severity: 'info' | 'warning' | 'critical'; alertType: string;

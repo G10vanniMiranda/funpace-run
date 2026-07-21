@@ -19,6 +19,16 @@ import {
   getDatabaseRuntimeConfig,
   markPaymentCreationFailedInPostgres,
   getReconciliationDashboardInPostgres,
+  getPartnerDashboardInPostgres,
+  getPartnerDetailInPostgres,
+  exportPartnerRegistrationsInPostgres,
+  appendPartnerAuditLogInPostgres,
+  appendPartnerPaymentStatusAuditInPostgres,
+  mutatePartnerWithAuditInPostgres,
+  listPartnerAuditLogsInPostgres,
+  getRegistrationPartnerAuditInPostgres,
+  getPartnerMonitoringInPostgres,
+  runPartnerConsistencyCheckInPostgres,
   listOperationalAlertsInPostgres,
   synchronizeOperationalAlertsInPostgres,
   updateOperationalAlertInPostgres,
@@ -31,11 +41,14 @@ import {
   upsertAdminBootstrapInPostgres,
   usesPostgresDatabase,
   type Database,
+  type PartnerRecord,
   type PartnershipLeadRecord,
   type PartnershipLeadStatus,
   type PaymentRecord,
   type RegistrationRecord,
+  type PartnerAnalyticsFilters,
 } from './database.js';
+import { normalizePartnerSlug, validatePartnerInput } from './partner-management.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, type RegistrationEmailContext } from './email.js';
 import {
   processGoogleSheetSync,
@@ -54,6 +67,8 @@ import { calculateLotCapacity, selectLotWithAvailability, synchronizeLotProjecti
 import { detectLocalReconciliationIssues, generateReconciliationReport } from './payment-reconciliation.js';
 import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAlerts } from './operational-intelligence.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
+import { calculatePartnerPricing } from './partner-discount.js';
+import { readCookie, signPartnerSession, verifyPartnerSession } from './partner-session.js';
 
 const port = Number(process.env.API_PORT || 3001);
 const defaultAllowedOrigins = [
@@ -82,6 +97,9 @@ const adminSessionSecret = process.env.ADMIN_SESSION_SECRET || adminApiKey;
 const adminSessionSecretConfigured = adminSessionSecret.length >= 32 && adminSessionSecret !== adminApiKey;
 const adminSessionTtlSeconds = Math.max(Number(process.env.ADMIN_SESSION_TTL_SECONDS || 28_800), 900);
 const adminCookieName = 'funpace_admin_session';
+const partnerCookieName = 'funpace_partner_session';
+const partnerSessionSecret = process.env.PARTNER_SESSION_SECRET || adminSessionSecret;
+const partnerSessionTtlSeconds = 24 * 60 * 60;
 type AdminRole = 'administrator' | 'finance' | 'operation';
 const isProduction = process.env.NODE_ENV === 'production';
 const pendingPaymentTtlMinutesInput = Number(process.env.PENDING_PAYMENT_TTL_MINUTES || 30);
@@ -103,7 +121,7 @@ function setCors(req: IncomingMessage, res: ServerResponse) {
   }
 
   res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Webhook-Signature,X-Request-ID');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -251,6 +269,14 @@ function signAdminSession(session: AdminSession) {
 
 function buildAdminCookie(token: string, maxAgeSeconds: number) {
   return `${adminCookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${isProduction ? '; Secure' : ''}`;
+}
+
+function buildPartnerCookie(token: string, maxAgeSeconds: number) {
+  return `${partnerCookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${isProduction ? '; Secure' : ''}`;
+}
+
+function readPartnerSession(req: IncomingMessage) {
+  return verifyPartnerSession(readCookie(req.headers.cookie, partnerCookieName), partnerSessionSecret);
 }
 
 function readSignedAdminSession(req: IncomingMessage): AdminSession | null {
@@ -1282,6 +1308,63 @@ async function processPaymentConfirmationEmail(req: IncomingMessage, registratio
   }
 }
 
+function resolvePublicPartnerContext(database: Database, partnerId?: string, slug?: string) {
+  const partner = database.partners.find((item) => !item.deletedAt
+    && (partnerId ? item.id === partnerId : item.slug === normalizePartnerSlug(slug || '')));
+  if (!partner || partner.status !== 'active') return null;
+  const event = database.events.find((item) => item.slug === 'funpace-run-2026' && item.status === 'published');
+  if (!event) return null;
+  const lot = selectLotWithAvailability(database.lots, database.registrations, event.id);
+  if (!lot) return null;
+  const pricing = calculatePartnerPricing(lot.priceCents, partner);
+  return pricing ? {
+    id: partner.id,
+    name: partner.name,
+    slug: partner.slug,
+    discountPercentage: pricing.discountPercentage,
+    discountAmountCents: pricing.discountAmountCents,
+    originalPriceCents: pricing.originalPriceCents,
+    finalPriceCents: pricing.finalPriceCents,
+  } : null;
+}
+
+async function handleActivatePartnerLink(req: IncomingMessage, res: ServerResponse, rawSlug: string) {
+  if (!requireAdminDatabase(res)) return;
+  const slug = normalizePartnerSlug(rawSlug);
+  const database = await transaction((current) => current, { persist: false, scope: 'availability' });
+  const existing = database.partners.find((partner) => partner.slug === slug && !partner.deletedAt);
+  const context = resolvePublicPartnerContext(database, undefined, slug);
+  if (!context) {
+    const reason = existing ? 'inactive_or_unavailable' : 'slug_not_found';
+    await appendPartnerAuditLogInPostgres({ partnerId: existing?.id || null, action: 'partner.link_rejected', metadata: { slug, reason }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+    await recordOperationalAlert({ dedupeKey: `partner-link-rejected:${slug}:${new Date().toISOString().slice(0, 10)}`, severity: existing ? 'critical' : 'warning', alertType: existing ? 'inactive_partner_access' : 'invalid_partner_slug', title: existing ? 'Parceiro inativo recebeu acesso' : 'Slug de parceiro inexistente', message: existing ? `O link /p/${slug} foi acessado enquanto o parceiro estava indisponivel.` : `Tentativa de acesso ao link inexistente /p/${slug}.`, entityType: 'partner', entityId: existing?.id || slug, payload: { slug, reason } });
+    res.setHeader('Set-Cookie', buildPartnerCookie('', 0));
+    json(res, existing ? 410 : 404, {
+      message: existing ? 'Este beneficio de assessoria nao esta disponivel.' : 'Link de assessoria invalido.',
+    });
+    return;
+  }
+  const eventId = database.events.find((item) => item.slug === 'funpace-run-2026')?.id || null;
+  const accessAuditId = await appendPartnerAuditLogInPostgres({ partnerId: context.id, action: 'partner.link_accessed', eventId, newData: { slug: context.slug, link: `/p/${context.slug}` }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+  const now = Date.now();
+  const token = signPartnerSession({ partnerId: context.id, slug: context.slug, issuedAt: now, expiresAt: now + partnerSessionTtlSeconds * 1000, accessAuditId }, partnerSessionSecret);
+  res.setHeader('Set-Cookie', buildPartnerCookie(token, partnerSessionTtlSeconds));
+  json(res, 200, { partner: context });
+}
+
+async function handlePartnerSession(req: IncomingMessage, res: ServerResponse) {
+  if (!requireAdminDatabase(res)) return;
+  const session = readPartnerSession(req);
+  if (!session) { json(res, 200, { partner: null }); return; }
+  const database = await transaction((current) => current, { persist: false, scope: 'availability' });
+  const context = resolvePublicPartnerContext(database, session.partnerId);
+  if (!context || context.slug !== session.slug) {
+    res.setHeader('Set-Cookie', buildPartnerCookie('', 0));
+    json(res, 200, { partner: null }); return;
+  }
+  json(res, 200, { partner: context });
+}
+
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
   const startedAt = Date.now();
   const requestId = Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'] || null;
@@ -1336,15 +1419,23 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   }
 
   const hash = cpfHash(payload.cpf);
+  const partnerSession = readPartnerSession(req);
 
   logStage('registration_persist_started', { databaseProvider: usesPostgresDatabase() ? 'postgres' : 'json' });
-  const response = usesPostgresDatabase()
+  let response: PendingCheckout;
+  try {
+    response = usesPostgresDatabase()
     ? await createPendingRegistrationInPostgres({
       payload,
       cpfHash: hash,
       paymentProvider: paymentProvider || 'not_configured',
       expiresAt: getPendingPaymentExpiresAt(new Date().toISOString()),
       description: getRegistrationDescription,
+      partnerId: partnerSession?.partnerId || null,
+      partnerSlug: partnerSession?.slug || null,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      accessAuditId: partnerSession?.accessAuditId || null,
     })
     : await transaction<PendingCheckout>((database) => {
     expirePendingPayments(database);
@@ -1373,9 +1464,10 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       const existingLot = database.lots.find((item) => item.id === existing.lotId);
       const isStalePending = !existingLot
         || existingLot.status !== 'active'
-        || existing.amountCents !== existingLot.priceCents
+        || (existing.originalPriceCents ?? existing.amountCents) !== existingLot.priceCents
+        || existing.amountCents !== (existing.finalPriceCents ?? existing.amountCents)
         || !existingPayment
-        || existingPayment.amountCents !== existingLot.priceCents;
+        || existingPayment.amountCents !== (existing.finalPriceCents ?? existing.amountCents);
 
       if (isStalePending) {
         existing.status = 'expired';
@@ -1415,6 +1507,14 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
           : shouldCreateCheckout
             ? 'Inscricao recuperada. Preparando um novo acesso ao checkout.'
             : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
+        partner: activeExisting.partnerId ? {
+          id: activeExisting.partnerId,
+          name: activeExisting.partnerName || '',
+          discountPercentage: activeExisting.discountPercentage || 0,
+          discountAmountCents: activeExisting.discountAmountCents || 0,
+          originalPriceCents: activeExisting.originalPriceCents ?? activeExisting.amountCents,
+          finalPriceCents: activeExisting.finalPriceCents ?? activeExisting.amountCents,
+        } : null,
       };
 
       return {
@@ -1463,6 +1563,10 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
     const now = new Date().toISOString();
     const expiresAt = getPendingPaymentExpiresAt(now);
+    const partner = partnerSession
+      ? database.partners.find((item) => item.id === partnerSession.partnerId && item.slug === partnerSession.slug)
+      : null;
+    const partnerPricing = calculatePartnerPricing(activeLot.priceCents, partner);
     const registration: RegistrationRecord = {
       id: randomUUID(),
       eventId: event.id,
@@ -1470,7 +1574,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       lotId: activeLot.id,
       cpfHash: hash,
       status: 'pending_payment',
-      amountCents: activeLot.priceCents,
+      amountCents: partnerPricing?.finalPriceCents ?? activeLot.priceCents,
       payload,
       createdAt: now,
       updatedAt: now,
@@ -1482,6 +1586,14 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       confirmationEmailProvider: null,
       confirmationEmailId: null,
       confirmationEmailError: null,
+      partnerId: partnerPricing?.partnerId || null,
+      partnerName: partnerPricing?.partnerName || null,
+      partnerLink: partnerPricing ? `/p/${partnerSession?.slug || ''}` : null,
+      partnerIdentifiedAt: partnerPricing ? now : null,
+      discountPercentage: partnerPricing?.discountPercentage || 0,
+      discountAmountCents: partnerPricing?.discountAmountCents || 0,
+      originalPriceCents: activeLot.priceCents,
+      finalPriceCents: partnerPricing?.finalPriceCents ?? activeLot.priceCents,
     };
     const payment: PaymentRecord = {
       id: randomUUID(),
@@ -1523,8 +1635,23 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       amountCents: registration.amountCents,
       description: getRegistrationDescription(distance.name, activeLot.name),
       shouldCreateCheckout: true,
+      partner: partnerPricing ? {
+        id: partnerPricing.partnerId,
+        name: partnerPricing.partnerName,
+        discountPercentage: partnerPricing.discountPercentage,
+        discountAmountCents: partnerPricing.discountAmountCents,
+        originalPriceCents: partnerPricing.originalPriceCents,
+        finalPriceCents: partnerPricing.finalPriceCents,
+      } : null,
     };
   }, { scope: 'checkout' });
+  } catch (error) {
+    if (partnerSession?.partnerId) {
+      await appendPartnerAuditLogInPostgres({ partnerId: partnerSession.partnerId, action: 'partner.persistence_failed', metadata: { slug: partnerSession.slug, error: error instanceof Error ? error.message.slice(0, 500) : String(error) }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) }).catch(() => undefined);
+      await recordOperationalAlert({ dedupeKey: `partner-persistence:${partnerSession.partnerId}:${new Date().toISOString().slice(0,13)}`, severity: 'critical', alertType: 'partner_persistence_failure', title: 'Falha na persistencia do parceiro', message: 'A inscricao nao conseguiu persistir os dados da assessoria.', entityType: 'partner', entityId: partnerSession.partnerId, payload: { slug: partnerSession.slug } });
+    }
+    throw error;
+  }
   logStage('registration_persist_finished', {
     statusCode: response.statusCode,
     registrationId: response.registrationId || null,
@@ -1886,7 +2013,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
 
     if (
       registration.status !== 'paid'
-      && (!lot || lot.status !== 'active' || registration.amountCents !== lot.priceCents)
+      && (!lot || lot.status !== 'active' || (registration.originalPriceCents ?? registration.amountCents) !== lot.priceCents)
     ) {
       if (payment) {
         payment.gatewayStatus = 'stale_checkout';
@@ -2005,6 +2132,9 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined }, registrationId: registration.id, paymentId: payment?.id, nextStatus };
   }, { scope: 'checkout' });
 
+  if (result.statusCode === 200 && result.registrationId && result.nextStatus && result.nextStatus !== 'paid') {
+    await appendPartnerPaymentStatusAuditInPostgres(result.registrationId, result.nextStatus, { provider: 'infinitepay' });
+  }
   const googleSheetSyncs = result.statusCode === 200 && result.nextStatus === 'paid' && result.registrationId && result.paymentId
     ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
     : [];
@@ -2045,6 +2175,14 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     expiresAt: registration.expiresAt || null,
     paidAt: registration.paidAt || payment?.paidAt || null,
     confirmedAt: registration.confirmedAt || (paymentProvesPaid ? payment?.paidAt || null : null),
+    partner: registration.partnerId ? {
+      id: registration.partnerId,
+      name: registration.partnerName || '',
+      discountPercentage: registration.discountPercentage || 0,
+      discountAmountCents: registration.discountAmountCents || 0,
+      originalPriceCents: registration.originalPriceCents ?? registration.amountCents,
+      finalPriceCents: registration.finalPriceCents ?? registration.amountCents,
+    } : null,
     gatewayStatus: payment?.gatewayStatus || null,
     gatewayTransactionId: payment?.gatewayTransactionId || payment?.providerPaymentId || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
@@ -2263,6 +2401,14 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     paymentProvider: payment?.provider || null,
     providerPaymentId: payment?.providerPaymentId || null,
     amountCents: registration.amountCents,
+    partnerId: registration.partnerId || null,
+    partnerName: registration.partnerName || null,
+    partnerLink: registration.partnerLink || null,
+    partnerIdentifiedAt: registration.partnerIdentifiedAt || null,
+    discountPercentage: registration.discountPercentage || 0,
+    discountAmountCents: registration.discountAmountCents || 0,
+    originalPriceCents: registration.originalPriceCents ?? registration.amountCents,
+    finalPriceCents: registration.finalPriceCents ?? registration.amountCents,
     createdAt: registration.createdAt,
     updatedAt: registration.updatedAt,
     expiresAt: registration.expiresAt || null,
@@ -2604,7 +2750,8 @@ async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) 
 
   console.log(JSON.stringify({ at: new Date().toISOString(), message: 'payment_recovery_completed', ...summary, elapsedMs: Date.now() - startedAt }));
   const reconciliation = await persistCurrentReconciliation('cron', 'apply', 'system:cron');
-  json(res, 200, { success: true, ...summary, reconciliation, elapsedMs: Date.now() - startedAt });
+  const partnerConsistency = await runPartnerConsistencyCheckInPostgres('system:cron');
+  json(res, 200, { success: true, ...summary, reconciliation, partnerConsistency, elapsedMs: Date.now() - startedAt });
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -3183,16 +3330,21 @@ async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerRe
 }
 
 async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerResponse, registrationId: string) {
-  if (!await requireAdmin(req, res) || !requireAdminDatabase(res)) return;
+  const session = await requireAdmin(req, res);
+  if (!session || !requireAdminDatabase(res)) return;
   const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
   const registration = database.registrations.find((item) => item.id === registrationId);
   if (!registration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
   const payment = database.payments.find((item) => item.registrationId === registrationId);
+  const partnerAuditLogs = session.role === 'administrator' ? await getRegistrationPartnerAuditInPostgres(registrationId) : [];
+  const partnerTimeline = partnerAuditLogs.map((log) => ({ id: `partner:${log.id}`, type: log.action, title: log.action, occurredAt: log.createdAt, actor: log.userId || 'system', origin: 'partner_audit', severity: /failed|declined|rejected|issue/i.test(log.action) ? 'critical' as const : /approved|applied/i.test(log.action) ? 'success' as const : 'info' as const, details: { partnerName: log.partnerName, oldData: log.oldData, newData: log.newData, ...(log.metadata as Record<string, unknown>) } }));
   json(res, 200, {
     registration: toAdminRow(database, registration),
     auditLogs: database.auditLogs.filter((item) => item.entityId === registrationId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     paymentEvents: payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)) : [],
-    timeline: buildRegistrationTimeline(database, registrationId),
+    partnerAuditLogs,
+    partnerHistory: session.role === 'administrator' && registration.partnerId ? { partnerId: registration.partnerId, partnerName: registration.partnerName || '', partnerLink: registration.partnerLink || '', discountPercentage: registration.discountPercentage || 0, identifiedAt: registration.partnerIdentifiedAt || registration.createdAt, paidAt: registration.paidAt || payment?.paidAt || null, responsibleUser: partnerAuditLogs.find((log) => log.userId)?.userId || null } : null,
+    timeline: [...buildRegistrationTimeline(database, registrationId), ...partnerTimeline].sort((left, right) => left.occurredAt.localeCompare(right.occurredAt)),
   });
 }
 
@@ -3359,6 +3511,175 @@ async function handleAdminAuditLogsCsv(req: IncomingMessage, res: ServerResponse
   const headers = ['data', 'ator', 'perfil', 'acao', 'entidade', 'id_entidade', 'sessao', 'ip', 'user_agent', 'payload'];
   const lines = logs.map((log) => [log.createdAt, log.actor, log.actorRole, log.action, log.entityType, log.entityId, log.sessionId, log.ipAddress, log.userAgent, JSON.stringify(log.payload)].map(escapeCsv).join(','));
   csv(res, 'funpace-run-auditoria.csv', [headers.join(','), ...lines].join('\n'));
+}
+
+function toAdminPartner(partner: PartnerRecord) {
+  return {
+    id: partner.id,
+    name: partner.name,
+    slug: partner.slug,
+    discountPercentage: partner.discountPercentage,
+    status: partner.status,
+    description: partner.description,
+    createdAt: partner.createdAt,
+    updatedAt: partner.updatedAt,
+  };
+}
+
+function isPartnerSlugConflict(error: unknown) {
+  return Boolean(error && typeof error === 'object' && 'constraint' in error
+    && (error as { constraint?: string }).constraint === 'run-partners_slug_key');
+}
+
+async function handleAdminPartnersList(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const name = (url.searchParams.get('name') || '').trim().toLowerCase();
+  const slug = normalizePartnerSlug(url.searchParams.get('slug') || '');
+  const status = url.searchParams.get('status') || '';
+  if (status && !['active', 'inactive'].includes(status)) {
+    json(res, 422, { message: 'Filtro de status invalido.' }); return;
+  }
+  const database = await transaction((current) => current, { persist: false, scope: 'partners' });
+  const partners = database.partners
+    .filter((partner) => !partner.deletedAt)
+    .filter((partner) => !name || partner.name.toLowerCase().includes(name))
+    .filter((partner) => !slug || partner.slug.includes(slug))
+    .filter((partner) => !status || partner.status === status)
+    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'))
+    .map(toAdminPartner);
+  json(res, 200, { partners });
+}
+
+async function handleAdminPartnerGet(req: IncomingMessage, res: ServerResponse, partnerId: string) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'partners' });
+  const partner = database.partners.find((item) => item.id === partnerId && !item.deletedAt);
+  if (!partner) { json(res, 404, { message: 'Parceiro nao encontrado.' }); return; }
+  json(res, 200, { partner: toAdminPartner(partner) });
+}
+
+async function handleAdminPartnerSlugAvailability(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const slug = normalizePartnerSlug(url.searchParams.get('slug') || '');
+  const excludeId = url.searchParams.get('excludeId') || '';
+  if (slug.length < 2) { json(res, 200, { slug, available: false }); return; }
+  const database = await transaction((current) => current, { persist: false, scope: 'partners' });
+  const available = !database.partners.some((partner) => partner.slug === slug && partner.id !== excludeId);
+  json(res, 200, { slug, available });
+}
+
+async function handleAdminPartnerWrite(req: IncomingMessage, res: ServerResponse, partnerId?: string) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<Record<string, unknown>>(await readBody(req));
+  const validation = validatePartnerInput(body);
+  if ('errors' in validation) { json(res, 422, { message: 'Revise os dados do parceiro.', errors: validation.errors }); return; }
+  const partnerInput = validation.value;
+  try {
+    const partner = await mutatePartnerWithAuditInPostgres({ mode: partnerId ? 'update' : 'create', partnerId, partner: partnerInput, actor: adminSession.actor, actorRole: adminSession.role, sessionId: adminSession.id, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+    if (!partner) { json(res, 404, { message: 'Parceiro nao encontrado.' }); return; }
+    json(res, partnerId ? 200 : 201, { partner: toAdminPartner(partner) });
+  } catch (error) {
+    if (isPartnerSlugConflict(error)) { json(res, 409, { message: 'Este slug ja esta em uso.', errors: { slug: 'Slug indisponivel.' } }); return; }
+    throw error;
+  }
+}
+
+async function handleAdminPartnerStatus(req: IncomingMessage, res: ServerResponse, partnerId: string) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ status?: string }>(await readBody(req));
+  if (!body?.status || !['active', 'inactive'].includes(body.status)) {
+    json(res, 422, { message: 'Status de parceiro invalido.' }); return;
+  }
+  const partner = await mutatePartnerWithAuditInPostgres({ mode: 'status', partnerId, status: body.status as PartnerRecord['status'], actor: adminSession.actor, actorRole: adminSession.role, sessionId: adminSession.id, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+  if (!partner) { json(res, 404, { message: 'Parceiro nao encontrado.' }); return; }
+  json(res, 200, { partner: toAdminPartner(partner) });
+}
+
+async function handleAdminPartnerDelete(req: IncomingMessage, res: ServerResponse, partnerId: string) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res)) return;
+  const partner = await mutatePartnerWithAuditInPostgres({ mode: 'delete', partnerId, actor: adminSession.actor, actorRole: adminSession.role, sessionId: adminSession.id, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+  if (!partner) { json(res, 404, { message: 'Parceiro nao encontrado.' }); return; }
+  json(res, 200, { ok: true });
+}
+
+const partnerPaymentStatuses = new Set(['pending_payment', 'paid', 'payment_failed', 'expired', 'cancelled', 'refunded']);
+
+function readPartnerAnalyticsFilters(url: URL): { filters: PartnerAnalyticsFilters; page: number; pageSize: number } | { error: string } {
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const eventId = (url.searchParams.get('eventId') || '').trim();
+  const dateFrom = (url.searchParams.get('dateFrom') || '').trim();
+  const dateTo = (url.searchParams.get('dateTo') || '').trim();
+  const paymentStatus = (url.searchParams.get('paymentStatus') || '').trim();
+  const partnerId = (url.searchParams.get('partnerId') || '').trim();
+  const city = (url.searchParams.get('city') || '').trim().slice(0, 120);
+  const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '20', 10) || 20));
+  if ((dateFrom && !datePattern.test(dateFrom)) || (dateTo && !datePattern.test(dateTo))) return { error: 'Periodo invalido.' };
+  if (dateFrom && dateTo && dateFrom > dateTo) return { error: 'A data inicial nao pode ser posterior a data final.' };
+  if (paymentStatus && !partnerPaymentStatuses.has(paymentStatus)) return { error: 'Status de pagamento invalido.' };
+  if (partnerId && !uuidPattern.test(partnerId)) return { error: 'Parceiro invalido.' };
+  return { filters: { eventId: eventId || undefined, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined, paymentStatus: paymentStatus || undefined, partnerId: partnerId || undefined, city: city || undefined }, page, pageSize };
+}
+
+async function handleAdminPartnerDashboard(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const parsed = readPartnerAnalyticsFilters(url);
+  if ('error' in parsed) { json(res, 422, { message: parsed.error }); return; }
+  json(res, 200, await getPartnerDashboardInPostgres(parsed.filters, parsed.page, parsed.pageSize));
+}
+
+async function handleAdminPartnerDashboardDetail(req: IncomingMessage, res: ServerResponse, url: URL, partnerId: string) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(partnerId)) { json(res, 422, { message: 'Parceiro invalido.' }); return; }
+  const parsed = readPartnerAnalyticsFilters(url);
+  if ('error' in parsed) { json(res, 422, { message: parsed.error }); return; }
+  const detail = await getPartnerDetailInPostgres(partnerId, parsed.filters, parsed.page, parsed.pageSize);
+  if (!detail) { json(res, 404, { message: 'Parceiro nao encontrado.' }); return; }
+  json(res, 200, detail);
+}
+
+function csvCell(value: unknown) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+async function handleAdminPartnerDashboardExport(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const parsed = readPartnerAnalyticsFilters(url);
+  if ('error' in parsed) { json(res, 422, { message: parsed.error }); return; }
+  const format = url.searchParams.get('format') || 'csv';
+  if (!['csv', 'excel'].includes(format)) { json(res, 422, { message: 'Formato de exportacao invalido.' }); return; }
+  const rows = await exportPartnerRegistrationsInPostgres(parsed.filters);
+  const headers = ['Inscricao', 'Atleta', 'Evento', 'Parceiro', 'Cidade', 'Data', 'Valor original', 'Desconto', 'Percentual', 'Valor pago', 'Status do pagamento'];
+  const values = rows.map((row) => [row.id, row.athleteName, row.eventName, row.partnerName, row.city, row.createdAt, row.originalPriceCents / 100, row.discountAmountCents / 100, row.discountPercentage, row.finalPriceCents / 100, row.paymentStatus]);
+  if (format === 'excel') { binary(res, 'funpace-parceiros.xls', 'application/vnd.ms-excel; charset=utf-8', createExcelXml('Parceiros', headers, values)); return; }
+  csv(res, 'funpace-parceiros.csv', `\uFEFF${[headers, ...values].map((row) => row.map(csvCell).join(';')).join('\n')}`);
+}
+
+async function handleAdminPartnerAudit(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25));
+  const filters = { partnerId: url.searchParams.get('partnerId') || undefined, registrationId: url.searchParams.get('registrationId') || undefined, action: url.searchParams.get('action') || undefined, dateFrom: url.searchParams.get('dateFrom') || undefined, dateTo: url.searchParams.get('dateTo') || undefined };
+  if (filters.partnerId && !/^[0-9a-f-]{36}$/i.test(filters.partnerId)) { json(res, 422, { message: 'Parceiro invalido.' }); return; }
+  if ((filters.dateFrom && !/^\d{4}-\d{2}-\d{2}$/.test(filters.dateFrom)) || (filters.dateTo && !/^\d{4}-\d{2}-\d{2}$/.test(filters.dateTo))) { json(res, 422, { message: 'Periodo invalido.' }); return; }
+  json(res, 200, await listPartnerAuditLogsInPostgres(filters, page, pageSize));
+}
+
+async function handleAdminPartnerMonitoring(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
+  const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25));
+  json(res, 200, await getPartnerMonitoringInPostgres(page, pageSize));
+}
+
+async function handleAdminPartnerConsistency(req: IncomingMessage, res: ServerResponse) {
+  const session = await requireAdmin(req, res, ['administrator']);
+  if (!session || !requireAdminDatabase(res)) return;
+  json(res, 200, await runPartnerConsistencyCheckInPostgres(session.actor));
 }
 
 async function handleAdminPartnerships(req: IncomingMessage, res: ServerResponse) {
@@ -3607,6 +3928,12 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       return;
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/partner-session') { await handlePartnerSession(req, res); return; }
+    const partnerLinkActivation = url.pathname.match(/^\/api\/partners\/resolve\/([^/]+)$/);
+    if (req.method === 'POST' && partnerLinkActivation) {
+      await handleActivatePartnerLink(req, res, decodeURIComponent(partnerLinkActivation[1])); return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/partnerships') {
       await handleCreatePartnership(req, res);
       return;
@@ -3666,6 +3993,28 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/audit-logs.csv') { await handleAdminAuditLogsCsv(req, res, url); return; }
+
+    if (req.method === 'GET' && url.pathname === '/api/admin/partner-audit') { await handleAdminPartnerAudit(req, res, url); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/partner-monitoring') { await handleAdminPartnerMonitoring(req, res, url); return; }
+    if (req.method === 'POST' && url.pathname === '/api/admin/partner-consistency/run') { await handleAdminPartnerConsistency(req, res); return; }
+
+    if (req.method === 'GET' && url.pathname === '/api/admin/partner-dashboard') { await handleAdminPartnerDashboard(req, res, url); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/partner-dashboard/export') { await handleAdminPartnerDashboardExport(req, res, url); return; }
+    const adminPartnerDashboardDetail = url.pathname.match(/^\/api\/admin\/partner-dashboard\/([^/]+)$/);
+    if (req.method === 'GET' && adminPartnerDashboardDetail) { await handleAdminPartnerDashboardDetail(req, res, url, decodeURIComponent(adminPartnerDashboardDetail[1])); return; }
+
+    if (req.method === 'GET' && url.pathname === '/api/admin/partners') { await handleAdminPartnersList(req, res, url); return; }
+    if (req.method === 'POST' && url.pathname === '/api/admin/partners') { await handleAdminPartnerWrite(req, res); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/partners/slug-availability') { await handleAdminPartnerSlugAvailability(req, res, url); return; }
+    const adminPartnerStatus = url.pathname.match(/^\/api\/admin\/partners\/([^/]+)\/status$/);
+    if (req.method === 'PATCH' && adminPartnerStatus) { await handleAdminPartnerStatus(req, res, decodeURIComponent(adminPartnerStatus[1])); return; }
+    const adminPartner = url.pathname.match(/^\/api\/admin\/partners\/([^/]+)$/);
+    if (adminPartner) {
+      const partnerId = decodeURIComponent(adminPartner[1]);
+      if (req.method === 'GET') { await handleAdminPartnerGet(req, res, partnerId); return; }
+      if (req.method === 'PUT') { await handleAdminPartnerWrite(req, res, partnerId); return; }
+      if (req.method === 'DELETE') { await handleAdminPartnerDelete(req, res, partnerId); return; }
+    }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/partnerships') {
       await handleAdminPartnerships(req, res);

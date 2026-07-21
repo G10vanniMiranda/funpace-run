@@ -36,8 +36,9 @@ const staleWhere = `
   registration.status = 'pending_payment'
   and (
     lot.status <> 'active'
-    or registration.amount_cents <> lot.price_cents
-    or payment.amount_cents <> lot.price_cents
+    or registration.original_price <> lot.price_cents
+    or registration.amount_cents <> registration.final_price
+    or payment.amount_cents <> registration.final_price
   )
 `;
 

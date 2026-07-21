@@ -38,6 +38,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { eventInfo } from '../config/event';
+import { PartnersPanel } from '../components/admin/PartnersPanel';
 import QRCode from 'qrcode';
 import {
   type AdminSession,
@@ -96,7 +97,7 @@ type AdminFilters = {
   sheetStatus: string;
 };
 
-type AdminNavKey = 'executive' | 'registrations' | 'payments' | 'reconciliation' | 'alerts' | 'monitoring' | 'operation' | 'reports' | 'audit' | 'event';
+type AdminNavKey = 'executive' | 'registrations' | 'payments' | 'partners' | 'reconciliation' | 'alerts' | 'monitoring' | 'operation' | 'reports' | 'audit' | 'event';
 type AdminRole = AdminSession['role'];
 
 const currencyFormatter = new Intl.NumberFormat('pt-BR', {
@@ -128,6 +129,7 @@ const navItems: Array<{ key: AdminNavKey; label: string; icon: LucideIcon; statu
   { key: 'executive', label: 'Dashboard Executivo', icon: BarChart3 },
   { key: 'registrations', label: 'Inscrições', icon: Ticket },
   { key: 'payments', label: 'Pagamentos', icon: CreditCard },
+  { key: 'partners', label: 'Parceiros', icon: Users },
   { key: 'reconciliation', label: 'Reconciliação', icon: ShieldCheck },
   { key: 'alerts', label: 'Alertas', icon: Bell },
   { key: 'monitoring', label: 'Monitoramento', icon: HeartPulse },
@@ -141,6 +143,7 @@ const navPermissions: Record<AdminNavKey, AdminRole[]> = {
   executive: ['administrator', 'finance'],
   registrations: ['administrator', 'finance', 'operation'],
   payments: ['administrator', 'finance'],
+  partners: ['administrator'],
   reconciliation: ['administrator', 'finance'],
   alerts: ['administrator', 'finance'],
   monitoring: ['administrator', 'finance'],
@@ -581,6 +584,7 @@ function AdminSection({
   if (activeNav === 'executive') return <ExecutiveDashboardPanel adminKey={adminKey} />;
   if (activeNav === 'alerts') return <AlertsCenterPanel adminKey={adminKey} registrations={registrations} onOpenRegistration={onOpenRegistration} />;
   if (activeNav === 'monitoring') return <MonitoringPanel adminKey={adminKey} />;
+  if (activeNav === 'partners') return <PartnersPanel adminKey={adminKey} />;
 
   if (activeNav === 'payments') {
     return (
@@ -782,23 +786,23 @@ function Topbar({
 
         <div className="flex shrink-0 items-center gap-2">
           <span className="hidden text-xs font-bold text-zinc-400 md:inline">{actor}</span>
-          <button
+          {activeNav !== 'partners' && <button
             type="button"
             onClick={onRefresh}
             className="flex min-h-10 items-center gap-2 border border-white/10 bg-white/3 px-3 text-xs font-bold uppercase tracking-widest text-zinc-200 transition-colors hover:border-brand"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
             <span className="hidden sm:inline">Atualizar</span>
-          </button>
+          </button>}
           <button type="button" onClick={onLogout} className="min-h-10 border border-white/10 px-3 text-xs font-bold uppercase text-zinc-300 hover:border-red-400 hover:text-red-300">Sair</button>
-          <button
+          {activeNav !== 'partners' && <button
             type="button"
             onClick={onExport}
             className="flex min-h-10 items-center gap-2 bg-brand px-3 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white"
           >
             <Download className="h-4 w-4" />
             <span className="hidden sm:inline">Exportar</span>
-          </button>
+          </button>}
         </div>
       </div>
     </header>
@@ -2283,6 +2287,19 @@ function AthleteDrawer({
           </div>
         </div>
 
+        {details?.partnerHistory && <div className="mt-5 border border-brand/25 bg-brand/5 p-4">
+          <p className="text-xs font-black uppercase tracking-widest text-brand">Historico da Assessoria</p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <Detail label="Assessoria responsavel" value={details.partnerHistory.partnerName} />
+            <Detail label="Percentual aplicado" value={`${details.partnerHistory.discountPercentage}%`} />
+            <Detail label="Link utilizado" value={details.partnerHistory.partnerLink || 'Nao registrado'} />
+            <Detail label="Identificada em" value={dateTimeFormatter.format(new Date(details.partnerHistory.identifiedAt))} />
+            <Detail label="Pagamento confirmado" value={details.partnerHistory.paidAt ? dateTimeFormatter.format(new Date(details.partnerHistory.paidAt)) : 'Ainda nao confirmado'} />
+            <Detail label="Usuario responsavel" value={details.partnerHistory.responsibleUser || 'Processo automatico'} />
+          </div>
+          <p className="mt-4 text-[10px] font-black uppercase tracking-widest text-zinc-600">Snapshot protegido contra alteracoes apos a confirmacao</p>
+        </div>}
+
         <div className="mt-5 grid gap-3 sm:grid-cols-2">
           <button
             type="button"
@@ -2705,6 +2722,17 @@ function auditActionLabel(action: string) {
     'email.confirmation.sent': 'Confirmacao enviada',
     'email.confirmation.failed': 'Falha na confirmacao',
     'email.confirmation.skipped': 'Confirmacao ignorada',
+    'partner.link_accessed': 'Link da assessoria acessado',
+    'partner.link_rejected': 'Acesso ao link rejeitado',
+    'registration.started': 'Inscricao iniciada pela assessoria',
+    'discount.applied': 'Desconto da assessoria aplicado',
+    'payment.started': 'Pagamento iniciado',
+    'webhook.received': 'Webhook recebido',
+    'payment.approved': 'Pagamento aprovado',
+    'payment.declined': 'Pagamento recusado',
+    'payment.refunded': 'Pagamento reembolsado',
+    'registration.cancelled': 'Inscricao cancelada',
+    'consistency.issue_detected': 'Inconsistencia de parceiro detectada',
   };
 
   return labels[action] || action;
