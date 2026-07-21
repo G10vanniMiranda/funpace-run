@@ -1588,6 +1588,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       confirmationEmailError: null,
       partnerId: partnerPricing?.partnerId || null,
       partnerName: partnerPricing?.partnerName || null,
+      partnerType: partnerPricing ? partner?.partnerType || 'sports_advisory' : null,
       partnerLink: partnerPricing ? `/p/${partnerSession?.slug || ''}` : null,
       partnerIdentifiedAt: partnerPricing ? now : null,
       discountPercentage: partnerPricing?.discountPercentage || 0,
@@ -2403,6 +2404,7 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     amountCents: registration.amountCents,
     partnerId: registration.partnerId || null,
     partnerName: registration.partnerName || null,
+    partnerType: registration.partnerType || null,
     partnerLink: registration.partnerLink || null,
     partnerIdentifiedAt: registration.partnerIdentifiedAt || null,
     discountPercentage: registration.discountPercentage || 0,
@@ -3343,7 +3345,7 @@ async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerR
     auditLogs: database.auditLogs.filter((item) => item.entityId === registrationId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     paymentEvents: payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)) : [],
     partnerAuditLogs,
-    partnerHistory: session.role === 'administrator' && registration.partnerId ? { partnerId: registration.partnerId, partnerName: registration.partnerName || '', partnerLink: registration.partnerLink || '', discountPercentage: registration.discountPercentage || 0, identifiedAt: registration.partnerIdentifiedAt || registration.createdAt, paidAt: registration.paidAt || payment?.paidAt || null, responsibleUser: partnerAuditLogs.find((log) => log.userId)?.userId || null } : null,
+    partnerHistory: session.role === 'administrator' && registration.partnerId ? { partnerId: registration.partnerId, partnerName: registration.partnerName || '', partnerType: registration.partnerType || 'sports_advisory', partnerLink: registration.partnerLink || '', discountPercentage: registration.discountPercentage || 0, identifiedAt: registration.partnerIdentifiedAt || registration.createdAt, paidAt: registration.paidAt || payment?.paidAt || null, responsibleUser: partnerAuditLogs.find((log) => log.userId)?.userId || null } : null,
     timeline: [...buildRegistrationTimeline(database, registrationId), ...partnerTimeline].sort((left, right) => left.occurredAt.localeCompare(right.occurredAt)),
   });
 }
@@ -3518,6 +3520,7 @@ function toAdminPartner(partner: PartnerRecord) {
     id: partner.id,
     name: partner.name,
     slug: partner.slug,
+    partnerType: partner.partnerType,
     discountPercentage: partner.discountPercentage,
     status: partner.status,
     description: partner.description,

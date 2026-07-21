@@ -1,4 +1,6 @@
 export type PartnerManagementStatus = 'active' | 'inactive';
+export const partnerTypes = ['sports_advisory', 'influencer'] as const;
+export type PartnerType = typeof partnerTypes[number];
 
 export type PartnerManagementInput = {
   name: string;
@@ -6,6 +8,7 @@ export type PartnerManagementInput = {
   discountPercentage: number;
   description: string | null;
   status: PartnerManagementStatus;
+  partnerType: PartnerType;
 };
 
 export type PartnerValidationResult =
@@ -30,6 +33,7 @@ export function validatePartnerInput(input: Record<string, unknown> | null): Par
   const descriptionValue = String(input?.description ?? '').trim().slice(0, 1000);
   const description = descriptionValue || null;
   const status = String(input?.status ?? 'active') as PartnerManagementStatus;
+  const partnerType = String(input?.partnerType ?? input?.partner_type ?? 'sports_advisory') as PartnerType;
   const errors: Record<string, string> = {};
 
   if (name.length < 2) errors.name = 'Informe o nome da assessoria.';
@@ -38,8 +42,9 @@ export function validatePartnerInput(input: Record<string, unknown> | null): Par
     errors.discountPercentage = 'O desconto deve ser maior que 0 e menor que 100.';
   }
   if (!['active', 'inactive'].includes(status)) errors.status = 'Status invalido.';
+  if (!partnerTypes.includes(partnerType)) errors.partnerType = 'Tipo de parceiro invalido.';
 
   return Object.keys(errors).length
     ? { ok: false, errors }
-    : { ok: true, value: { name, slug, discountPercentage, description, status } };
+    : { ok: true, value: { name, slug, discountPercentage, description, status, partnerType } };
 }

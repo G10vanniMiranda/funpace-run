@@ -192,6 +192,7 @@ export type AdminRegistration = {
   amountCents: number;
   partnerId?: string | null;
   partnerName?: string | null;
+  partnerType?: import('./partner').PartnerType | null;
   partnerLink?: string | null;
   partnerIdentifiedAt?: string | null;
   discountPercentage?: number;
@@ -273,7 +274,7 @@ export type AdminRegistrationDetailsResponse = {
   paymentEvents: AdminPaymentEvent[];
   timeline: AdminTimelineEvent[];
   partnerAuditLogs: Array<{ id: string; partnerId: string | null; partnerName: string | null; action: string; userId: string | null; registrationId: string | null; eventId: string | null; oldData: unknown; newData: unknown; metadata: Record<string, unknown>; ipAddress: string | null; userAgent: string | null; createdAt: string }>;
-  partnerHistory: { partnerId: string; partnerName: string; partnerLink: string; discountPercentage: number; identifiedAt: string; paidAt: string | null; responsibleUser: string | null } | null;
+  partnerHistory: { partnerId: string; partnerName: string; partnerType: import('./partner').PartnerType; partnerLink: string; discountPercentage: number; identifiedAt: string; paidAt: string | null; responsibleUser: string | null } | null;
 };
 
 export type AdminOperationalAlert = {

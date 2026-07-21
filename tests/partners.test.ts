@@ -18,8 +18,26 @@ test('validates and normalizes a valid partner payload', () => {
   assert.equal(result.ok, true);
   if (result.ok) assert.deepEqual(result.value, {
     name: 'Runners Club', slug: 'runners-club', discountPercentage: 10,
-    description: 'Assessoria de corrida', status: 'active',
+    description: 'Assessoria de corrida', status: 'active', partnerType: 'sports_advisory',
   });
+});
+
+test('accepts both partner type API conventions and preserves legacy defaults', () => {
+  const legacy = validatePartnerInput({ name: 'Legacy Partner', slug: 'legacy', discountPercentage: 10, status: 'active' });
+  assert.equal(legacy.ok, true);
+  if (legacy.ok) assert.equal(legacy.value.partnerType, 'sports_advisory');
+
+  const camelCase = validatePartnerInput({ name: 'Influencer One', slug: 'influencer-one', discountPercentage: 10, status: 'active', partnerType: 'influencer' });
+  assert.equal(camelCase.ok, true);
+  if (camelCase.ok) assert.equal(camelCase.value.partnerType, 'influencer');
+
+  const snakeCase = validatePartnerInput({ name: 'Influencer Two', slug: 'influencer-two', discountPercentage: 10, status: 'active', partner_type: 'influencer' });
+  assert.equal(snakeCase.ok, true);
+  if (snakeCase.ok) assert.equal(snakeCase.value.partnerType, 'influencer');
+
+  const unsupported = validatePartnerInput({ name: 'Future Type', slug: 'future-type', discountPercentage: 10, status: 'active', partnerType: 'ambassador' });
+  assert.equal(unsupported.ok, false);
+  if (!unsupported.ok) assert.ok(unsupported.errors.partnerType);
 });
 
 test('rejects invalid partner discounts and statuses', () => {

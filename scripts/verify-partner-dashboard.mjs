@@ -47,16 +47,16 @@ try {
     ($1,'Phase 4 Volume',$4,10,'active','Temporary dashboard validation',$7,$7,null),
     ($2,'Phase 4 Growth',$5,10,'active','Temporary dashboard validation',$7,$7,null),
     ($3,'Phase 4 Inactive',$6,10,'inactive','Temporary dashboard validation',$7,$7,null)`, [partnerA, partnerB, partnerC, `phase4-volume-${runId}`, `phase4-growth-${runId}`, `phase4-inactive-${runId}`, now]);
-  await database.query(`insert into "run-registrations" (id,event_id,distance_id,lot_id,cpf_hash,status,amount_cents,payload,created_at,updated_at,partner_id,partner_name,discount_percentage,discount_amount,original_price,final_price)
+  await database.query(`insert into "run-registrations" (id,event_id,distance_id,lot_id,cpf_hash,status,amount_cents,payload,created_at,updated_at,partner_id,partner_name,partner_type,discount_percentage,discount_amount,original_price,final_price)
     select $1 || '-a-' || g, $2, $3, $4, $1 || '-cpf-a-' || g,
       case when g <= 200 then 'paid' else 'pending_payment' end, 10800,
       jsonb_build_object('fullName','Atleta Volume ' || g,'city',$5::text,'state','AM'),
       (case when g <= 100 then now() - (g || ' minutes')::interval else date_trunc('month',now()) - interval '15 days' - (g || ' minutes')::interval end)::text,
-      now()::text,$6::uuid,'Phase 4 Volume',10,1200,12000,10800 from generate_series(1,220) g`, [`phase4-${runId}`, eventId, distanceId, lotId, city, partnerA]);
-  await database.query(`insert into "run-registrations" (id,event_id,distance_id,lot_id,cpf_hash,status,amount_cents,payload,created_at,updated_at,partner_id,partner_name,discount_percentage,discount_amount,original_price,final_price)
+      now()::text,$6::uuid,'Phase 4 Volume','sports_advisory',10,1200,12000,10800 from generate_series(1,220) g`, [`phase4-${runId}`, eventId, distanceId, lotId, city, partnerA]);
+  await database.query(`insert into "run-registrations" (id,event_id,distance_id,lot_id,cpf_hash,status,amount_cents,payload,created_at,updated_at,partner_id,partner_name,partner_type,discount_percentage,discount_amount,original_price,final_price)
     select $1 || '-b-' || g, $2, $3, $4, $1 || '-cpf-b-' || g, 'paid',10800,
       jsonb_build_object('fullName','Atleta Growth ' || g,'city',$5::text,'state','AM'),
-      (now() - (g || ' minutes')::interval)::text,now()::text,$6::uuid,'Phase 4 Growth',10,1200,12000,10800 from generate_series(1,30) g`, [`phase4-${runId}`, eventId, distanceId, lotId, city, partnerB]);
+      (now() - (g || ' minutes')::interval)::text,now()::text,$6::uuid,'Phase 4 Growth','sports_advisory',10,1200,12000,10800 from generate_series(1,30) g`, [`phase4-${runId}`, eventId, distanceId, lotId, city, partnerB]);
 
   const indexes = await database.query(`select indexname from pg_indexes where tablename='run-registrations' and indexname like 'run-registrations_partner_%'`);
   assert.ok(indexes.rows.length >= 4, 'Indices analiticos nao foram encontrados.');

@@ -55,6 +55,7 @@ create table if not exists "run-registrations" (
   ,bib_number text,
   partner_id uuid,
   partner_name text,
+  partner_type text,
   partner_link text,
   partner_identified_at text,
   discount_percentage numeric(5, 2) not null default 0,
@@ -67,8 +68,8 @@ create table if not exists "run-registrations" (
     and original_price - discount_amount = final_price and amount_cents = final_price
   ),
   constraint "run-registrations_partner_metadata_check" check (
-    (partner_id is null and partner_name is null and discount_percentage = 0 and discount_amount = 0)
-    or (partner_id is not null and partner_name is not null and discount_percentage > 0 and discount_amount > 0)
+    (partner_id is null and partner_name is null and partner_type is null and discount_percentage = 0 and discount_amount = 0)
+    or (partner_id is not null and partner_name is not null and partner_type is not null and discount_percentage > 0 and discount_amount > 0)
   )
 );
 
@@ -186,6 +187,7 @@ create table if not exists "run-partners" (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   slug text not null,
+  partner_type text not null default 'sports_advisory',
   discount_percentage numeric(5, 2) not null,
   status text not null default 'active',
   description text,
@@ -193,8 +195,29 @@ create table if not exists "run-partners" (
   updated_at text not null default (now()::text),
   deleted_at text,
   constraint "run-partners_slug_key" unique (slug),
-  constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage <= 100),
+  constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer')),
+  constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100),
   constraint "run-partners_status_check" check (status in ('active', 'inactive'))
+);
+
+alter table "run-partners" add column if not exists partner_type text;
+update "run-partners" set partner_type = 'sports_advisory' where partner_type is null or btrim(partner_type) = '';
+alter table "run-partners" alter column partner_type set default 'sports_advisory';
+alter table "run-partners" alter column partner_type set not null;
+alter table "run-partners" drop constraint if exists "run-partners_partner_type_check";
+alter table "run-partners" add constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer'));
+alter table "run-partners" drop constraint if exists "run-partners_discount_percentage_check";
+alter table "run-partners" add constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100);
+
+alter table "run-registrations" add column if not exists partner_type text;
+update "run-registrations" registration set partner_type = partner.partner_type
+from "run-partners" partner where registration.partner_id = partner.id and registration.partner_type is null;
+alter table "run-registrations" drop constraint if exists "run-registrations_partner_type_check";
+alter table "run-registrations" add constraint "run-registrations_partner_type_check" check (partner_type is null or partner_type in ('sports_advisory', 'influencer'));
+alter table "run-registrations" drop constraint if exists "run-registrations_partner_metadata_check";
+alter table "run-registrations" add constraint "run-registrations_partner_metadata_check" check (
+  (partner_id is null and partner_name is null and partner_type is null and discount_percentage = 0 and discount_amount = 0)
+  or (partner_id is not null and partner_name is not null and partner_type is not null and discount_percentage > 0 and discount_amount > 0)
 );
 
 create table if not exists "run-partner-audit-logs" (
@@ -228,6 +251,7 @@ create index if not exists "run-registrations_partner_created_idx" on "run-regis
 create index if not exists "run-registrations_partner_status_created_idx" on "run-registrations"(partner_id, status, created_at desc) where partner_id is not null;
 create index if not exists "run-registrations_partner_event_created_idx" on "run-registrations"(partner_id, event_id, created_at desc) where partner_id is not null;
 create index if not exists "run-registrations_partner_city_idx" on "run-registrations"(lower((payload->>'city'))) where partner_id is not null and coalesce(payload->>'city', '') <> '';
+create index if not exists "run-partners_type_status_idx" on "run-partners"(partner_type, status) where deleted_at is null;
 create index if not exists "run-partner-audit_partner_created_idx" on "run-partner-audit-logs"(partner_id, created_at desc);
 create index if not exists "run-partner-audit_registration_created_idx" on "run-partner-audit-logs"(registration_id, created_at asc);
 create index if not exists "run-partner-audit_action_created_idx" on "run-partner-audit-logs"(action, created_at desc);
@@ -244,6 +268,7 @@ returns trigger language plpgsql as $$
 begin
   if old.confirmed_at is not null and (
     new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name
+    or new.partner_type is distinct from old.partner_type
     or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at
     or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount
     or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price
@@ -282,6 +307,7 @@ alter table "run-registrations" add column if not exists confirmation_email_erro
 alter table "run-registrations" add column if not exists bib_number text;
 alter table "run-registrations" add column if not exists partner_id uuid references "run-partners"(id);
 alter table "run-registrations" add column if not exists partner_name text;
+alter table "run-registrations" add column if not exists partner_type text;
 alter table "run-registrations" add column if not exists discount_percentage numeric(5, 2) default 0;
 alter table "run-registrations" add column if not exists discount_amount integer default 0;
 alter table "run-registrations" add column if not exists original_price integer;

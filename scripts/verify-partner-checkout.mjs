@@ -105,7 +105,7 @@ try {
   assert.equal(created.payload.partner.finalPriceCents, created.payload.partner.originalPriceCents - created.payload.partner.discountAmountCents);
 
   const persisted = await database.query(
-    `select r.partner_id, r.partner_name, r.discount_percentage::float8, r.discount_amount, r.original_price, r.final_price, r.amount_cents,
+    `select r.partner_id, r.partner_name, r.partner_type, r.discount_percentage::float8, r.discount_amount, r.original_price, r.final_price, r.amount_cents,
             p.amount_cents as payment_amount
      from "run-registrations" r join "run-payments" p on p.registration_id = r.id where r.id = $1`,
     [created.payload.registrationId],
@@ -113,6 +113,7 @@ try {
   const row = persisted.rows[0];
   assert.equal(row.partner_id, activePartnerId);
   assert.equal(row.partner_name, 'Phase 3 Active');
+  assert.equal(row.partner_type, 'sports_advisory');
   assert.equal(row.discount_percentage, 10);
   assert.equal(row.discount_amount, Math.round(row.original_price * 0.1));
   assert.equal(row.final_price, row.original_price - row.discount_amount);
@@ -136,9 +137,10 @@ try {
     payload: { verified: true }, auditAction: 'phase3.verify',
   });
   assert.equal(confirmed.statusCode, 200);
-  const afterWebhook = await database.query(`select status, partner_id, discount_amount, original_price, final_price from "run-registrations" where id = $1`, [created.payload.registrationId]);
+  const afterWebhook = await database.query(`select status, partner_id, partner_type, discount_amount, original_price, final_price from "run-registrations" where id = $1`, [created.payload.registrationId]);
   assert.equal(afterWebhook.rows[0].status, 'paid');
   assert.equal(afterWebhook.rows[0].partner_id, activePartnerId);
+  assert.equal(afterWebhook.rows[0].partner_type, 'sports_advisory');
   assert.equal(afterWebhook.rows[0].final_price, row.final_price);
 
   const plain = await request(baseUrl, '/api/registrations', {
@@ -147,8 +149,9 @@ try {
   assert.equal(plain.response.status, 201, JSON.stringify(plain.payload));
   registrationIds.push(plain.payload.registrationId); paymentIds.push(plain.payload.paymentId);
   assert.equal(plain.payload.partner, null);
-  const plainRow = await database.query(`select partner_id, discount_percentage::float8, discount_amount, original_price, final_price, amount_cents from "run-registrations" where id = $1`, [plain.payload.registrationId]);
+  const plainRow = await database.query(`select partner_id, partner_type, discount_percentage::float8, discount_amount, original_price, final_price, amount_cents from "run-registrations" where id = $1`, [plain.payload.registrationId]);
   assert.equal(plainRow.rows[0].partner_id, null);
+  assert.equal(plainRow.rows[0].partner_type, null);
   assert.equal(plainRow.rows[0].discount_percentage, 0);
   assert.equal(plainRow.rows[0].discount_amount, 0);
   assert.equal(plainRow.rows[0].original_price, plainRow.rows[0].final_price);

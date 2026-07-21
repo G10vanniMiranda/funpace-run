@@ -69,6 +69,7 @@ try {
   });
   assert.equal(created.response.status, 201, JSON.stringify(created.payload));
   partnerId = created.payload.partner.id;
+  assert.equal(created.payload.partner.partnerType, 'sports_advisory', 'Payload legado deve usar o tipo padrao.');
 
   const fetched = await request(baseUrl, `/api/admin/partners/${partnerId}`, { headers: authHeaders });
   assert.equal(fetched.response.status, 200);
@@ -89,6 +90,25 @@ try {
   });
   assert.equal(invalid.response.status, 422);
 
+  const invalidFullDiscount = await request(baseUrl, '/api/admin/partners', {
+    method: 'POST', headers: authHeaders,
+    body: JSON.stringify({ name: 'Invalid Full Discount', slug: `${slug}-full`, discountPercentage: 100, status: 'active' }),
+  });
+  assert.equal(invalidFullDiscount.response.status, 422);
+
+  const invalidType = await request(baseUrl, '/api/admin/partners', {
+    method: 'POST', headers: authHeaders,
+    body: JSON.stringify({ name: 'Invalid Type', slug: `${slug}-type`, partner_type: 'ambassador', discountPercentage: 10, status: 'active' }),
+  });
+  assert.equal(invalidType.response.status, 422);
+
+  const typedUpdate = await request(baseUrl, `/api/admin/partners/${partnerId}`, {
+    method: 'PUT', headers: authHeaders,
+    body: JSON.stringify({ name: 'Phase 2 Influencer', slug, partner_type: 'influencer', discountPercentage: 10, description: 'Typed', status: 'active' }),
+  });
+  assert.equal(typedUpdate.response.status, 200, JSON.stringify(typedUpdate.payload));
+  assert.equal(typedUpdate.payload.partner.partnerType, 'influencer');
+
   const updatedSlug = `${slug}-updated`;
   const updated = await request(baseUrl, `/api/admin/partners/${partnerId}`, {
     method: 'PUT', headers: authHeaders,
@@ -96,6 +116,7 @@ try {
   });
   assert.equal(updated.response.status, 200, JSON.stringify(updated.payload));
   assert.equal(updated.payload.partner.discountPercentage, 15);
+  assert.equal(updated.payload.partner.partnerType, 'sports_advisory', 'Update legado deve permanecer compativel com o tipo padrao.');
 
   const activated = await request(baseUrl, `/api/admin/partners/${partnerId}/status`, {
     method: 'PATCH', headers: authHeaders, body: JSON.stringify({ status: 'active' }),

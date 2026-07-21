@@ -70,6 +70,7 @@ export type RegistrationRecord = {
   confirmationEmailError?: string | null;
   partnerId?: string | null;
   partnerName?: string | null;
+  partnerType?: PartnerType | null;
   partnerLink?: string | null;
   partnerIdentifiedAt?: string | null;
   discountPercentage?: number;
@@ -192,11 +193,13 @@ export type PartnershipLeadRecord = {
 };
 
 export type PartnerStatus = 'active' | 'inactive';
+export type PartnerType = 'sports_advisory' | 'influencer';
 
 export type PartnerRecord = {
   id: string;
   name: string;
   slug: string;
+  partnerType: PartnerType;
   discountPercentage: number;
   status: PartnerStatus;
   description: string | null;
@@ -557,6 +560,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       ,bib_number text,
       partner_id uuid,
       partner_name text,
+      partner_type text,
       partner_link text,
       partner_identified_at text,
       discount_percentage numeric(5, 2) not null default 0,
@@ -679,6 +683,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       id uuid primary key default gen_random_uuid(),
       name text not null,
       slug text not null,
+      partner_type text not null default 'sports_advisory',
       discount_percentage numeric(5, 2) not null,
       status text not null default 'active',
       description text,
@@ -686,7 +691,8 @@ async function ensurePostgresDatabase(client: Queryable) {
       updated_at text not null default (now()::text),
       deleted_at text,
       constraint "run-partners_slug_key" unique (slug),
-      constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage <= 100),
+      constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer')),
+      constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100),
       constraint "run-partners_status_check" check (status in ('active', 'inactive'))
     );
 
@@ -782,6 +788,15 @@ async function ensurePostgresDatabase(client: Queryable) {
     create index if not exists "run-operational-alerts_status_idx" on ${table.operationalAlerts}(status, severity, detected_at desc);
   `);
 
+  await client.query(`alter table ${table.partners} add column if not exists partner_type text`);
+  await client.query(`update ${table.partners} set partner_type = 'sports_advisory' where partner_type is null or btrim(partner_type) = ''`);
+  await client.query(`alter table ${table.partners} alter column partner_type set default 'sports_advisory'`);
+  await client.query(`alter table ${table.partners} alter column partner_type set not null`);
+  await client.query(`alter table ${table.partners} drop constraint if exists "run-partners_partner_type_check"`);
+  await client.query(`alter table ${table.partners} add constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer'))`);
+  await client.query(`alter table ${table.partners} drop constraint if exists "run-partners_discount_percentage_check"`);
+  await client.query(`alter table ${table.partners} add constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100)`);
+  await client.query(`create index if not exists "run-partners_type_status_idx" on ${table.partners}(partner_type, status) where deleted_at is null`);
   await client.query(`alter table ${table.registrations} add column if not exists expires_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists paid_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmed_at text`);
@@ -793,12 +808,14 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.registrations} add column if not exists bib_number text`);
   await client.query(`alter table ${table.registrations} add column if not exists partner_id uuid`);
   await client.query(`alter table ${table.registrations} add column if not exists partner_name text`);
+  await client.query(`alter table ${table.registrations} add column if not exists partner_type text`);
   await client.query(`alter table ${table.registrations} add column if not exists partner_link text`);
   await client.query(`alter table ${table.registrations} add column if not exists partner_identified_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists discount_percentage numeric(5, 2) default 0`);
   await client.query(`alter table ${table.registrations} add column if not exists discount_amount integer default 0`);
   await client.query(`alter table ${table.registrations} add column if not exists original_price integer`);
   await client.query(`alter table ${table.registrations} add column if not exists final_price integer`);
+  await client.query(`update ${table.registrations} registration set partner_type = partner.partner_type from ${table.partners} partner where registration.partner_id = partner.id and registration.partner_type is null`);
   await client.query(`update ${table.registrations} set discount_percentage = coalesce(discount_percentage, 0), discount_amount = coalesce(discount_amount, 0), original_price = coalesce(original_price, amount_cents), final_price = coalesce(final_price, amount_cents)`);
   await client.query(`alter table ${table.registrations} alter column discount_percentage set not null`);
   await client.query(`alter table ${table.registrations} alter column discount_amount set not null`);
@@ -812,13 +829,17 @@ async function ensurePostgresDatabase(client: Queryable) {
       if not exists (select 1 from pg_constraint where conname = 'run-registrations_partner_pricing_check') then
         alter table "run-registrations" add constraint "run-registrations_partner_pricing_check" check (original_price > 0 and final_price > 0 and discount_amount >= 0 and discount_percentage >= 0 and discount_percentage < 100 and original_price - discount_amount = final_price and amount_cents = final_price);
       end if;
-      if not exists (select 1 from pg_constraint where conname = 'run-registrations_partner_metadata_check') then
-        alter table "run-registrations" add constraint "run-registrations_partner_metadata_check" check ((partner_id is null and partner_name is null and discount_percentage = 0 and discount_amount = 0) or (partner_id is not null and partner_name is not null and discount_percentage > 0 and discount_amount > 0));
-      end if;
     end $$;
+    alter table "run-registrations" drop constraint if exists "run-registrations_partner_type_check";
+    alter table "run-registrations" add constraint "run-registrations_partner_type_check" check (partner_type is null or partner_type in ('sports_advisory', 'influencer'));
+    alter table "run-registrations" drop constraint if exists "run-registrations_partner_metadata_check";
+    alter table "run-registrations" add constraint "run-registrations_partner_metadata_check" check ((partner_id is null and partner_name is null and partner_type is null and discount_percentage = 0 and discount_amount = 0) or (partner_id is not null and partner_name is not null and partner_type is not null and discount_percentage > 0 and discount_amount > 0));
     create or replace function public.run_registration_pricing_defaults() returns trigger language plpgsql set search_path = public as $$ begin new.discount_percentage := coalesce(new.discount_percentage, 0); new.discount_amount := coalesce(new.discount_amount, 0); new.original_price := coalesce(new.original_price, new.amount_cents); new.final_price := coalesce(new.final_price, new.amount_cents); return new; end; $$;
     drop trigger if exists "run-registrations_pricing_defaults" on "run-registrations";
     create trigger "run-registrations_pricing_defaults" before insert on "run-registrations" for each row execute function public.run_registration_pricing_defaults();
+    create or replace function public.protect_confirmed_partner_snapshot() returns trigger language plpgsql set search_path = public as $$ begin if old.confirmed_at is not null and (new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name or new.partner_type is distinct from old.partner_type or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price) then raise exception 'confirmed partner snapshot is immutable'; end if; return new; end; $$;
+    drop trigger if exists "run-registrations_partner_snapshot_immutable" on "run-registrations";
+    create trigger "run-registrations_partner_snapshot_immutable" before update on "run-registrations" for each row execute function public.protect_confirmed_partner_snapshot();
   `);
   await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
   await client.query(`alter table ${table.lots} add column if not exists order_index integer not null default 0`);
@@ -1035,7 +1056,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
   const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
   const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`) : emptyRows;
-  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price from ${table.registrations}`) : emptyRows;
+  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
@@ -1045,7 +1066,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const adminSessions = include.adminSessions ? await client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`) : emptyRows;
   const adminUsers = include.adminUsers ? await client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`) : emptyRows;
   const partnershipLeads = include.partnershipLeads ? await client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`) : emptyRows;
-  const partners = include.partners ? await client.query(`select id, name, slug, discount_percentage, status, description, created_at, updated_at, deleted_at from ${table.partners}`) : emptyRows;
+  const partners = include.partners ? await client.query(`select id, name, slug, partner_type, discount_percentage, status, description, created_at, updated_at, deleted_at from ${table.partners}`) : emptyRows;
 
   return {
     events: events.rows.map((row) => ({
@@ -1102,6 +1123,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       bibNumber: row.bib_number,
       partnerId: row.partner_id,
       partnerName: row.partner_name,
+      partnerType: row.partner_type,
       partnerLink: row.partner_link,
       partnerIdentifiedAt: row.partner_identified_at,
       discountPercentage: Number(row.discount_percentage || 0),
@@ -1199,6 +1221,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       id: row.id,
       name: row.name,
       slug: row.slug,
+      partnerType: row.partner_type,
       discountPercentage: Number(row.discount_percentage),
       status: row.status,
       description: row.description,
@@ -1274,8 +1297,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -1296,6 +1319,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          bib_number = excluded.bib_number,
          partner_id = excluded.partner_id,
          partner_name = excluded.partner_name,
+         partner_type = excluded.partner_type,
          partner_link = excluded.partner_link,
          partner_identified_at = excluded.partner_identified_at,
          discount_percentage = excluded.discount_percentage,
@@ -1324,6 +1348,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.bibNumber || null,
         item.partnerId || null,
         item.partnerName || null,
+        item.partnerType || null,
         item.partnerLink || null,
         item.partnerIdentifiedAt || null,
         item.discountPercentage || 0,
@@ -1522,17 +1547,18 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.partners) {
     await client.query(
-      `insert into ${table.partners} (id, name, slug, discount_percentage, status, description, created_at, updated_at, deleted_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `insert into ${table.partners} (id, name, slug, partner_type, discount_percentage, status, description, created_at, updated_at, deleted_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        on conflict (id) do update set
          name = excluded.name,
          slug = excluded.slug,
+         partner_type = excluded.partner_type,
          discount_percentage = excluded.discount_percentage,
          status = excluded.status,
          description = excluded.description,
          updated_at = excluded.updated_at,
          deleted_at = excluded.deleted_at`,
-      [item.id, item.name, item.slug, item.discountPercentage, item.status, item.description, item.createdAt, item.updatedAt, item.deletedAt],
+      [item.id, item.name, item.slug, item.partnerType, item.discountPercentage, item.status, item.description, item.createdAt, item.updatedAt, item.deletedAt],
     );
   }
 }
@@ -1691,7 +1717,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
 
     const existingResult = await client.query(
       `select registration.id, registration.status, registration.expires_at,
-              registration.amount_cents, registration.partner_id, registration.partner_name,
+              registration.amount_cents, registration.partner_id, registration.partner_name, registration.partner_type,
               registration.discount_percentage, registration.discount_amount,
               registration.original_price, registration.final_price,
               payment.id as payment_id, payment.checkout_url,
@@ -1832,7 +1858,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     const originalPriceCents = Number(lot.priceCents);
     const partnerResult = input.partnerId
       ? await client.query(
-        `select id, name, discount_percentage, status, deleted_at from ${table.partners} where id = $1 limit 1`,
+        `select id, name, partner_type, discount_percentage, status, deleted_at from ${table.partners} where id = $1 limit 1`,
         [input.partnerId],
       )
       : { rows: [] };
@@ -1842,13 +1868,14 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       discountPercentage: Number(partnerRow.discount_percentage), status: partnerRow.status,
       deletedAt: partnerRow.deleted_at,
     }) : null;
+    const partnerType = partnerPricing ? partnerRow.partner_type as PartnerType : null;
     const amountCents = partnerPricing?.finalPriceCents ?? originalPriceCents;
 
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null, null, null, null, $11, $12, $13, $14, $15, $16, $17, $18)`,
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null, null, null, null, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
       [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now, input.expiresAt,
-        partnerPricing?.partnerId || null, partnerPricing?.partnerName || null, partnerPricing ? `/p/${input.partnerSlug || ''}` : null, partnerPricing ? now : null,
+        partnerPricing?.partnerId || null, partnerPricing?.partnerName || null, partnerType, partnerPricing ? `/p/${input.partnerSlug || ''}` : null, partnerPricing ? now : null,
         partnerPricing?.discountPercentage || 0, partnerPricing?.discountAmountCents || 0, originalPriceCents, amountCents],
     );
     await client.query(
@@ -2588,7 +2615,7 @@ export async function getPartnerDetailInPostgres(partnerId: string, filters: Par
   const total = Number(registrationsResult.rows[0]?.total_count || 0);
   return {
     generatedAt: new Date().toISOString(),
-    partner: { id: String(partner.id), name: String(partner.name), slug: String(partner.slug), discountPercentage: Number(partner.discount_percentage), status: partner.status, description: partner.description || null, createdAt: String(partner.created_at), updatedAt: String(partner.updated_at) },
+    partner: { id: String(partner.id), name: String(partner.name), slug: String(partner.slug), partnerType: partner.partner_type as PartnerType, discountPercentage: Number(partner.discount_percentage), status: partner.status, description: partner.description || null, createdAt: String(partner.created_at), updatedAt: String(partner.updated_at) },
     metrics: { registrations: Number(metrics.registrations || 0), paidRegistrations: Number(metrics.paid_registrations || 0), grossRevenueCents: Number(metrics.gross_revenue_cents || 0), discountAmountCents: Number(metrics.discount_amount_cents || 0), netRevenueCents: Number(metrics.net_revenue_cents || 0), averageTicketCents: Number(metrics.average_ticket_cents || 0), lastRegistrationAt: metrics.last_registration_at ? String(metrics.last_registration_at) : null },
     monthly: monthlyResult.rows.map(mapPartnerMetric),
     registrations: registrationsResult.rows.map((row) => ({ id: String(row.id), athleteName: String(row.athlete_name), eventName: String(row.event_name), city: String(row.city), createdAt: String(row.created_at), originalPriceCents: Number(row.original_price), discountAmountCents: Number(row.discount_amount), finalPriceCents: Number(row.final_price), paymentStatus: String(row.status) })),
@@ -2645,11 +2672,11 @@ export async function appendPartnerPaymentStatusAuditInPostgres(registrationId: 
 }
 
 function mapPartnerRow(row: Record<string, unknown>): PartnerRecord {
-  return { id: String(row.id), name: String(row.name), slug: String(row.slug), discountPercentage: Number(row.discount_percentage), status: row.status as PartnerRecord['status'], description: row.description ? String(row.description) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at), deletedAt: row.deleted_at ? String(row.deleted_at) : null };
+  return { id: String(row.id), name: String(row.name), slug: String(row.slug), partnerType: row.partner_type as PartnerType, discountPercentage: Number(row.discount_percentage), status: row.status as PartnerRecord['status'], description: row.description ? String(row.description) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at), deletedAt: row.deleted_at ? String(row.deleted_at) : null };
 }
 
 export async function mutatePartnerWithAuditInPostgres(input: {
-  mode: 'create' | 'update' | 'status' | 'delete'; partnerId?: string; partner?: Pick<PartnerRecord, 'name' | 'slug' | 'discountPercentage' | 'status' | 'description'>;
+  mode: 'create' | 'update' | 'status' | 'delete'; partnerId?: string; partner?: Pick<PartnerRecord, 'name' | 'slug' | 'partnerType' | 'discountPercentage' | 'status' | 'description'>;
   status?: PartnerRecord['status']; actor: string; actorRole: string; sessionId: string; ipAddress: string | null; userAgent: string | null;
 }) {
   const client = await requirePool().connect();
@@ -2659,7 +2686,7 @@ export async function mutatePartnerWithAuditInPostgres(input: {
     let before: PartnerRecord | null = null; let after: PartnerRecord | null = null; let action: PartnerAuditAction;
     if (input.mode === 'create') {
       const id = randomUUID(); const partner = input.partner!;
-      const result = await client.query(`insert into ${table.partners} (id,name,slug,discount_percentage,status,description,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$7,null) returning *`, [id,partner.name,partner.slug,partner.discountPercentage,partner.status,partner.description,now]);
+      const result = await client.query(`insert into ${table.partners} (id,name,slug,partner_type,discount_percentage,status,description,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$8,null) returning *`, [id,partner.name,partner.slug,partner.partnerType,partner.discountPercentage,partner.status,partner.description,now]);
       after = mapPartnerRow(result.rows[0]); action = 'partner.created';
     } else {
       const current = await client.query(`select * from ${table.partners} where id=$1::uuid and deleted_at is null for update`, [input.partnerId]);
@@ -2667,7 +2694,7 @@ export async function mutatePartnerWithAuditInPostgres(input: {
       before = mapPartnerRow(current.rows[0]);
       if (input.mode === 'update') {
         const partner = input.partner!;
-        const result = await client.query(`update ${table.partners} set name=$1,slug=$2,discount_percentage=$3,status=$4,description=$5,updated_at=$6 where id=$7::uuid returning *`, [partner.name,partner.slug,partner.discountPercentage,partner.status,partner.description,now,input.partnerId]);
+        const result = await client.query(`update ${table.partners} set name=$1,slug=$2,partner_type=$3,discount_percentage=$4,status=$5,description=$6,updated_at=$7 where id=$8::uuid returning *`, [partner.name,partner.slug,partner.partnerType,partner.discountPercentage,partner.status,partner.description,now,input.partnerId]);
         after = mapPartnerRow(result.rows[0]); action = 'partner.updated';
       } else if (input.mode === 'status') {
         const result = await client.query(`update ${table.partners} set status=$1,updated_at=$2 where id=$3::uuid returning *`, [input.status,now,input.partnerId]);

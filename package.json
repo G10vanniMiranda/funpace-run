@@ -22,6 +22,7 @@
     "phase3:partners:verify": "node --import tsx scripts/verify-partner-checkout.mjs",
     "phase4:partners:verify": "node --import tsx scripts/verify-partner-dashboard.mjs",
     "phase5:partners:verify": "node --import tsx scripts/verify-partner-audit.mjs",
+    "i2:influencers:verify": "node scripts/verify-influencer-domain.mjs",
     "reconciliation:initialize": "node --import tsx scripts/initialize-reconciliation.ts",
     "phase2:verify": "node scripts/verify-phase2.mjs",
     "reservations:expire": "node --import tsx scripts/expire-reservations.ts",

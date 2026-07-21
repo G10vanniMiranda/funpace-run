@@ -1,4 +1,5 @@
 export type PartnerStatus = 'active' | 'inactive';
+export type PartnerType = 'sports_advisory' | 'influencer';
 
 export type AdminPartner = {
   id: string;
@@ -6,12 +7,13 @@ export type AdminPartner = {
   slug: string;
   discountPercentage: number;
   status: PartnerStatus;
+  partnerType: PartnerType;
   description: string | null;
   createdAt: string;
   updatedAt: string;
 };
 
-export type PartnerInput = Pick<AdminPartner, 'name' | 'slug' | 'discountPercentage' | 'status' | 'description'>;
+export type PartnerInput = Pick<AdminPartner, 'name' | 'slug' | 'discountPercentage' | 'status' | 'description'> & { partnerType?: PartnerType };
 export type AdminPartnersResponse = { partners: AdminPartner[] };
 export type AdminPartnerResponse = { partner: AdminPartner };
 export type PartnerSlugAvailabilityResponse = { slug: string; available: boolean };

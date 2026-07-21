@@ -62,10 +62,11 @@ try {
   const defaults = await client.query(
     `insert into "run-partners" (name, slug, discount_percentage)
      values ('Temporary Partner', 'phase1-verification', 10)
-     returning id, status, created_at, updated_at`,
+     returning id, partner_type, status, created_at, updated_at`,
   );
   assert.match(String(defaults.rows[0].id), /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   assert.equal(defaults.rows[0].status, 'active');
+  assert.equal(defaults.rows[0].partner_type, 'sports_advisory');
   assert.ok(defaults.rows[0].created_at);
   assert.ok(defaults.rows[0].updated_at);
 
@@ -82,6 +83,11 @@ try {
   await expectConstraintViolation(
     'negative_discount',
     `insert into "run-partners" (name, slug, discount_percentage) values ('Invalid', 'invalid-negative', -1)`,
+    'run-partners_discount_percentage_check',
+  );
+  await expectConstraintViolation(
+    'full_discount',
+    `insert into "run-partners" (name, slug, discount_percentage) values ('Invalid', 'invalid-full', 100)`,
     'run-partners_discount_percentage_check',
   );
   await client.query('rollback');
