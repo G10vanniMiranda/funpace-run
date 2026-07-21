@@ -247,6 +247,7 @@ $$;
 create index if not exists "run-registrations_cpf_hash_idx" on "run-registrations"(cpf_hash);
 create index if not exists "run-registrations_status_idx" on "run-registrations"(status);
 create index if not exists "run-registrations_partner_id_idx" on "run-registrations"(partner_id) where partner_id is not null;
+create index if not exists "run-registrations_partner_type_status_created_idx" on "run-registrations"(partner_type,status,created_at desc) where partner_id is not null;
 create index if not exists "run-registrations_partner_created_idx" on "run-registrations"(partner_id, created_at desc) where partner_id is not null;
 create index if not exists "run-registrations_partner_status_created_idx" on "run-registrations"(partner_id, status, created_at desc) where partner_id is not null;
 create index if not exists "run-registrations_partner_event_created_idx" on "run-registrations"(partner_id, event_id, created_at desc) where partner_id is not null;

@@ -41,6 +41,7 @@ export type PartnerDashboardFilters = {
   paymentStatus?: string;
   partnerId?: string;
   city?: string;
+  partnerType?: PartnerType;
 };
 
 export type PartnerMetricPoint = {
@@ -57,6 +58,7 @@ export type PartnerRankingItem = PartnerMetricPoint & {
   name: string;
   slug: string;
   status: PartnerStatus;
+  partnerType: PartnerType;
   paidRegistrations: number;
   averageTicketCents: number;
 };
@@ -65,6 +67,11 @@ export type AdminPartnerDashboardResponse = {
   generatedAt: string;
   summary: {
     totalPartners: number;
+    sportsAdvisories: number;
+    influencers: number;
+    activePartners: number;
+    inactivePartners: number;
+    withoutRegistrations: number;
     totalRegistrations: number;
     paidRegistrations: number;
     grossRevenueCents: number;
@@ -74,6 +81,9 @@ export type AdminPartnerDashboardResponse = {
     leader: { partnerId: string; name: string; registrations: number } | null;
     conversionRate: number;
     conversionDefinition: string;
+    topRevenue: { partnerId: string; name: string; value: number } | null;
+    topDiscount: { partnerId: string; name: string; value: number } | null;
+    topConversion: { partnerId: string; name: string; value: number } | null;
   };
   ranking: PartnerRankingItem[];
   rankingPagination: { page: number; pageSize: number; total: number; totalPages: number };
@@ -81,6 +91,7 @@ export type AdminPartnerDashboardResponse = {
     monthly: PartnerMetricPoint[];
     comparison: PartnerRankingItem[];
   };
+  breakdown: Array<{ partnerType: PartnerType; registrations: number; paidRegistrations: number; revenueCents: number; discountAmountCents: number; averageTicketCents: number; conversionRate: number; participationPercentage: number }>;
   indicators: {
     leader: PartnerRankingItem | null;
     withoutRegistrations: Array<{ partnerId: string; name: string }>;
@@ -90,9 +101,10 @@ export type AdminPartnerDashboardResponse = {
   };
   options: {
     events: Array<{ id: string; name: string }>;
-    partners: Array<{ id: string; name: string }>;
+    partners: Array<{ id: string; name: string; partnerType: PartnerType }>;
     cities: string[];
     paymentStatuses: string[];
+    partnerTypes: PartnerType[];
   };
 };
 
@@ -135,6 +147,6 @@ export type PartnerAuditResponse = { logs: PartnerAuditLog[]; pagination: { page
 export type PartnerMonitoringResponse = {
   generatedAt: string;
   totals: { accesses: number; started: number; completed: number; conversionRate: number; abandoned: number; abandonmentRate: number; failures: number };
-  partners: Array<{ partnerId: string; name: string; status: PartnerStatus; accesses: number; started: number; completed: number; conversionRate: number; abandoned: number; abandonmentRate: number; failures: number }>;
+  partners: Array<{ partnerId: string; name: string; status: PartnerStatus; partnerType: PartnerType; accesses: number; started: number; completed: number; conversionRate: number; abandoned: number; abandonmentRate: number; failures: number }>;
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };

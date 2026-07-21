@@ -3693,6 +3693,10 @@ function readPartnerAnalyticsFilters(url: URL): { filters: PartnerAnalyticsFilte
   const dateTo = (url.searchParams.get('dateTo') || '').trim();
   const paymentStatus = (url.searchParams.get('paymentStatus') || '').trim();
   const partnerId = (url.searchParams.get('partnerId') || '').trim();
+  const partnerTypeCamel = (url.searchParams.get('partnerType') || '').trim();
+  const partnerTypeSnake = (url.searchParams.get('partner_type') || '').trim();
+  if (partnerTypeCamel && partnerTypeSnake && partnerTypeCamel !== partnerTypeSnake) return { error: 'Tipo de parceiro divergente.' };
+  const partnerType = partnerTypeCamel || partnerTypeSnake;
   const city = (url.searchParams.get('city') || '').trim().slice(0, 120);
   const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
   const pageSize = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '20', 10) || 20));
@@ -3700,7 +3704,8 @@ function readPartnerAnalyticsFilters(url: URL): { filters: PartnerAnalyticsFilte
   if (dateFrom && dateTo && dateFrom > dateTo) return { error: 'A data inicial nao pode ser posterior a data final.' };
   if (paymentStatus && !partnerPaymentStatuses.has(paymentStatus)) return { error: 'Status de pagamento invalido.' };
   if (partnerId && !uuidPattern.test(partnerId)) return { error: 'Parceiro invalido.' };
-  return { filters: { eventId: eventId || undefined, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined, paymentStatus: paymentStatus || undefined, partnerId: partnerId || undefined, city: city || undefined }, page, pageSize };
+  if (partnerType && !partnerTypes.includes(partnerType as PartnerType)) return { error: 'Tipo de parceiro invalido.' };
+  return { filters: { eventId: eventId || undefined, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined, paymentStatus: paymentStatus || undefined, partnerId: partnerId || undefined, city: city || undefined, partnerType: partnerType as PartnerType || undefined }, page, pageSize };
 }
 
 async function handleAdminPartnerDashboard(req: IncomingMessage, res: ServerResponse, url: URL) {
@@ -3731,8 +3736,8 @@ async function handleAdminPartnerDashboardExport(req: IncomingMessage, res: Serv
   const format = url.searchParams.get('format') || 'csv';
   if (!['csv', 'excel'].includes(format)) { json(res, 422, { message: 'Formato de exportacao invalido.' }); return; }
   const rows = await exportPartnerRegistrationsInPostgres(parsed.filters);
-  const headers = ['Inscricao', 'Atleta', 'Evento', 'Parceiro', 'Cidade', 'Data', 'Valor original', 'Desconto', 'Percentual', 'Valor pago', 'Status do pagamento'];
-  const values = rows.map((row) => [row.id, row.athleteName, row.eventName, row.partnerName, row.city, row.createdAt, row.originalPriceCents / 100, row.discountAmountCents / 100, row.discountPercentage, row.finalPriceCents / 100, row.paymentStatus]);
+  const headers = ['Inscricao', 'Atleta', 'Evento', 'Parceiro', 'Cidade', 'Data', 'Valor original', 'Desconto', 'Percentual', 'Valor pago', 'Status do pagamento', 'Tipo do parceiro'];
+  const values = rows.map((row) => [row.id, row.athleteName, row.eventName, row.partnerName, row.city, row.createdAt, row.originalPriceCents / 100, row.discountAmountCents / 100, row.discountPercentage, row.finalPriceCents / 100, row.paymentStatus, row.partnerType]);
   if (format === 'excel') { binary(res, 'funpace-parceiros.xls', 'application/vnd.ms-excel; charset=utf-8', createExcelXml('Parceiros', headers, values)); return; }
   csv(res, 'funpace-parceiros.csv', `\uFEFF${[headers, ...values].map((row) => row.map(csvCell).join(';')).join('\n')}`);
 }
@@ -3741,9 +3746,14 @@ async function handleAdminPartnerAudit(req: IncomingMessage, res: ServerResponse
   if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
   const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
   const pageSize = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25));
-  const filters = { partnerId: url.searchParams.get('partnerId') || undefined, registrationId: url.searchParams.get('registrationId') || undefined, action: url.searchParams.get('action') || undefined, dateFrom: url.searchParams.get('dateFrom') || undefined, dateTo: url.searchParams.get('dateTo') || undefined };
+  const partnerTypeCamel = url.searchParams.get('partnerType') || '';
+  const partnerTypeSnake = url.searchParams.get('partner_type') || '';
+  if (partnerTypeCamel && partnerTypeSnake && partnerTypeCamel !== partnerTypeSnake) { json(res, 422, { message: 'Tipo de parceiro divergente.' }); return; }
+  const partnerType = partnerTypeCamel || partnerTypeSnake;
+  const filters = { partnerId: url.searchParams.get('partnerId') || undefined, registrationId: url.searchParams.get('registrationId') || undefined, action: url.searchParams.get('action') || undefined, dateFrom: url.searchParams.get('dateFrom') || undefined, dateTo: url.searchParams.get('dateTo') || undefined, partnerType: partnerType as PartnerType || undefined };
   if (filters.partnerId && !/^[0-9a-f-]{36}$/i.test(filters.partnerId)) { json(res, 422, { message: 'Parceiro invalido.' }); return; }
   if ((filters.dateFrom && !/^\d{4}-\d{2}-\d{2}$/.test(filters.dateFrom)) || (filters.dateTo && !/^\d{4}-\d{2}-\d{2}$/.test(filters.dateTo))) { json(res, 422, { message: 'Periodo invalido.' }); return; }
+  if (partnerType && !partnerTypes.includes(partnerType as PartnerType)) { json(res, 422, { message: 'Tipo de parceiro invalido.' }); return; }
   json(res, 200, await listPartnerAuditLogsInPostgres(filters, page, pageSize));
 }
 
@@ -3751,7 +3761,12 @@ async function handleAdminPartnerMonitoring(req: IncomingMessage, res: ServerRes
   if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
   const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
   const pageSize = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25));
-  json(res, 200, await getPartnerMonitoringInPostgres(page, pageSize));
+  const partnerTypeCamel = url.searchParams.get('partnerType') || '';
+  const partnerTypeSnake = url.searchParams.get('partner_type') || '';
+  if (partnerTypeCamel && partnerTypeSnake && partnerTypeCamel !== partnerTypeSnake) { json(res, 422, { message: 'Tipo de parceiro divergente.' }); return; }
+  const partnerType = partnerTypeCamel || partnerTypeSnake;
+  if (partnerType && !partnerTypes.includes(partnerType as PartnerType)) { json(res, 422, { message: 'Tipo de parceiro invalido.' }); return; }
+  json(res, 200, await getPartnerMonitoringInPostgres(page, pageSize, partnerType as PartnerType || undefined));
 }
 
 async function handleAdminPartnerConsistency(req: IncomingMessage, res: ServerResponse) {

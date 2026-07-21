@@ -768,6 +768,7 @@ async function ensurePostgresDatabase(client: Queryable) {
     create index if not exists "run-registrations_cpf_hash_idx" on ${table.registrations}(cpf_hash);
     create index if not exists "run-registrations_status_idx" on ${table.registrations}(status);
     create index if not exists "run-registrations_partner_id_idx" on ${table.registrations}(partner_id) where partner_id is not null;
+    create index if not exists "run-registrations_partner_type_status_created_idx" on ${table.registrations}(partner_type,status,created_at desc) where partner_id is not null;
     create index if not exists "run-payments_registration_id_idx" on ${table.payments}(registration_id);
     create index if not exists "run-payments_status_updated_idx" on ${table.payments}(status, updated_at desc);
     create index if not exists "run-payment-events_payment_received_idx" on ${table.paymentEvents}(payment_id, received_at asc);
@@ -2517,6 +2518,7 @@ export type PartnerAnalyticsFilters = {
   paymentStatus?: string;
   partnerId?: string;
   city?: string;
+  partnerType?: PartnerType;
 };
 
 function partnerAnalyticsFilter(filters: PartnerAnalyticsFilters) {
@@ -2529,6 +2531,16 @@ function partnerAnalyticsFilter(filters: PartnerAnalyticsFilters) {
   if (filters.paymentStatus) conditions.push(`r.status = ${add(filters.paymentStatus)}`);
   if (filters.partnerId) conditions.push(`r.partner_id = ${add(filters.partnerId)}::uuid`);
   if (filters.city) conditions.push(`lower(coalesce(r.payload->>'city', '')) = lower(${add(filters.city)}::text)`);
+  if (filters.partnerType) conditions.push(`r.partner_type = ${add(filters.partnerType)}`);
+  return { sql: conditions.join(' and '), values };
+}
+
+function partnerEntityFilter(filters: Pick<PartnerAnalyticsFilters, 'partnerId' | 'partnerType'>, startIndex = 0, alias = 'p') {
+  const values: unknown[] = [];
+  const conditions = [`${alias}.deleted_at is null`];
+  const add = (value: unknown) => { values.push(value); return `$${startIndex + values.length}`; };
+  if (filters.partnerId) conditions.push(`${alias}.id = ${add(filters.partnerId)}::uuid`);
+  if (filters.partnerType) conditions.push(`${alias}.partner_type = ${add(filters.partnerType)}`);
   return { sql: conditions.join(' and '), values };
 }
 
@@ -2546,6 +2558,7 @@ function mapPartnerMetric(row: Record<string, unknown>) {
 function mapPartnerRanking(row: Record<string, unknown>) {
   return {
     partnerId: String(row.partner_id), name: String(row.name), slug: String(row.slug), status: row.status as PartnerRecord['status'],
+    partnerType: row.partner_type as PartnerType,
     paidRegistrations: Number(row.paid_registrations || 0), averageTicketCents: Number(row.average_ticket_cents || 0),
     ...mapPartnerMetric({ ...row, label: row.name }),
   };
@@ -2556,10 +2569,10 @@ export async function getPartnerDashboardInPostgres(filters: PartnerAnalyticsFil
   const pool = requirePool();
   const filtered = partnerAnalyticsFilter(filters);
   const offset = (page - 1) * pageSize;
-  const partnerScope = filters.partnerId ? 'and p.id = $1::uuid' : '';
-  const partnerScopeValues = filters.partnerId ? [filters.partnerId] : [];
+  const partnerScope = partnerEntityFilter(filters);
+  const joinedPartnerScope = partnerEntityFilter(filters, filtered.values.length);
   const financial = `filter (where status = 'paid')`;
-  const [summaryResult, rankingResult, monthlyResult, comparisonResult, emptyResult, inactiveResult, growthResult, optionsResult] = await Promise.all([
+  const [summaryResult, rankingResult, monthlyResult, comparisonResult, emptyResult, inactiveResult, growthResult, optionsResult, partnerSummaryResult, breakdownResult] = await Promise.all([
     pool.query(
       `with filtered as (select * from ${table.registrations} r where ${filtered.sql}),
        partner_totals as (
@@ -2578,18 +2591,18 @@ export async function getPartnerDashboardInPostgres(filters: PartnerAnalyticsFil
        from filtered`, filtered.values),
     pool.query(
       `with filtered as (select * from ${table.registrations} r where ${filtered.sql}), ranked as (
-         select p.id partner_id, p.name, p.slug, p.status, count(f.id)::int registrations,
+         select p.id partner_id, p.name, p.slug, p.status, p.partner_type, count(f.id)::int registrations,
            count(f.id) filter (where f.status='paid')::int paid_registrations,
            coalesce(sum(f.original_price) filter (where f.status='paid'),0)::bigint gross_revenue_cents,
            coalesce(sum(f.discount_amount) filter (where f.status='paid'),0)::bigint discount_amount_cents,
            coalesce(sum(f.final_price) filter (where f.status='paid'),0)::bigint net_revenue_cents,
            coalesce(round(avg(f.final_price) filter (where f.status='paid')),0)::bigint average_ticket_cents
          from ${table.partners} p left join filtered f on f.partner_id=p.id
-         where p.deleted_at is null ${filters.partnerId ? `and p.id = $${filtered.values.length + 1}::uuid` : ''}
-         group by p.id, p.name, p.slug, p.status
+         where ${joinedPartnerScope.sql}
+         group by p.id, p.name, p.slug, p.status, p.partner_type
        ) select *, count(*) over()::int total_count from ranked
-         order by registrations desc, name asc limit $${filtered.values.length + (filters.partnerId ? 2 : 1)} offset $${filtered.values.length + (filters.partnerId ? 3 : 2)}`,
-      [...filtered.values, ...(filters.partnerId ? [filters.partnerId] : []), pageSize, offset]),
+         order by registrations desc, name asc limit $${filtered.values.length + joinedPartnerScope.values.length + 1} offset $${filtered.values.length + joinedPartnerScope.values.length + 2}`,
+      [...filtered.values, ...joinedPartnerScope.values, pageSize, offset]),
     pool.query(
       `with filtered as (select * from ${table.registrations} r where ${filtered.sql})
        select to_char(date_trunc('month', created_at::timestamptz), 'YYYY-MM') label,
@@ -2600,42 +2613,68 @@ export async function getPartnerDashboardInPostgres(filters: PartnerAnalyticsFil
        from filtered group by date_trunc('month', created_at::timestamptz) order by date_trunc('month', created_at::timestamptz) asc`, filtered.values),
     pool.query(
       `with filtered as (select * from ${table.registrations} r where ${filtered.sql}), aggregate as (
-         select p.id partner_id, p.name, p.slug, p.status, count(f.id)::int registrations,
+         select p.id partner_id, p.name, p.slug, p.status, p.partner_type, count(f.id)::int registrations,
            count(f.id) filter (where f.status='paid')::int paid_registrations,
            coalesce(sum(f.original_price) filter (where f.status='paid'),0)::bigint gross_revenue_cents,
            coalesce(sum(f.discount_amount) filter (where f.status='paid'),0)::bigint discount_amount_cents,
            coalesce(sum(f.final_price) filter (where f.status='paid'),0)::bigint net_revenue_cents,
            coalesce(round(avg(f.final_price) filter (where f.status='paid')),0)::bigint average_ticket_cents
          from ${table.partners} p left join filtered f on f.partner_id=p.id
-         where p.deleted_at is null ${filters.partnerId ? `and p.id = $${filtered.values.length + 1}::uuid` : ''}
-         group by p.id, p.name, p.slug, p.status
+         where ${joinedPartnerScope.sql}
+         group by p.id, p.name, p.slug, p.status, p.partner_type
        ), totals as (select coalesce(sum(registrations),0) total from aggregate)
        select aggregate.*, case when totals.total=0 then 0 else round(aggregate.registrations::numeric * 100 / totals.total, 2) end share_percentage
        from aggregate cross join totals order by registrations desc, name asc limit 12`,
-      [...filtered.values, ...(filters.partnerId ? [filters.partnerId] : [])]),
+      [...filtered.values, ...joinedPartnerScope.values]),
     pool.query(
       `select p.id partner_id, p.name from ${table.partners} p
-       where p.deleted_at is null and not exists (select 1 from ${table.registrations} r where r.partner_id=p.id)
-       ${partnerScope} order by p.name asc limit 100`, partnerScopeValues),
+       where ${partnerScope.sql} and not exists (select 1 from ${table.registrations} r where r.partner_id=p.id)
+       order by p.name asc limit 100`, partnerScope.values),
     pool.query(
-      `select p.id partner_id, p.name from ${table.partners} p where p.deleted_at is null and p.status='inactive'
-       ${partnerScope} order by p.name asc limit 100`, partnerScopeValues),
+      `select p.id partner_id, p.name from ${table.partners} p where ${partnerScope.sql} and p.status='inactive'
+       order by p.name asc limit 100`, partnerScope.values),
     pool.query(
       `with counts as (
          select p.id partner_id, p.name,
            count(r.id) filter (where r.created_at::timestamptz >= date_trunc('month', now()))::int current_count,
            count(r.id) filter (where r.created_at::timestamptz >= date_trunc('month', now()) - interval '1 month' and r.created_at::timestamptz < date_trunc('month', now()))::int previous_count
          from ${table.partners} p left join ${table.registrations} r on r.partner_id=p.id
-         where p.deleted_at is null ${partnerScope} group by p.id,p.name
+         where ${partnerScope.sql} group by p.id,p.name
        ) select *, case when previous_count=0 then case when current_count>0 then 100 else 0 end
          else round((current_count-previous_count)::numeric*100/previous_count,2) end change_percentage
-       from counts where current_count<>previous_count order by change_percentage desc, name asc`, partnerScopeValues),
+       from counts where current_count<>previous_count order by change_percentage desc, name asc`, partnerScope.values),
     pool.query(
       `select jsonb_build_object(
         'events', (select coalesce(jsonb_agg(jsonb_build_object('id',id,'name',name) order by name),'[]') from ${table.events}),
-        'partners', (select coalesce(jsonb_agg(jsonb_build_object('id',id,'name',name) order by name),'[]') from ${table.partners} where deleted_at is null),
-        'cities', (select coalesce(jsonb_agg(city order by city),'[]') from (select distinct payload->>'city' city from ${table.registrations} where partner_id is not null and coalesce(payload->>'city','')<>'') c)
-       ) options`),
+        'partners', (select coalesce(jsonb_agg(jsonb_build_object('id',id,'name',name,'partnerType',partner_type) order by name),'[]') from ${table.partners} where deleted_at is null and ($1='' or partner_type=$1)),
+        'cities', (select coalesce(jsonb_agg(city order by city),'[]') from (select distinct payload->>'city' city from ${table.registrations} where partner_id is not null and coalesce(payload->>'city','')<>'' and ($1='' or partner_type=$1)) c)
+       ) options`, [filters.partnerType || '']),
+    pool.query(
+      `with filtered as (select * from ${table.registrations} r where ${filtered.sql}), scoped as (
+         select p.id,p.name,p.partner_type,p.status,count(f.id)::int registrations,
+           count(f.id) filter(where f.status='paid')::int paid_registrations,
+           coalesce(sum(f.final_price) filter(where f.status='paid'),0)::bigint revenue_cents,
+           coalesce(sum(f.discount_amount) filter(where f.status='paid'),0)::bigint discount_cents
+         from ${table.partners} p left join filtered f on f.partner_id=p.id
+         where ${joinedPartnerScope.sql} group by p.id,p.name,p.partner_type,p.status
+       ) select count(*)::int total_partners,
+         count(*) filter(where partner_type='sports_advisory')::int sports_advisories,
+         count(*) filter(where partner_type='influencer')::int influencers,
+         count(*) filter(where status='active')::int active_partners,
+         count(*) filter(where status='inactive')::int inactive_partners,
+         count(*) filter(where registrations=0)::int without_registrations,
+         (select jsonb_build_object('partnerId',id,'name',name,'value',revenue_cents) from scoped where revenue_cents>0 order by revenue_cents desc,name asc limit 1) top_revenue,
+         (select jsonb_build_object('partnerId',id,'name',name,'value',discount_cents) from scoped where discount_cents>0 order by discount_cents desc,name asc limit 1) top_discount,
+         (select jsonb_build_object('partnerId',id,'name',name,'value',round(paid_registrations::numeric*100/registrations,2)) from scoped where registrations>0 order by paid_registrations::numeric/registrations desc,paid_registrations desc,name asc limit 1) top_conversion
+       from scoped`, [...filtered.values, ...joinedPartnerScope.values]),
+    pool.query(
+      `with filtered as (select * from ${table.registrations} r where ${filtered.sql})
+       select partner_type,count(*)::int registrations,
+         count(*) filter(where status='paid')::int paid_registrations,
+         coalesce(sum(final_price) filter(where status='paid'),0)::bigint revenue_cents,
+         coalesce(sum(discount_amount) filter(where status='paid'),0)::bigint discount_cents,
+         coalesce(round(avg(final_price) filter(where status='paid')),0)::bigint average_ticket_cents
+       from filtered group by partner_type order by partner_type`, filtered.values),
   ]);
   const summary = summaryResult.rows[0] || {};
   const ranking = rankingResult.rows.map(mapPartnerRanking);
@@ -2644,19 +2683,34 @@ export async function getPartnerDashboardInPostgres(filters: PartnerAnalyticsFil
   const totalRegistrations = Number(summary.total_registrations || 0);
   const paidRegistrations = Number(summary.paid_registrations || 0);
   const options = optionsResult.rows[0]?.options || {};
+  const partnerSummary = partnerSummaryResult.rows[0] || {};
   return {
     generatedAt: new Date().toISOString(),
     summary: {
-      totalPartners: total, totalRegistrations, paidRegistrations,
+      totalPartners: Number(partnerSummary.total_partners || total),
+      sportsAdvisories: Number(partnerSummary.sports_advisories || 0), influencers: Number(partnerSummary.influencers || 0),
+      activePartners: Number(partnerSummary.active_partners || 0), inactivePartners: Number(partnerSummary.inactive_partners || 0),
+      withoutRegistrations: Number(partnerSummary.without_registrations || 0), totalRegistrations, paidRegistrations,
       grossRevenueCents: Number(summary.gross_revenue_cents || 0), discountAmountCents: Number(summary.discount_amount_cents || 0),
       netRevenueCents: Number(summary.net_revenue_cents || 0), averageTicketCents: Number(summary.average_ticket_cents || 0),
       leader: summary.leader_id ? { partnerId: String(summary.leader_id), name: String(summary.leader_name), registrations: Number(summary.leader_registrations) } : null,
       conversionRate: totalRegistrations ? Number(((paidRegistrations * 100) / totalRegistrations).toFixed(2)) : 0,
       conversionDefinition: 'Inscricoes pagas divididas pelo total de inscricoes atribuidas a parceiros.',
+      topRevenue: partnerSummary.top_revenue || null,
+      topDiscount: partnerSummary.top_discount || null,
+      topConversion: partnerSummary.top_conversion || null,
     },
     ranking,
     rankingPagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
     charts: { monthly: monthlyResult.rows.map(mapPartnerMetric), comparison: comparisonResult.rows.map(mapPartnerRanking) },
+    breakdown: breakdownResult.rows.map((row) => ({
+      partnerType: row.partner_type as PartnerType,
+      registrations: Number(row.registrations || 0), paidRegistrations: Number(row.paid_registrations || 0),
+      revenueCents: Number(row.revenue_cents || 0), discountAmountCents: Number(row.discount_cents || 0),
+      averageTicketCents: Number(row.average_ticket_cents || 0),
+      conversionRate: Number(row.registrations) ? Number((Number(row.paid_registrations) * 100 / Number(row.registrations)).toFixed(2)) : 0,
+      participationPercentage: totalRegistrations ? Number((Number(row.registrations) * 100 / totalRegistrations).toFixed(2)) : 0,
+    })),
     indicators: {
       leader: comparisonResult.rows[0] ? mapPartnerRanking(comparisonResult.rows[0]) : null,
       withoutRegistrations: emptyResult.rows.map((row) => ({ partnerId: String(row.partner_id), name: String(row.name) })),
@@ -2664,7 +2718,7 @@ export async function getPartnerDashboardInPostgres(filters: PartnerAnalyticsFil
       fastestGrowing: growth.filter((item) => item.changePercentage > 0).slice(0, 5),
       declining: growth.filter((item) => item.changePercentage < 0).reverse().slice(0, 5),
     },
-    options: { events: options.events || [], partners: options.partners || [], cities: options.cities || [], paymentStatuses: ['pending_payment','paid','payment_failed','expired','cancelled','refunded'] },
+    options: { events: options.events || [], partners: options.partners || [], cities: options.cities || [], paymentStatuses: ['pending_payment','paid','payment_failed','expired','cancelled','refunded'], partnerTypes: ['sports_advisory','influencer'] },
   };
 }
 
@@ -2697,6 +2751,7 @@ export async function getPartnerDetailInPostgres(partnerId: string, filters: Par
   ]);
   if (!partnerResult.rows[0]) return null;
   const partner = partnerResult.rows[0];
+  if (filters.partnerType && partner.partner_type !== filters.partnerType) return null;
   const metrics = metricsResult.rows[0] || {};
   const total = Number(registrationsResult.rows[0]?.total_count || 0);
   return {
@@ -2713,11 +2768,11 @@ export async function exportPartnerRegistrationsInPostgres(filters: PartnerAnaly
   await ensurePostgresReady();
   const filtered = partnerAnalyticsFilter(filters);
   const result = await requirePool().query(`select r.id, coalesce(r.payload->>'fullName','Atleta') athlete_name,
-    e.name event_name, p.name partner_name, coalesce(r.payload->>'city','') city, r.created_at,
+    e.name event_name, p.name partner_name, r.partner_type, coalesce(r.payload->>'city','') city, r.created_at,
     r.original_price, r.discount_amount, r.final_price, r.discount_percentage, r.status
     from ${table.registrations} r join ${table.events} e on e.id=r.event_id join ${table.partners} p on p.id=r.partner_id
     where ${filtered.sql} order by r.created_at desc limit 100000`, filtered.values);
-  return result.rows.map((row) => ({ id: String(row.id), athleteName: String(row.athlete_name), eventName: String(row.event_name), partnerName: String(row.partner_name), city: String(row.city), createdAt: String(row.created_at), originalPriceCents: Number(row.original_price), discountAmountCents: Number(row.discount_amount), finalPriceCents: Number(row.final_price), discountPercentage: Number(row.discount_percentage), paymentStatus: String(row.status) }));
+  return result.rows.map((row) => ({ id: String(row.id), athleteName: String(row.athlete_name), eventName: String(row.event_name), partnerName: String(row.partner_name), partnerType: row.partner_type as PartnerType, city: String(row.city), createdAt: String(row.created_at), originalPriceCents: Number(row.original_price), discountAmountCents: Number(row.discount_amount), finalPriceCents: Number(row.final_price), discountPercentage: Number(row.discount_percentage), paymentStatus: String(row.status) }));
 }
 
 export type PartnerAuditAction =
@@ -2883,13 +2938,14 @@ function mapPartnerAuditRow(row: Record<string, unknown>) {
   return { id: String(row.id), partnerId: row.partner_id ? String(row.partner_id) : null, partnerName: row.partner_name ? String(row.partner_name) : null, action: String(row.action), userId: row.user_id ? String(row.user_id) : null, registrationId: row.registration_id ? String(row.registration_id) : null, athleteName: row.athlete_name ? String(row.athlete_name) : null, eventId: row.event_id ? String(row.event_id) : null, eventName: row.event_name ? String(row.event_name) : null, oldData: row.old_data || null, newData: row.new_data || null, metadata: row.metadata || {}, ipAddress: row.ip_address ? String(row.ip_address) : null, userAgent: row.user_agent ? String(row.user_agent) : null, createdAt: String(row.created_at) };
 }
 
-export async function listPartnerAuditLogsInPostgres(filters: { partnerId?: string; registrationId?: string; action?: string; dateFrom?: string; dateTo?: string }, page = 1, pageSize = 25) {
+export async function listPartnerAuditLogsInPostgres(filters: { partnerId?: string; registrationId?: string; action?: string; dateFrom?: string; dateTo?: string; partnerType?: PartnerType }, page = 1, pageSize = 25) {
   await ensurePostgresReady(); const values: unknown[] = []; const where: string[] = ['1=1']; const add = (value: unknown) => { values.push(value); return `$${values.length}`; };
   if (filters.partnerId) where.push(`log.partner_id=${add(filters.partnerId)}::uuid`);
   if (filters.registrationId) where.push(`log.registration_id=${add(filters.registrationId)}`);
   if (filters.action) where.push(`log.action=${add(filters.action)}`);
   if (filters.dateFrom) where.push(`log.created_at::timestamptz>=${add(filters.dateFrom)}::date`);
   if (filters.dateTo) where.push(`log.created_at::timestamptz<(${add(filters.dateTo)}::date+interval '1 day')`);
+  if (filters.partnerType) where.push(`p.partner_type=${add(filters.partnerType)}`);
   const result = await requirePool().query(`select log.*,p.name partner_name,r.payload->>'fullName' athlete_name,e.name event_name,count(*) over()::int total_count from ${table.partnerAuditLogs} log left join ${table.partners} p on p.id=log.partner_id left join ${table.registrations} r on r.id=log.registration_id left join ${table.events} e on e.id=log.event_id where ${where.join(' and ')} order by log.created_at desc limit $${values.length+1} offset $${values.length+2}`, [...values,pageSize,(page-1)*pageSize]);
   const total = Number(result.rows[0]?.total_count || 0); return { logs: result.rows.map(mapPartnerAuditRow), pagination: { page,pageSize,total,totalPages: Math.ceil(total/pageSize) } };
 }
@@ -2900,18 +2956,18 @@ export async function getRegistrationPartnerAuditInPostgres(registrationId: stri
   return result.rows.map(mapPartnerAuditRow);
 }
 
-export async function getPartnerMonitoringInPostgres(page = 1, pageSize = 25) {
+export async function getPartnerMonitoringInPostgres(page = 1, pageSize = 25, partnerType?: PartnerType) {
   await ensurePostgresReady();
   const result = await requirePool().query(`with linked as (select distinct partner_id,registration_id from ${table.partnerAuditLogs} where action='registration.started' and coalesce(metadata->>'accessAuditId','')<>''), audit as (
     select log.partner_id,count(*) filter(where action='partner.link_accessed')::int accesses,count(distinct log.registration_id) filter(where action='registration.started')::int started,count(distinct log.registration_id) filter(where action='payment.approved')::int completed,count(distinct log.registration_id) filter(where action='payment.approved' and exists(select 1 from linked where linked.partner_id=log.partner_id and linked.registration_id=log.registration_id))::int converted,count(*) filter(where action in ('partner.link_rejected','payment.declined','payment.amount_mismatch','partner.persistence_failed','consistency.issue_detected'))::int failures from ${table.partnerAuditLogs} log group by log.partner_id
-  ), rows as (select p.id partner_id,p.name,p.status,coalesce(a.accesses,0)::int accesses,coalesce(a.started,0)::int started,coalesce(a.completed,0)::int completed,coalesce(a.failures,0)::int failures,
+  ), rows as (select p.id partner_id,p.name,p.status,p.partner_type,coalesce(a.accesses,0)::int accesses,coalesce(a.started,0)::int started,coalesce(a.completed,0)::int completed,coalesce(a.failures,0)::int failures,
     case when coalesce(a.accesses,0)=0 then 0 else round(a.converted::numeric*100/a.accesses,2) end conversion_rate,
     greatest(coalesce(a.started,0)-coalesce(a.completed,0),0)::int abandoned,
     case when coalesce(a.started,0)=0 then 0 else round(greatest(a.started-a.completed,0)::numeric*100/a.started,2) end abandonment_rate
-    from ${table.partners} p left join audit a on a.partner_id=p.id where p.deleted_at is null)
-    select *,count(*) over()::int total_count from rows order by accesses desc,name asc limit $1 offset $2`, [pageSize,(page-1)*pageSize]);
-  const total = Number(result.rows[0]?.total_count || 0); const rows = result.rows.map((row) => ({ partnerId:String(row.partner_id),name:String(row.name),status:row.status,accesses:Number(row.accesses),started:Number(row.started),completed:Number(row.completed),conversionRate:Number(row.conversion_rate),abandoned:Number(row.abandoned),abandonmentRate:Number(row.abandonment_rate),failures:Number(row.failures) }));
-  const totals = await requirePool().query(`with linked as (select distinct registration_id from ${table.partnerAuditLogs} where action='registration.started' and coalesce(metadata->>'accessAuditId','')<>'') select count(*) filter(where action='partner.link_accessed')::int accesses,count(distinct registration_id) filter(where action='registration.started')::int started,count(distinct registration_id) filter(where action='payment.approved')::int completed,count(distinct registration_id) filter(where action='payment.approved' and registration_id in(select registration_id from linked))::int converted,count(*) filter(where action in ('partner.link_rejected','payment.declined','payment.amount_mismatch','partner.persistence_failed','consistency.issue_detected'))::int failures from ${table.partnerAuditLogs}`);
+    from ${table.partners} p left join audit a on a.partner_id=p.id where p.deleted_at is null and ($3='' or p.partner_type=$3))
+    select *,count(*) over()::int total_count from rows order by accesses desc,name asc limit $1 offset $2`, [pageSize,(page-1)*pageSize,partnerType || '']);
+  const total = Number(result.rows[0]?.total_count || 0); const rows = result.rows.map((row) => ({ partnerId:String(row.partner_id),name:String(row.name),status:row.status,partnerType:row.partner_type as PartnerType,accesses:Number(row.accesses),started:Number(row.started),completed:Number(row.completed),conversionRate:Number(row.conversion_rate),abandoned:Number(row.abandoned),abandonmentRate:Number(row.abandonment_rate),failures:Number(row.failures) }));
+  const totals = await requirePool().query(`with linked as (select distinct log.registration_id from ${table.partnerAuditLogs} log join ${table.partners} p on p.id=log.partner_id where log.action='registration.started' and coalesce(log.metadata->>'accessAuditId','')<>'' and ($1='' or p.partner_type=$1)) select count(*) filter(where log.action='partner.link_accessed')::int accesses,count(distinct log.registration_id) filter(where log.action='registration.started')::int started,count(distinct log.registration_id) filter(where log.action='payment.approved')::int completed,count(distinct log.registration_id) filter(where log.action='payment.approved' and log.registration_id in(select registration_id from linked))::int converted,count(*) filter(where log.action in ('partner.link_rejected','payment.declined','payment.amount_mismatch','partner.persistence_failed','consistency.issue_detected'))::int failures from ${table.partnerAuditLogs} log join ${table.partners} p on p.id=log.partner_id where ($1='' or p.partner_type=$1)`, [partnerType || '']);
   const t=totals.rows[0]||{}; const accesses=Number(t.accesses||0),started=Number(t.started||0),completed=Number(t.completed||0),converted=Number(t.converted||0);
   return { generatedAt:new Date().toISOString(),totals:{accesses,started,completed,conversionRate:accesses?Number((converted*100/accesses).toFixed(2)):0,abandoned:Math.max(started-completed,0),abandonmentRate:started?Number((Math.max(started-completed,0)*100/started).toFixed(2)):0,failures:Number(t.failures||0)},partners:rows,pagination:{page,pageSize,total,totalPages:Math.ceil(total/pageSize)} };
 }

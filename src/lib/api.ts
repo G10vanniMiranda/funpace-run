@@ -487,8 +487,8 @@ export function getAdminPartnerAudit(adminKey: string, filters: Record<string, s
   return adminFetch<PartnerAuditResponse>(`/api/admin/partner-audit${toQueryString(filters)}`, adminKey);
 }
 
-export function getAdminPartnerMonitoring(adminKey: string, page = 1, pageSize = 25) {
-  return adminFetch<PartnerMonitoringResponse>(`/api/admin/partner-monitoring${toQueryString({ page: String(page), pageSize: String(pageSize) })}`, adminKey);
+export function getAdminPartnerMonitoring(adminKey: string, page = 1, pageSize = 25, partnerType = '') {
+  return adminFetch<PartnerMonitoringResponse>(`/api/admin/partner-monitoring${toQueryString({ page: String(page), pageSize: String(pageSize), partnerType })}`, adminKey);
 }
 
 export function runAdminPartnerConsistency(adminKey: string) {
