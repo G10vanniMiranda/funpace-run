@@ -1348,11 +1348,18 @@ async function handleActivatePartnerLink(req: IncomingMessage, res: ServerRespon
   const context = resolvePublicPartnerContext(database, undefined, slug);
   if (!context) {
     const reason = !existing ? 'slug_not_found' : existing.deletedAt ? 'partner_removed' : existing.status !== 'active' ? 'partner_inactive' : 'invalid_discount_or_unavailable';
+    const publicMessage = reason === 'slug_not_found'
+      ? 'Link de parceiro invalido.'
+      : reason === 'partner_removed'
+        ? 'Este link de parceiro foi removido.'
+        : reason === 'partner_inactive'
+          ? 'Este parceiro esta inativo no momento.'
+          : 'Este beneficio esta temporariamente indisponivel.';
     await appendPartnerAuditLogInPostgres({ partnerId: existing?.id || null, action: 'partner.link_rejected', metadata: { slug, reason, partnerType: existing?.partnerType || null, partner_type: existing?.partnerType || null }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
     await recordOperationalAlert({ dedupeKey: `partner-link-rejected:${slug}:${new Date().toISOString().slice(0, 10)}`, severity: existing ? 'critical' : 'warning', alertType: existing ? 'inactive_partner_access' : 'invalid_partner_slug', title: existing ? 'Parceiro inativo recebeu acesso' : 'Slug de parceiro inexistente', message: existing ? `O link /p/${slug} foi acessado enquanto o parceiro estava indisponivel.` : `Tentativa de acesso ao link inexistente /p/${slug}.`, entityType: 'partner', entityId: existing?.id || slug, payload: { slug, reason } });
     res.setHeader('Set-Cookie', buildPartnerCookie('', 0));
     json(res, existing ? 410 : 404, {
-      message: existing ? 'Este beneficio de parceiro nao esta disponivel.' : 'Link de parceiro invalido.',
+      message: publicMessage,
     });
     return;
   }

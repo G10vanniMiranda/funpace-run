@@ -2,6 +2,18 @@ import { useEffect, useState } from 'react';
 import { ArrowRight, Loader2, ShieldCheck, Users } from 'lucide-react';
 import { activatePartnerLink, ApiError } from '../lib/api';
 
+function getPartnerLinkErrorMessage(error: unknown) {
+  if (!(error instanceof ApiError)) {
+    return 'Nao foi possivel validar este beneficio agora. Tente novamente ou continue sem desconto.';
+  }
+
+  if (error.code === 'endpoint_not_found' || error.code === 'network_error' || error.code === 'timeout' || (error.status && error.status >= 500)) {
+    return 'Nao foi possivel validar este beneficio agora. Tente novamente ou continue sem desconto.';
+  }
+
+  return error.message;
+}
+
 export function PartnerLandingPage({ slug }: { slug: string }) {
   const [error, setError] = useState('');
 
@@ -10,7 +22,7 @@ export function PartnerLandingPage({ slug }: { slug: string }) {
     void activatePartnerLink(slug)
       .then(() => { if (active) window.location.replace('/#register'); })
       .catch((requestError) => {
-        if (active) setError(requestError instanceof ApiError ? requestError.message : 'Este link de parceiro nao esta disponivel.');
+        if (active) setError(getPartnerLinkErrorMessage(requestError));
       });
     return () => { active = false; };
   }, [slug]);

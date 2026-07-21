@@ -226,7 +226,9 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
       lastError = new ApiError(getFriendlyHttpError(response.status, errorPayload), {
         status: response.status,
         errors: errorPayload?.errors,
-        code: `http_${response.status}`,
+        code: response.status === 404 && !errorPayload?.message
+          ? 'endpoint_not_found'
+          : `http_${response.status}`,
         retryable: isRetryableStatus(response.status),
       });
 
