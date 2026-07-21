@@ -4,6 +4,7 @@ import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
 import { ApiError, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
+import { partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
 import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
@@ -219,13 +220,14 @@ export function RegistrationSection() {
                 <div className="flex items-start gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center bg-black text-brand"><Users className="h-5 w-5" /></div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] opacity-60">Inscricao atraves da assessoria</p>
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] opacity-60">{partnerTypeBenefitLabels[partnerContext.partnerType]}</p>
                     <p className="mt-1 text-lg font-black">{partnerContext.name}</p>
+                    <p className="mt-1 text-[10px] font-bold uppercase tracking-wider opacity-55">{partnerTypeLabels[partnerContext.partnerType]}</p>
                   </div>
                   <ShieldCheck className="h-5 w-5 shrink-0" />
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-black/15 pt-4 text-sm sm:grid-cols-4">
-                  <PriceItem label="Desconto aplicado" value={`${partnerContext.discountPercentage}%`} />
+                  <PriceItem label="Desconto exclusivo" value={`${partnerContext.discountPercentage}%`} />
                   <PriceItem label="Valor original" value={(partnerContext.originalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} />
                   <PriceItem label="Desconto" value={`- ${(partnerContext.discountAmountCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`} />
                   <PriceItem label="Total" value={(partnerContext.finalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} strong />

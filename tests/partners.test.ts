@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizePartnerSlug, validatePartnerInput } from '../server/partner-management.js';
-import { buildPartnerLink, copyPartnerLink, slugifyPartnerName } from '../src/lib/partners.js';
+import { buildPartnerLink, copyPartnerLink, partnerTypeBenefitLabels, partnerTypeLabels, slugifyPartnerName } from '../src/lib/partners.js';
 import { calculatePartnerPricing } from '../server/partner-discount.js';
 import { signPartnerSession, verifyPartnerSession } from '../server/partner-session.js';
 
@@ -59,15 +59,29 @@ test('calculates partner pricing from the original backend price', () => {
   assert.equal(calculatePartnerPricing(10_800, { ...partner, status: 'inactive' }), null);
   assert.equal(calculatePartnerPricing(10_800, { ...partner, discountPercentage: 0 }), null);
   assert.equal(calculatePartnerPricing(10_800, { ...partner, deletedAt: '2026-07-21T00:00:00.000Z' }), null);
+  const influencer = { ...partner, partnerType: 'influencer' as const };
+  const sportsAdvisory = { ...partner, partnerType: 'sports_advisory' as const };
+  assert.deepEqual(calculatePartnerPricing(12_000, influencer), calculatePartnerPricing(12_000, sportsAdvisory));
 });
 
 test('signs partner sessions and rejects tampering or expiration', () => {
   const secret = 'partner-session-test-secret-at-least-32-characters';
-  const session = { partnerId: 'partner-1', slug: 'runners-club', issuedAt: 1_000, expiresAt: 10_000 };
+  const session = { partnerId: 'partner-1', slug: 'runners-club', partnerType: 'influencer' as const, issuedAt: 1_000, expiresAt: 10_000, correlationId: 'correlation-1' };
   const token = signPartnerSession(session, secret);
   assert.deepEqual(verifyPartnerSession(token, secret, 5_000), session);
   assert.equal(verifyPartnerSession(`${token}tampered`, secret, 5_000), null);
   assert.equal(verifyPartnerSession(token, secret, 10_001), null);
+  const legacy = { partnerId: 'legacy-partner', slug: 'legacy', issuedAt: 1_000, expiresAt: 10_000 };
+  assert.deepEqual(verifyPartnerSession(signPartnerSession(legacy, secret), secret, 5_000), legacy);
+  const invalidType = { ...legacy, partnerType: 'ambassador' as never };
+  assert.equal(verifyPartnerSession(signPartnerSession(invalidType, secret), secret, 5_000), null);
+});
+
+test('centralizes contextual labels for both supported partner types', () => {
+  assert.equal(partnerTypeLabels.sports_advisory, 'Assessoria esportiva');
+  assert.equal(partnerTypeLabels.influencer, 'Influenciador');
+  assert.equal(partnerTypeBenefitLabels.sports_advisory, 'Inscricao atraves da assessoria');
+  assert.equal(partnerTypeBenefitLabels.influencer, 'Beneficio do influenciador');
 });
 
 test('builds and copies the exclusive partner link', async () => {

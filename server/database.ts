@@ -233,6 +233,8 @@ export type PendingRegistrationInput = {
   description: (distanceName: string, lotName: string) => string;
   partnerId?: string | null;
   partnerSlug?: string | null;
+  partnerType?: PartnerType | null;
+  correlationId?: string | null;
   ipAddress?: string | null;
   userAgent?: string | null;
   accessAuditId?: string | null;
@@ -1676,15 +1678,12 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     const stalePendingResult = await client.query(
       `select registration.id, registration.lot_id
        from ${table.registrations} registration
-       join ${table.lots} lot on lot.id = registration.lot_id
        left join ${table.payments} payment on payment.registration_id = registration.id
        where registration.event_id = $1
          and registration.cpf_hash = $2
          and registration.status = $3
          and (
-           lot.status <> 'active'
-           or registration.original_price <> lot.price_cents
-           or registration.amount_cents <> registration.final_price
+           registration.amount_cents <> registration.final_price
            or payment.id is null
            or payment.amount_cents <> registration.final_price
          )
@@ -1735,6 +1734,31 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     const existing = existingResult.rows[0];
 
     if (existing) {
+      const recoveredAt = new Date().toISOString();
+      const requestedPartnerDiffers = Boolean(input.partnerId) && input.partnerId !== existing.partner_id;
+      if (requestedPartnerDiffers) {
+        await insertPartnerAudit(client, {
+          partnerId: input.partnerId,
+          action: 'partner.session_replacement_blocked',
+          registrationId: existing.id,
+          oldData: { partnerId: existing.partner_id || null, partnerType: existing.partner_type || null },
+          newData: { requestedPartnerId: input.partnerId, requestedPartnerType: input.partnerType || null },
+          metadata: { correlationId: input.correlationId || null, reason: 'registration_already_persisted', status: existing.status, partner_type: input.partnerType || null },
+          ipAddress: input.ipAddress,
+          userAgent: input.userAgent,
+          createdAt: recoveredAt,
+        });
+      }
+      await insertPartnerAudit(client, {
+        partnerId: existing.partner_id || null,
+        action: 'registration.recovered',
+        registrationId: existing.id,
+        newData: { status: existing.status, partnerType: existing.partner_type || null, finalPriceCents: Number(existing.final_price) },
+        metadata: { correlationId: input.correlationId || null, requestedPartnerId: input.partnerId || null, snapshotPreserved: true, partner_type: existing.partner_type || null },
+        ipAddress: input.ipAddress,
+        userAgent: input.userAgent,
+        createdAt: recoveredAt,
+      });
       await client.query('commit');
       const shouldCreateCheckout = existing.status === 'pending_payment' && !existing.checkout_url;
       return {
@@ -1755,8 +1779,8 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         description: shouldCreateCheckout ? input.description(existing.distance_name, existing.lot_name) : undefined,
         shouldCreateCheckout,
         partner: existing.partner_id ? {
-          id: existing.partner_id,
           name: existing.partner_name,
+          partnerType: existing.partner_type as PartnerType,
           discountPercentage: Number(existing.discount_percentage),
           discountAmountCents: Number(existing.discount_amount),
           originalPriceCents: Number(existing.original_price),
@@ -1858,18 +1882,35 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     const originalPriceCents = Number(lot.priceCents);
     const partnerResult = input.partnerId
       ? await client.query(
-        `select id, name, partner_type, discount_percentage, status, deleted_at from ${table.partners} where id = $1 limit 1`,
+        `select id,name,slug,partner_type,discount_percentage,status,deleted_at from ${table.partners} where id=$1 limit 1`,
         [input.partnerId],
       )
       : { rows: [] };
     const partnerRow = partnerResult.rows[0];
-    const partnerPricing = partnerRow ? calculatePartnerPricing(originalPriceCents, {
+    const partnerIdentityIsValid = partnerRow
+      && partnerRow.slug === input.partnerSlug
+      && (!input.partnerType || partnerRow.partner_type === input.partnerType);
+    const partnerPricing = partnerIdentityIsValid ? calculatePartnerPricing(originalPriceCents, {
       id: String(partnerRow.id), name: String(partnerRow.name),
       discountPercentage: Number(partnerRow.discount_percentage), status: partnerRow.status,
       deletedAt: partnerRow.deleted_at,
     }) : null;
     const partnerType = partnerPricing ? partnerRow.partner_type as PartnerType : null;
     const amountCents = partnerPricing?.finalPriceCents ?? originalPriceCents;
+
+    if (input.partnerId && !partnerPricing) {
+      await insertPartnerAudit(client, {
+        partnerId: partnerRow?.id || null,
+        action: 'consistency.issue_detected',
+        eventId: event.id,
+        oldData: { sessionPartnerId: input.partnerId, sessionSlug: input.partnerSlug || null, sessionPartnerType: input.partnerType || null },
+        newData: partnerRow ? { partnerId: partnerRow.id, slug: partnerRow.slug, partnerType: partnerRow.partner_type, status: partnerRow.status, deleted: Boolean(partnerRow.deleted_at) } : null,
+        metadata: { issueCode: 'partner_session_revalidation_failed', correlationId: input.correlationId || null, partnerType: partnerRow?.partner_type || input.partnerType || null, partner_type: partnerRow?.partner_type || input.partnerType || null },
+        ipAddress: input.ipAddress,
+        userAgent: input.userAgent,
+        createdAt: now,
+      });
+    }
 
     await client.query(
       `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
@@ -1896,8 +1937,10 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       }, now],
     );
     if (partnerPricing) {
-      await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'registration.started', registrationId, eventId: event.id, newData: { partnerName: partnerPricing.partnerName, partnerLink: `/p/${input.partnerSlug || ''}` }, metadata: { status: 'pending_payment', accessAuditId: input.accessAuditId || null }, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
-      await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'discount.applied', registrationId, eventId: event.id, newData: { discountPercentage: partnerPricing.discountPercentage, discountAmountCents: partnerPricing.discountAmountCents, originalPriceCents, finalPriceCents: amountCents }, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+      const auditMetadata = { status: 'pending_payment', accessAuditId: input.accessAuditId || null, correlationId: input.correlationId || null, partnerType, partner_type: partnerType };
+      await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'registration.started', registrationId, eventId: event.id, newData: { partnerName: partnerPricing.partnerName, partnerLink: `/p/${input.partnerSlug || ''}`, partnerType }, metadata: auditMetadata, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+      await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'discount.applied', registrationId, eventId: event.id, newData: { discountPercentage: partnerPricing.discountPercentage, discountAmountCents: partnerPricing.discountAmountCents, originalPriceCents, finalPriceCents: amountCents }, metadata: auditMetadata, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+      await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'partner.snapshot_persisted', registrationId, eventId: event.id, newData: { partnerId: partnerPricing.partnerId, partnerName: partnerPricing.partnerName, partnerType, partnerLink: `/p/${input.partnerSlug || ''}`, discountPercentage: partnerPricing.discountPercentage, discountAmountCents: partnerPricing.discountAmountCents, originalPriceCents, finalPriceCents: amountCents }, metadata: auditMetadata, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
     }
     await client.query('commit');
 
@@ -1917,8 +1960,8 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       description: input.description(distance.name, lot.name),
       shouldCreateCheckout: true,
       partner: partnerPricing ? {
-        id: partnerPricing.partnerId,
         name: partnerPricing.partnerName,
+        partnerType: partnerType!,
         discountPercentage: partnerPricing.discountPercentage,
         discountAmountCents: partnerPricing.discountAmountCents,
         originalPriceCents: partnerPricing.originalPriceCents,
@@ -2636,7 +2679,9 @@ export async function exportPartnerRegistrationsInPostgres(filters: PartnerAnaly
 
 export type PartnerAuditAction =
   | 'partner.created' | 'partner.updated' | 'partner.type_changed' | 'partner.type_change_blocked' | 'partner.activated' | 'partner.inactivated' | 'partner.deleted'
-  | 'partner.link_accessed' | 'partner.link_rejected' | 'registration.started' | 'discount.applied'
+  | 'partner.link_accessed' | 'partner.link_rejected' | 'partner.resolution_approved' | 'partner.session_created'
+  | 'partner.session_replaced' | 'partner.session_replacement_blocked' | 'registration.started' | 'registration.recovered'
+  | 'partner.snapshot_persisted' | 'discount.applied'
   | 'payment.started' | 'webhook.received' | 'payment.approved' | 'payment.declined'
   | 'registration.cancelled' | 'payment.refunded' | 'consistency.issue_detected' | 'partner.persistence_failed';
 
@@ -2661,6 +2706,23 @@ async function insertPartnerAudit(client: Queryable, input: PartnerAuditInput) {
 export async function appendPartnerAuditLogInPostgres(input: PartnerAuditInput) {
   await ensurePostgresReady();
   return insertPartnerAudit(requirePool(), input);
+}
+
+export async function findPartnerRegistrationBySessionInPostgres(input: { correlationId?: string | null; accessAuditId?: string | null }) {
+  await ensurePostgresReady();
+  if (!input.correlationId && !input.accessAuditId) return null;
+  const result = await requirePool().query(
+    `select log.registration_id,log.partner_id,registration.partner_type,registration.status
+     from ${table.partnerAuditLogs} log
+     join ${table.registrations} registration on registration.id=log.registration_id
+     where log.action='registration.started'
+       and (($1::text is not null and log.metadata->>'correlationId'=$1)
+         or ($2::text is not null and log.metadata->>'accessAuditId'=$2))
+     order by log.created_at desc limit 1`,
+    [input.correlationId || null, input.accessAuditId || null],
+  );
+  const row = result.rows[0];
+  return row ? { registrationId: String(row.registration_id), partnerId: String(row.partner_id), partnerType: row.partner_type as PartnerType, status: String(row.status) } : null;
 }
 
 export async function appendPartnerPaymentStatusAuditInPostgres(registrationId: string, status: RegistrationStatus, metadata: Record<string, unknown> = {}) {
@@ -2814,16 +2876,16 @@ export async function runPartnerConsistencyCheckInPostgres(actor = 'system:cron'
   await ensurePostgresReady(); const client = await requirePool().connect(); const runId=randomUUID(); const now=new Date().toISOString();
   try { await client.query('begin');
     const issues = await client.query(`select * from (
-      select r.partner_id,r.id registration_id,r.event_id,'partner_without_discount' issue_code,'Parceiro vinculado sem desconto positivo' message from ${table.registrations} r where r.partner_id is not null and (r.discount_percentage<=0 or r.discount_amount<=0)
-      union all select r.partner_id,r.id,r.event_id,'pending_discount_mismatch','Desconto da inscricao pendente diverge do parceiro' from ${table.registrations} r join ${table.partners} p on p.id=r.partner_id where r.status='pending_payment' and r.discount_percentage<>p.discount_percentage
-      union all select r.partner_id,r.id,r.event_id,'payment_amount_mismatch','Pagamento diverge do valor final da inscricao' from ${table.registrations} r join ${table.payments} pay on pay.registration_id=r.id where r.partner_id is not null and pay.amount_cents<>r.final_price
-      union all select null::uuid,r.id,r.event_id,'approved_without_partner','Pagamento aprovado com evidencia de parceiro sem partner_id persistido' from ${table.registrations} r where r.status='paid' and r.partner_id is null and exists(select 1 from ${table.partnerAuditLogs} l where l.registration_id=r.id and l.action='discount.applied')
-      union all select r.partner_id,r.id,r.event_id,'partner_snapshot_incomplete','Snapshot de parceiro incompleto' from ${table.registrations} r where r.partner_id is not null and (r.partner_name is null or r.partner_link is null or r.partner_identified_at is null)
+      select r.partner_id,r.id registration_id,r.event_id,r.partner_type,'partner_without_discount' issue_code,'Parceiro vinculado sem desconto positivo' message from ${table.registrations} r where r.partner_id is not null and (r.discount_percentage<=0 or r.discount_amount<=0)
+      union all select r.partner_id,r.id,r.event_id,r.partner_type,'pending_discount_mismatch','Desconto da inscricao pendente diverge do parceiro' from ${table.registrations} r join ${table.partners} p on p.id=r.partner_id where r.status='pending_payment' and r.discount_percentage<>p.discount_percentage
+      union all select r.partner_id,r.id,r.event_id,r.partner_type,'payment_amount_mismatch','Pagamento diverge do valor final da inscricao' from ${table.registrations} r join ${table.payments} pay on pay.registration_id=r.id where r.partner_id is not null and pay.amount_cents<>r.final_price
+      union all select null::uuid,r.id,r.event_id,r.partner_type,'approved_without_partner','Pagamento aprovado com evidencia de parceiro sem partner_id persistido' from ${table.registrations} r where r.status='paid' and r.partner_id is null and exists(select 1 from ${table.partnerAuditLogs} l where l.registration_id=r.id and l.action='discount.applied')
+      union all select r.partner_id,r.id,r.event_id,r.partner_type,'partner_snapshot_incomplete','Snapshot de parceiro incompleto' from ${table.registrations} r where r.partner_id is not null and (r.partner_name is null or r.partner_type is null or r.partner_link is null or r.partner_identified_at is null)
     ) issues`);
     for (const issue of issues.rows) {
       const key=`partner-consistency:${issue.issue_code}:${issue.registration_id}`;
       await client.query(`insert into ${table.operationalAlerts} (id,dedupe_key,severity,alert_type,title,message,entity_type,entity_id,payload,status,detected_at) values ($1,$2,'critical',$3,'Inconsistencia no sistema de parceiros',$4,'registration',$5,$6,'open',$7) on conflict(dedupe_key) do update set payload=excluded.payload,detected_at=excluded.detected_at,status=case when ${table.operationalAlerts}.status='resolved' then 'open' else ${table.operationalAlerts}.status end,resolved_at=null`, [randomUUID(),key,issue.issue_code,issue.message,issue.registration_id,{runId,partnerId:issue.partner_id},now]);
-      await insertPartnerAudit(client,{partnerId:issue.partner_id,action:'consistency.issue_detected',userId:actor,registrationId:issue.registration_id,eventId:issue.event_id,metadata:{runId,issueCode:issue.issue_code,message:issue.message},createdAt:now});
+      await insertPartnerAudit(client,{partnerId:issue.partner_id,action:'consistency.issue_detected',userId:actor,registrationId:issue.registration_id,eventId:issue.event_id,metadata:{runId,issueCode:issue.issue_code,message:issue.message,partnerType:issue.partner_type||null,partner_type:issue.partner_type||null},createdAt:now});
     }
     await client.query('commit'); return {runId,checkedAt:now,issues:issues.rows.length};
   } catch(error){await client.query('rollback').catch(()=>undefined);throw error;} finally{client.release();}

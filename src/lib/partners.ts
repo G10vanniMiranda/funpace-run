@@ -29,3 +29,8 @@ export const partnerTypeLabels: Record<PartnerType, string> = {
   sports_advisory: 'Assessoria esportiva',
   influencer: 'Influenciador',
 };
+
+export const partnerTypeBenefitLabels: Record<PartnerType, string> = {
+  sports_advisory: 'Inscricao atraves da assessoria',
+  influencer: 'Beneficio do influenciador',
+};

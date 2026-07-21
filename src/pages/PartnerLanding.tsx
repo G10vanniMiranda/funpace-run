@@ -10,7 +10,7 @@ export function PartnerLandingPage({ slug }: { slug: string }) {
     void activatePartnerLink(slug)
       .then(() => { if (active) window.location.replace('/#register'); })
       .catch((requestError) => {
-        if (active) setError(requestError instanceof ApiError ? requestError.message : 'Este link de assessoria nao esta disponivel.');
+        if (active) setError(requestError instanceof ApiError ? requestError.message : 'Este link de parceiro nao esta disponivel.');
       });
     return () => { active = false; };
   }, [slug]);
@@ -27,7 +27,7 @@ export function PartnerLandingPage({ slug }: { slug: string }) {
           {error ? 'Link indisponivel' : 'Beneficio identificado'}
         </h1>
         <p className="mx-auto mt-5 max-w-md text-sm leading-relaxed text-zinc-400">
-          {error || 'Estamos validando sua assessoria e preparando a inscricao com o desconto automatico.'}
+          {error || 'Estamos validando seu parceiro e preparando a inscricao com o desconto automatico.'}
         </p>
         {error ? (
           <a href="/#register" className="mt-8 inline-flex min-h-12 w-full items-center justify-center gap-2 bg-brand px-5 text-xs font-black uppercase tracking-widest text-black hover:bg-white">

@@ -93,7 +93,8 @@ try {
   const cookie = setCookie.split(';')[0];
 
   const session = await request(baseUrl, '/api/partner-session', { headers: { Cookie: cookie } });
-  assert.equal(session.payload.partner.id, activePartnerId);
+  assert.equal(session.payload.partner.partnerType, 'sports_advisory');
+  assert.equal('id' in session.payload.partner, false);
 
   const malicious = { partnerId: inactivePartnerId, discountPercentage: 99, discountAmount: 999_999, originalPrice: 1, finalPrice: 1, amountCents: 1 };
   const created = await request(baseUrl, '/api/registrations', {
@@ -101,7 +102,7 @@ try {
   });
   assert.equal(created.response.status, 201, JSON.stringify(created.payload));
   registrationIds.push(created.payload.registrationId); paymentIds.push(created.payload.paymentId);
-  assert.equal(created.payload.partner.id, activePartnerId);
+  assert.equal(created.payload.partner.partnerType, 'sports_advisory');
   assert.equal(created.payload.partner.finalPriceCents, created.payload.partner.originalPriceCents - created.payload.partner.discountAmountCents);
 
   const persisted = await database.query(

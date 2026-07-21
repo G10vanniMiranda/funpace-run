@@ -50,8 +50,8 @@ export type RegistrationStatus =
 export type CheckoutStatus = 'not_configured' | 'created';
 
 export type RegistrationPartnerPricing = {
-  id: string;
   name: string;
+  partnerType: import('./partner').PartnerType;
   discountPercentage: number;
   discountAmountCents: number;
   originalPriceCents: number;

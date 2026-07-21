@@ -24,6 +24,7 @@ import {
   exportPartnerRegistrationsInPostgres,
   appendPartnerAuditLogInPostgres,
   appendPartnerPaymentStatusAuditInPostgres,
+  findPartnerRegistrationBySessionInPostgres,
   listAdminPartnersInPostgres,
   mutatePartnerWithAuditInPostgres,
   PartnerTypeChangeBlockedError,
@@ -1324,6 +1325,8 @@ function resolvePublicPartnerContext(database: Database, partnerId?: string, slu
     id: partner.id,
     name: partner.name,
     slug: partner.slug,
+    partnerType: partner.partnerType,
+    resolutionStatus: 'approved' as const,
     discountPercentage: pricing.discountPercentage,
     discountAmountCents: pricing.discountAmountCents,
     originalPriceCents: pricing.originalPriceCents,
@@ -1331,28 +1334,60 @@ function resolvePublicPartnerContext(database: Database, partnerId?: string, slu
   } : null;
 }
 
+function toPublicPartnerContext(context: NonNullable<ReturnType<typeof resolvePublicPartnerContext>>) {
+  const { id: _id, ...publicContext } = context;
+  return publicContext;
+}
+
 async function handleActivatePartnerLink(req: IncomingMessage, res: ServerResponse, rawSlug: string) {
   if (!requireAdminDatabase(res)) return;
   const slug = normalizePartnerSlug(rawSlug);
   const database = await transaction((current) => current, { persist: false, scope: 'availability' });
-  const existing = database.partners.find((partner) => partner.slug === slug && !partner.deletedAt);
+  const existing = database.partners.find((partner) => partner.slug === slug);
   const context = resolvePublicPartnerContext(database, undefined, slug);
   if (!context) {
-    const reason = existing ? 'inactive_or_unavailable' : 'slug_not_found';
-    await appendPartnerAuditLogInPostgres({ partnerId: existing?.id || null, action: 'partner.link_rejected', metadata: { slug, reason }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+    const reason = !existing ? 'slug_not_found' : existing.deletedAt ? 'partner_removed' : existing.status !== 'active' ? 'partner_inactive' : 'invalid_discount_or_unavailable';
+    await appendPartnerAuditLogInPostgres({ partnerId: existing?.id || null, action: 'partner.link_rejected', metadata: { slug, reason, partnerType: existing?.partnerType || null, partner_type: existing?.partnerType || null }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
     await recordOperationalAlert({ dedupeKey: `partner-link-rejected:${slug}:${new Date().toISOString().slice(0, 10)}`, severity: existing ? 'critical' : 'warning', alertType: existing ? 'inactive_partner_access' : 'invalid_partner_slug', title: existing ? 'Parceiro inativo recebeu acesso' : 'Slug de parceiro inexistente', message: existing ? `O link /p/${slug} foi acessado enquanto o parceiro estava indisponivel.` : `Tentativa de acesso ao link inexistente /p/${slug}.`, entityType: 'partner', entityId: existing?.id || slug, payload: { slug, reason } });
     res.setHeader('Set-Cookie', buildPartnerCookie('', 0));
     json(res, existing ? 410 : 404, {
-      message: existing ? 'Este beneficio de assessoria nao esta disponivel.' : 'Link de assessoria invalido.',
+      message: existing ? 'Este beneficio de parceiro nao esta disponivel.' : 'Link de parceiro invalido.',
     });
     return;
   }
+  const previousSession = readPartnerSession(req);
+  const isReplacement = Boolean(previousSession && (previousSession.partnerId !== context.id || previousSession.slug !== context.slug));
+  if (isReplacement && previousSession) {
+    const persisted = usesPostgresDatabase()
+      ? await findPartnerRegistrationBySessionInPostgres({ correlationId: previousSession.correlationId, accessAuditId: previousSession.accessAuditId })
+      : null;
+    if (persisted) {
+      await appendPartnerAuditLogInPostgres({
+        partnerId: context.id,
+        action: 'partner.session_replacement_blocked',
+        registrationId: persisted.registrationId,
+        oldData: { partnerId: previousSession.partnerId, partnerType: previousSession.partnerType || persisted.partnerType },
+        newData: { requestedPartnerId: context.id, requestedPartnerType: context.partnerType },
+        metadata: { reason: 'registration_already_persisted', correlationId: previousSession.correlationId || null, previousPartnerId: previousSession.partnerId, requestedPartnerId: context.id, partnerType: context.partnerType, partner_type: context.partnerType },
+        ipAddress: getClientIp(req), userAgent: getUserAgent(req),
+      });
+      json(res, 409, { message: 'A inscricao existente permanece vinculada ao beneficio identificado anteriormente.' });
+      return;
+    }
+  }
   const eventId = database.events.find((item) => item.slug === 'funpace-run-2026')?.id || null;
-  const accessAuditId = await appendPartnerAuditLogInPostgres({ partnerId: context.id, action: 'partner.link_accessed', eventId, newData: { slug: context.slug, link: `/p/${context.slug}` }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+  const correlationId = isReplacement || !previousSession?.correlationId ? randomUUID() : previousSession.correlationId;
+  const auditMetadata = { correlationId, partnerType: context.partnerType, partner_type: context.partnerType };
+  const accessAuditId = await appendPartnerAuditLogInPostgres({ partnerId: context.id, action: 'partner.link_accessed', eventId, newData: { slug: context.slug, link: `/p/${context.slug}`, partnerType: context.partnerType }, metadata: auditMetadata, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+  await appendPartnerAuditLogInPostgres({ partnerId: context.id, action: 'partner.resolution_approved', eventId, newData: { slug: context.slug, partnerType: context.partnerType }, metadata: auditMetadata, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+  if (isReplacement && previousSession) {
+    await appendPartnerAuditLogInPostgres({ partnerId: context.id, action: 'partner.session_replaced', eventId, oldData: { partnerId: previousSession.partnerId, slug: previousSession.slug, partnerType: previousSession.partnerType || null }, newData: { partnerId: context.id, slug: context.slug, partnerType: context.partnerType }, metadata: { ...auditMetadata, previousCorrelationId: previousSession.correlationId || null }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
+  }
   const now = Date.now();
-  const token = signPartnerSession({ partnerId: context.id, slug: context.slug, issuedAt: now, expiresAt: now + partnerSessionTtlSeconds * 1000, accessAuditId }, partnerSessionSecret);
+  const token = signPartnerSession({ partnerId: context.id, slug: context.slug, partnerType: context.partnerType, issuedAt: now, expiresAt: now + partnerSessionTtlSeconds * 1000, correlationId, accessAuditId }, partnerSessionSecret);
+  await appendPartnerAuditLogInPostgres({ partnerId: context.id, action: 'partner.session_created', eventId, newData: { slug: context.slug, partnerType: context.partnerType, expiresAt: now + partnerSessionTtlSeconds * 1000 }, metadata: auditMetadata, ipAddress: getClientIp(req), userAgent: getUserAgent(req) });
   res.setHeader('Set-Cookie', buildPartnerCookie(token, partnerSessionTtlSeconds));
-  json(res, 200, { partner: context });
+  json(res, 200, { partner: toPublicPartnerContext(context) });
 }
 
 async function handlePartnerSession(req: IncomingMessage, res: ServerResponse) {
@@ -1361,11 +1396,11 @@ async function handlePartnerSession(req: IncomingMessage, res: ServerResponse) {
   if (!session) { json(res, 200, { partner: null }); return; }
   const database = await transaction((current) => current, { persist: false, scope: 'availability' });
   const context = resolvePublicPartnerContext(database, session.partnerId);
-  if (!context || context.slug !== session.slug) {
+  if (!context || context.slug !== session.slug || (session.partnerType && context.partnerType !== session.partnerType)) {
     res.setHeader('Set-Cookie', buildPartnerCookie('', 0));
     json(res, 200, { partner: null }); return;
   }
-  json(res, 200, { partner: context });
+  json(res, 200, { partner: toPublicPartnerContext(context) });
 }
 
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
@@ -1436,6 +1471,8 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       description: getRegistrationDescription,
       partnerId: partnerSession?.partnerId || null,
       partnerSlug: partnerSession?.slug || null,
+      partnerType: partnerSession?.partnerType || null,
+      correlationId: partnerSession?.correlationId || null,
       ipAddress: getClientIp(req),
       userAgent: getUserAgent(req),
       accessAuditId: partnerSession?.accessAuditId || null,
@@ -1464,11 +1501,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
     if (existing?.status === 'pending_payment') {
       const existingPayment = database.payments.find((item) => item.registrationId === existing.id);
-      const existingLot = database.lots.find((item) => item.id === existing.lotId);
-      const isStalePending = !existingLot
-        || existingLot.status !== 'active'
-        || (existing.originalPriceCents ?? existing.amountCents) !== existingLot.priceCents
-        || existing.amountCents !== (existing.finalPriceCents ?? existing.amountCents)
+      const isStalePending = existing.amountCents !== (existing.finalPriceCents ?? existing.amountCents)
         || !existingPayment
         || existingPayment.amountCents !== (existing.finalPriceCents ?? existing.amountCents);
 
@@ -1511,8 +1544,8 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
             ? 'Inscricao recuperada. Preparando um novo acesso ao checkout.'
             : 'Ja existe uma inscricao aguardando pagamento para este CPF.',
         partner: activeExisting.partnerId ? {
-          id: activeExisting.partnerId,
           name: activeExisting.partnerName || '',
+          partnerType: activeExisting.partnerType || 'sports_advisory',
           discountPercentage: activeExisting.discountPercentage || 0,
           discountAmountCents: activeExisting.discountAmountCents || 0,
           originalPriceCents: activeExisting.originalPriceCents ?? activeExisting.amountCents,
@@ -1567,7 +1600,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     const now = new Date().toISOString();
     const expiresAt = getPendingPaymentExpiresAt(now);
     const partner = partnerSession
-      ? database.partners.find((item) => item.id === partnerSession.partnerId && item.slug === partnerSession.slug)
+      ? database.partners.find((item) => item.id === partnerSession.partnerId
+        && item.slug === partnerSession.slug
+        && (!partnerSession.partnerType || item.partnerType === partnerSession.partnerType))
       : null;
     const partnerPricing = calculatePartnerPricing(activeLot.priceCents, partner);
     const registration: RegistrationRecord = {
@@ -1640,8 +1675,8 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       description: getRegistrationDescription(distance.name, activeLot.name),
       shouldCreateCheckout: true,
       partner: partnerPricing ? {
-        id: partnerPricing.partnerId,
         name: partnerPricing.partnerName,
+        partnerType: partner?.partnerType || 'sports_advisory',
         discountPercentage: partnerPricing.discountPercentage,
         discountAmountCents: partnerPricing.discountAmountCents,
         originalPriceCents: partnerPricing.originalPriceCents,
@@ -1651,7 +1686,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   }, { scope: 'checkout' });
   } catch (error) {
     if (partnerSession?.partnerId) {
-      await appendPartnerAuditLogInPostgres({ partnerId: partnerSession.partnerId, action: 'partner.persistence_failed', metadata: { slug: partnerSession.slug, error: error instanceof Error ? error.message.slice(0, 500) : String(error) }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) }).catch(() => undefined);
+      await appendPartnerAuditLogInPostgres({ partnerId: partnerSession.partnerId, action: 'partner.persistence_failed', metadata: { slug: partnerSession.slug, correlationId: partnerSession.correlationId || null, partnerType: partnerSession.partnerType || null, partner_type: partnerSession.partnerType || null, error: error instanceof Error ? error.message.slice(0, 500) : String(error) }, ipAddress: getClientIp(req), userAgent: getUserAgent(req) }).catch(() => undefined);
       await recordOperationalAlert({ dedupeKey: `partner-persistence:${partnerSession.partnerId}:${new Date().toISOString().slice(0,13)}`, severity: 'critical', alertType: 'partner_persistence_failure', title: 'Falha na persistencia do parceiro', message: 'A inscricao nao conseguiu persistir os dados da assessoria.', entityType: 'partner', entityId: partnerSession.partnerId, payload: { slug: partnerSession.slug } });
     }
     throw error;
@@ -2180,8 +2215,8 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     paidAt: registration.paidAt || payment?.paidAt || null,
     confirmedAt: registration.confirmedAt || (paymentProvesPaid ? payment?.paidAt || null : null),
     partner: registration.partnerId ? {
-      id: registration.partnerId,
       name: registration.partnerName || '',
+      partnerType: registration.partnerType || 'sports_advisory',
       discountPercentage: registration.discountPercentage || 0,
       discountAmountCents: registration.discountAmountCents || 0,
       originalPriceCents: registration.originalPriceCents ?? registration.amountCents,

@@ -1,6 +1,15 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import type { PartnerType } from './database.js';
 
-export type PartnerSession = { partnerId: string; slug: string; issuedAt: number; expiresAt: number; accessAuditId?: string };
+export type PartnerSession = {
+  partnerId: string;
+  slug: string;
+  partnerType?: PartnerType;
+  issuedAt: number;
+  expiresAt: number;
+  correlationId?: string;
+  accessAuditId?: string;
+};
 
 export function signPartnerSession(session: PartnerSession, secret: string) {
   const payload = Buffer.from(JSON.stringify(session)).toString('base64url');
@@ -17,7 +26,8 @@ export function verifyPartnerSession(token: string | undefined, secret: string, 
   if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) return null;
   try {
     const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as PartnerSession;
-    return session.partnerId && session.slug && session.expiresAt > now ? session : null;
+    const validType = session.partnerType === undefined || ['sports_advisory', 'influencer'].includes(session.partnerType);
+    return session.partnerId && session.slug && Number.isFinite(session.issuedAt) && session.expiresAt > now && validType ? session : null;
   } catch {
     return null;
   }

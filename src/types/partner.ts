@@ -22,9 +22,10 @@ export type AdminPartnerResponse = { partner: AdminPartner };
 export type PartnerSlugAvailabilityResponse = { slug: string; available: boolean };
 
 export type PublicPartnerContext = {
-  id: string;
   name: string;
   slug: string;
+  partnerType: PartnerType;
+  resolutionStatus: 'approved';
   discountPercentage: number;
   discountAmountCents: number;
   originalPriceCents: number;
