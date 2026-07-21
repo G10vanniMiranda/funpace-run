@@ -13,8 +13,11 @@ export type AdminPartner = {
   updatedAt: string;
 };
 
-export type PartnerInput = Pick<AdminPartner, 'name' | 'slug' | 'discountPercentage' | 'status' | 'description'> & { partnerType?: PartnerType };
-export type AdminPartnersResponse = { partners: AdminPartner[] };
+export type PartnerInput = Pick<AdminPartner, 'name' | 'slug' | 'partnerType' | 'discountPercentage' | 'status' | 'description'>;
+export type AdminPartnersResponse = {
+  partners: AdminPartner[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+};
 export type AdminPartnerResponse = { partner: AdminPartner };
 export type PartnerSlugAvailabilityResponse = { slug: string; available: boolean };
 

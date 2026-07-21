@@ -1,3 +1,5 @@
+import type { PartnerType } from '../types/partner';
+
 export function slugifyPartnerName(value: string) {
   return value
     .normalize('NFD')
@@ -18,3 +20,12 @@ export async function copyPartnerLink(link: string, clipboard?: Pick<Clipboard, 
   if (!target) throw new Error('A area de transferencia nao esta disponivel.');
   await target.writeText(link);
 }
+export const partnerTypeOptions: ReadonlyArray<{ value: PartnerType; label: string }> = [
+  { value: 'sports_advisory', label: 'Assessoria esportiva' },
+  { value: 'influencer', label: 'Influenciador' },
+];
+
+export const partnerTypeLabels: Record<PartnerType, string> = {
+  sports_advisory: 'Assessoria esportiva',
+  influencer: 'Influenciador',
+};

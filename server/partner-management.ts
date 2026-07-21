@@ -36,7 +36,7 @@ export function validatePartnerInput(input: Record<string, unknown> | null): Par
   const partnerType = String(input?.partnerType ?? input?.partner_type ?? 'sports_advisory') as PartnerType;
   const errors: Record<string, string> = {};
 
-  if (name.length < 2) errors.name = 'Informe o nome da assessoria.';
+  if (name.length < 2) errors.name = 'Informe o nome do parceiro.';
   if (slug.length < 2) errors.slug = 'Informe um slug com pelo menos 2 caracteres.';
   if (!Number.isFinite(discountPercentage) || discountPercentage <= 0 || discountPercentage >= 100) {
     errors.discountPercentage = 'O desconto deve ser maior que 0 e menor que 100.';

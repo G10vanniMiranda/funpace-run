@@ -2635,7 +2635,7 @@ export async function exportPartnerRegistrationsInPostgres(filters: PartnerAnaly
 }
 
 export type PartnerAuditAction =
-  | 'partner.created' | 'partner.updated' | 'partner.activated' | 'partner.inactivated' | 'partner.deleted'
+  | 'partner.created' | 'partner.updated' | 'partner.type_changed' | 'partner.type_change_blocked' | 'partner.activated' | 'partner.inactivated' | 'partner.deleted'
   | 'partner.link_accessed' | 'partner.link_rejected' | 'registration.started' | 'discount.applied'
   | 'payment.started' | 'webhook.received' | 'payment.approved' | 'payment.declined'
   | 'registration.cancelled' | 'payment.refunded' | 'consistency.issue_detected' | 'partner.persistence_failed';
@@ -2675,11 +2675,49 @@ function mapPartnerRow(row: Record<string, unknown>): PartnerRecord {
   return { id: String(row.id), name: String(row.name), slug: String(row.slug), partnerType: row.partner_type as PartnerType, discountPercentage: Number(row.discount_percentage), status: row.status as PartnerRecord['status'], description: row.description ? String(row.description) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at), deletedAt: row.deleted_at ? String(row.deleted_at) : null };
 }
 
+export async function listAdminPartnersInPostgres(
+  filters: { name?: string; slug?: string; status?: PartnerStatus; partnerType?: PartnerType },
+  page = 1,
+  pageSize = 20,
+) {
+  await ensurePostgresReady();
+  const values: unknown[] = [];
+  const where = ['deleted_at is null'];
+  const add = (value: unknown) => { values.push(value); return `$${values.length}`; };
+  if (filters.name) where.push(`name ilike '%' || ${add(filters.name)} || '%'`);
+  if (filters.slug) where.push(`slug like '%' || ${add(filters.slug)} || '%'`);
+  if (filters.status) where.push(`status=${add(filters.status)}`);
+  if (filters.partnerType) where.push(`partner_type=${add(filters.partnerType)}`);
+  const pool = requirePool();
+  const countResult = await pool.query(`select count(*)::int total from ${table.partners} where ${where.join(' and ')}`, values);
+  const result = await pool.query(
+    `select * from ${table.partners} where ${where.join(' and ')} order by name asc,id asc
+     limit $${values.length + 1} offset $${values.length + 2}`,
+    [...values, pageSize, (page - 1) * pageSize],
+  );
+  const total = Number(countResult.rows[0]?.total || 0);
+  return {
+    partners: result.rows.map(mapPartnerRow),
+    pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
+  };
+}
+
+export class PartnerTypeChangeBlockedError extends Error {
+  readonly details: { registrations: number; payments: number; transactionalAuditLogs: number };
+
+  constructor(details: { registrations: number; payments: number; transactionalAuditLogs: number }) {
+    super('O tipo nao pode ser alterado porque o parceiro ja possui historico transacional.');
+    this.name = 'PartnerTypeChangeBlockedError';
+    this.details = details;
+  }
+}
+
 export async function mutatePartnerWithAuditInPostgres(input: {
   mode: 'create' | 'update' | 'status' | 'delete'; partnerId?: string; partner?: Pick<PartnerRecord, 'name' | 'slug' | 'partnerType' | 'discountPercentage' | 'status' | 'description'>;
   status?: PartnerRecord['status']; actor: string; actorRole: string; sessionId: string; ipAddress: string | null; userAgent: string | null;
 }) {
   const client = await requirePool().connect();
+  let transactionFinished = false;
   try {
     await ensurePostgresReady(); await client.query('begin');
     const now = new Date().toISOString();
@@ -2694,8 +2732,29 @@ export async function mutatePartnerWithAuditInPostgres(input: {
       before = mapPartnerRow(current.rows[0]);
       if (input.mode === 'update') {
         const partner = input.partner!;
+        if (partner.partnerType !== before.partnerType) {
+          const history = (await client.query(
+            `select
+              (select count(*)::int from ${table.registrations} where partner_id=$1::uuid) registrations,
+              (select count(*)::int from ${table.payments} payment join ${table.registrations} registration on registration.id=payment.registration_id where registration.partner_id=$1::uuid) payments,
+              (select count(*)::int from ${table.partnerAuditLogs} where partner_id=$1::uuid and (registration_id is not null or action in ('registration.started','discount.applied','payment.started','webhook.received','payment.approved','payment.declined','registration.cancelled','payment.refunded'))) transactional_audit_logs`,
+            [input.partnerId],
+          )).rows[0];
+          const details = {
+            registrations: Number(history?.registrations || 0),
+            payments: Number(history?.payments || 0),
+            transactionalAuditLogs: Number(history?.transactional_audit_logs || 0),
+          };
+          if (details.registrations > 0 || details.payments > 0 || details.transactionalAuditLogs > 0) {
+            const metadata = { partnerType: before.partnerType, partner_type: before.partnerType, previousPartnerType: before.partnerType, requestedPartnerType: partner.partnerType, actorRole: input.actorRole, sessionId: input.sessionId, history: details };
+            await insertPartnerAudit(client, { partnerId: before.id, action: 'partner.type_change_blocked', userId: input.actor, oldData: before, newData: { requestedPartnerType: partner.partnerType }, metadata, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+            await client.query(`insert into ${table.auditLogs} (id,actor,actor_role,action,entity_type,entity_id,payload,session_id,ip_address,user_agent,created_at) values ($1,$2,$3,$4,'partner',$5,$6,$7,$8,$9,$10)`, [randomUUID(),input.actor,input.actorRole,'partner.type_change_blocked',before.id,{ before, requestedPartnerType: partner.partnerType, metadata },input.sessionId,input.ipAddress,input.userAgent,now]);
+            await client.query('commit'); transactionFinished = true;
+            throw new PartnerTypeChangeBlockedError(details);
+          }
+        }
         const result = await client.query(`update ${table.partners} set name=$1,slug=$2,partner_type=$3,discount_percentage=$4,status=$5,description=$6,updated_at=$7 where id=$8::uuid returning *`, [partner.name,partner.slug,partner.partnerType,partner.discountPercentage,partner.status,partner.description,now,input.partnerId]);
-        after = mapPartnerRow(result.rows[0]); action = 'partner.updated';
+        after = mapPartnerRow(result.rows[0]); action = partner.partnerType === before.partnerType ? 'partner.updated' : 'partner.type_changed';
       } else if (input.mode === 'status') {
         const result = await client.query(`update ${table.partners} set status=$1,updated_at=$2 where id=$3::uuid returning *`, [input.status,now,input.partnerId]);
         after = mapPartnerRow(result.rows[0]); action = input.status === 'active' ? 'partner.activated' : 'partner.inactivated';
@@ -2706,10 +2765,11 @@ export async function mutatePartnerWithAuditInPostgres(input: {
         if (Number(active.rows[0]?.count || 0) > 0) await client.query(`insert into ${table.operationalAlerts} (id,dedupe_key,severity,alert_type,title,message,entity_type,entity_id,payload,status,detected_at) values ($1,$2,'critical','partner_removed_with_active_registrations','Parceiro removido com inscricoes ativas',$3,'partner',$4,$5,'open',$6) on conflict (dedupe_key) do update set payload=excluded.payload,detected_at=excluded.detected_at,status='open',resolved_at=null`, [randomUUID(),`partner-removed-active:${input.partnerId}`,`${before.name} foi removido com inscricoes pendentes ou pagas.`,input.partnerId,{ activeRegistrations: Number(active.rows[0].count) },now]);
       }
     }
-    await insertPartnerAudit(client, { partnerId: after!.id, action, userId: input.actor, oldData: before, newData: after, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
-    await client.query(`insert into ${table.auditLogs} (id,actor,actor_role,action,entity_type,entity_id,payload,session_id,ip_address,user_agent,created_at) values ($1,$2,$3,$4,'partner',$5,$6,$7,$8,$9,$10)`, [randomUUID(),input.actor,input.actorRole,action,after!.id,{before,after},input.sessionId,input.ipAddress,input.userAgent,now]);
-    await client.query('commit'); return after;
-  } catch (error) { await client.query('rollback').catch(() => undefined); throw error; }
+    const metadata = { partnerType: after!.partnerType, partner_type: after!.partnerType, previousPartnerType: before?.partnerType ?? null, nextPartnerType: after!.partnerType, actorRole: input.actorRole, sessionId: input.sessionId };
+    await insertPartnerAudit(client, { partnerId: after!.id, action, userId: input.actor, oldData: before, newData: after, metadata, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+    await client.query(`insert into ${table.auditLogs} (id,actor,actor_role,action,entity_type,entity_id,payload,session_id,ip_address,user_agent,created_at) values ($1,$2,$3,$4,'partner',$5,$6,$7,$8,$9,$10)`, [randomUUID(),input.actor,input.actorRole,action,after!.id,{before,after,metadata},input.sessionId,input.ipAddress,input.userAgent,now]);
+    await client.query('commit'); transactionFinished = true; return after;
+  } catch (error) { if (!transactionFinished) await client.query('rollback').catch(() => undefined); throw error; }
   finally { client.release(); }
 }
 

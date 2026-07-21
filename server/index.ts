@@ -24,7 +24,9 @@ import {
   exportPartnerRegistrationsInPostgres,
   appendPartnerAuditLogInPostgres,
   appendPartnerPaymentStatusAuditInPostgres,
+  listAdminPartnersInPostgres,
   mutatePartnerWithAuditInPostgres,
+  PartnerTypeChangeBlockedError,
   listPartnerAuditLogsInPostgres,
   getRegistrationPartnerAuditInPostgres,
   getPartnerMonitoringInPostgres,
@@ -42,13 +44,14 @@ import {
   usesPostgresDatabase,
   type Database,
   type PartnerRecord,
+  type PartnerType,
   type PartnershipLeadRecord,
   type PartnershipLeadStatus,
   type PaymentRecord,
   type RegistrationRecord,
   type PartnerAnalyticsFilters,
 } from './database.js';
-import { normalizePartnerSlug, validatePartnerInput } from './partner-management.js';
+import { normalizePartnerSlug, partnerTypes, validatePartnerInput } from './partner-management.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, type RegistrationEmailContext } from './email.js';
 import {
   processGoogleSheetSync,
@@ -3536,21 +3539,25 @@ function isPartnerSlugConflict(error: unknown) {
 
 async function handleAdminPartnersList(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
-  const name = (url.searchParams.get('name') || '').trim().toLowerCase();
+  const name = (url.searchParams.get('name') || '').trim();
   const slug = normalizePartnerSlug(url.searchParams.get('slug') || '');
   const status = url.searchParams.get('status') || '';
+  const partnerType = url.searchParams.get('partnerType') || url.searchParams.get('partner_type') || '';
+  const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '20', 10) || 20));
   if (status && !['active', 'inactive'].includes(status)) {
     json(res, 422, { message: 'Filtro de status invalido.' }); return;
   }
-  const database = await transaction((current) => current, { persist: false, scope: 'partners' });
-  const partners = database.partners
-    .filter((partner) => !partner.deletedAt)
-    .filter((partner) => !name || partner.name.toLowerCase().includes(name))
-    .filter((partner) => !slug || partner.slug.includes(slug))
-    .filter((partner) => !status || partner.status === status)
-    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'))
-    .map(toAdminPartner);
-  json(res, 200, { partners });
+  if (partnerType && !partnerTypes.includes(partnerType as PartnerType)) {
+    json(res, 422, { message: 'Filtro de tipo de parceiro invalido.' }); return;
+  }
+  const result = await listAdminPartnersInPostgres({
+    name: name || undefined,
+    slug: slug || undefined,
+    status: status as PartnerRecord['status'] || undefined,
+    partnerType: partnerType as PartnerType || undefined,
+  }, page, pageSize);
+  json(res, 200, { partners: result.partners.map(toAdminPartner), pagination: result.pagination });
 }
 
 async function handleAdminPartnerGet(req: IncomingMessage, res: ServerResponse, partnerId: string) {
@@ -3575,6 +3582,12 @@ async function handleAdminPartnerWrite(req: IncomingMessage, res: ServerResponse
   const adminSession = await requireAdmin(req, res, ['administrator']);
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<Record<string, unknown>>(await readBody(req));
+  if (partnerId && body && body.partnerType === undefined && body.partner_type === undefined) {
+    const database = await transaction((current) => current, { persist: false, scope: 'partners' });
+    const currentPartner = database.partners.find((partner) => partner.id === partnerId && !partner.deletedAt);
+    if (!currentPartner) { json(res, 404, { message: 'Parceiro nao encontrado.' }); return; }
+    body.partnerType = currentPartner.partnerType;
+  }
   const validation = validatePartnerInput(body);
   if ('errors' in validation) { json(res, 422, { message: 'Revise os dados do parceiro.', errors: validation.errors }); return; }
   const partnerInput = validation.value;
@@ -3584,6 +3597,9 @@ async function handleAdminPartnerWrite(req: IncomingMessage, res: ServerResponse
     json(res, partnerId ? 200 : 201, { partner: toAdminPartner(partner) });
   } catch (error) {
     if (isPartnerSlugConflict(error)) { json(res, 409, { message: 'Este slug ja esta em uso.', errors: { slug: 'Slug indisponivel.' } }); return; }
+    if (error instanceof PartnerTypeChangeBlockedError) {
+      json(res, 409, { message: error.message, errors: { partnerType: error.message }, history: error.details }); return;
+    }
     throw error;
   }
 }

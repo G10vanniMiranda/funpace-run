@@ -116,7 +116,7 @@ try {
   });
   assert.equal(updated.response.status, 200, JSON.stringify(updated.payload));
   assert.equal(updated.payload.partner.discountPercentage, 15);
-  assert.equal(updated.payload.partner.partnerType, 'sports_advisory', 'Update legado deve permanecer compativel com o tipo padrao.');
+  assert.equal(updated.payload.partner.partnerType, 'influencer', 'Update legado nao deve reclassificar silenciosamente um parceiro existente.');
 
   const activated = await request(baseUrl, `/api/admin/partners/${partnerId}/status`, {
     method: 'PATCH', headers: authHeaders, body: JSON.stringify({ status: 'active' }),
