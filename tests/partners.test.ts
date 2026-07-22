@@ -81,8 +81,8 @@ test('signs partner sessions and rejects tampering or expiration', () => {
 test('centralizes contextual labels for both supported partner types', () => {
   assert.equal(partnerTypeLabels.sports_advisory, 'Assessoria esportiva');
   assert.equal(partnerTypeLabels.influencer, 'Influenciador');
-  assert.equal(partnerTypeBenefitLabels.sports_advisory, 'Inscricao atraves da assessoria');
-  assert.equal(partnerTypeBenefitLabels.influencer, 'Beneficio do influenciador');
+  assert.equal(partnerTypeBenefitLabels.sports_advisory, 'Inscrição através da assessoria');
+  assert.equal(partnerTypeBenefitLabels.influencer, 'Benefício do influenciador');
 });
 
 test('labels payment audit events with the persisted attribution type', () => {

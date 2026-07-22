@@ -225,7 +225,7 @@ export function AdminPage() {
       }
       const message = requestError instanceof ApiError
         ? requestError.message
-        : 'Não foi possivel carregar o painel.';
+        : 'Não foi possível carregar o painel.';
       setError(message);
     } finally {
       setLoading(false);
@@ -321,7 +321,7 @@ export function AdminPage() {
       setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
       await loadAdminData();
     } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possivel registrar o check-in.');
+      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível registrar o check-in.');
     } finally {
       setActionLoading('');
     }
@@ -337,7 +337,7 @@ export function AdminPage() {
       setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
       await loadAdminData();
     } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possivel registrar a entrega do kit.');
+      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível registrar a entrega do kit.');
     } finally {
       setActionLoading('');
     }
@@ -353,8 +353,8 @@ export function AdminPage() {
     const needsReason = maintenanceDraft.action !== 'send-email';
     if (needsReason && maintenanceDraft.reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
     setActionLoading(maintenanceDraft.action); setError('');
-    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setActionMessage(response.message || (maintenanceDraft.action === 'cancel' ? 'inscrição cancelada com sucesso.' : maintenanceDraft.action === 'send-email' ? 'Email de confirmacao enviado com sucesso.' : 'Acao concluida com sucesso.')); setMaintenanceDraft(null); }
-    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possivel concluir a ação.'); }
+    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setActionMessage(response.message || (maintenanceDraft.action === 'cancel' ? 'Inscrição cancelada com sucesso.' : maintenanceDraft.action === 'send-email' ? 'Email de confirmação enviado com sucesso.' : 'Ação concluída com sucesso.')); setMaintenanceDraft(null); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível concluir a ação.'); }
     finally { setActionLoading(''); }
   };
 
@@ -668,7 +668,7 @@ function LoginScreen({
       <form onSubmit={onSubmit} aria-busy={loading} className="relative mx-auto w-full max-w-xl border border-white/10 bg-zinc-950/95 p-5 shadow-2xl sm:p-8 md:p-12">
         <ShieldCheck className="mb-8 h-12 w-12 text-brand" />
         <p className="mb-3 text-xs font-black uppercase tracking-[0.28em] text-brand">Centro de comando</p>
-        <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FUNPACE Run</h1>
+        <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FunPace Run</h1>
         <p className="mb-8 font-mono text-sm leading-relaxed text-zinc-400">
           Acesse vendas, inscrições, lotes, pagamentos e operação do evento com email e senha administrativa.
         </p>
@@ -707,7 +707,7 @@ function Sidebar({ activeNav, adminRole, onSelect }: { activeNav: AdminNavKey; a
   return (
     <div className="flex h-full flex-col">
       <div className="mb-5 border-b border-white/10 px-3 pb-5">
-        <p className="font-display text-xl font-black uppercase tracking-tighter">FUNPACE</p>
+        <p className="font-display text-xl font-black uppercase tracking-tighter">FunPace</p>
         <p className="mt-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Run Operations</p>
       </div>
 
@@ -780,7 +780,7 @@ function Topbar({
           </button>
           <div className="min-w-0">
             <p className="text-xs font-black uppercase tracking-widest text-brand">{getNavLabel(activeNav)}</p>
-            <h1 className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operações FUNPACE Run</h1>
+            <h1 className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operações FunPace Run</h1>
           </div>
         </div>
 
@@ -958,16 +958,16 @@ function PaymentControlPanel({
   const filtered = paymentRows;
   useEffect(() => {
     const status = filter === 'pending' ? 'pending_payment' : filter === 'all' ? '' : filter;
-    void getAdminPayments(adminKey, { ...paymentFilters, status }).then((response) => { setPaymentRows(response.payments); setPaymentPagination(response.pagination); setOrphanEvents(response.orphanEvents); }).catch((error) => setActionError(error instanceof ApiError ? error.message : 'Não foi possivel carregar os pagamentos.'));
+    void getAdminPayments(adminKey, { ...paymentFilters, status }).then((response) => { setPaymentRows(response.payments); setPaymentPagination(response.pagination); setOrphanEvents(response.orphanEvents); }).catch((error) => setActionError(error instanceof ApiError ? error.message : 'Não foi possível carregar os pagamentos.'));
   }, [adminKey, filter, paymentFilters.q, paymentFilters.method, paymentFilters.dateFrom, paymentFilters.dateTo, paymentFilters.page, paymentFilters.pageSize]);
 
   const exportPayments = async () => {
     const status = filter === 'pending' ? 'pending_payment' : filter === 'all' ? '' : filter;
     try {
       const response = await fetch(getAdminPaymentsCsvUrl({ ...paymentFilters, status }), { credentials: 'include' });
-      if (!response.ok) throw new Error('Não foi possivel exportar pagamentos.');
+      if (!response.ok) throw new Error('Não foi possível exportar pagamentos.');
       const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-pagamentos.csv'; link.click(); URL.revokeObjectURL(url);
-    } catch (error) { setActionError(error instanceof Error ? error.message : 'Não foi possivel exportar pagamentos.'); }
+    } catch (error) { setActionError(error instanceof Error ? error.message : 'Não foi possível exportar pagamentos.'); }
   };
   const linkOrphan = async (event: AdminPaymentEvent) => {
     setOrphanDraft({ event, registrationId: '', reason: '' });
@@ -976,13 +976,13 @@ function PaymentControlPanel({
   const submitOrphanLink = async () => {
     if (!orphanDraft?.registrationId.trim() || orphanDraft.reason.trim().length < 5) { setActionError('Informe a inscrição e um motivo com pelo menos 5 caracteres.'); return; }
     try { await linkAdminOrphanPayment(adminKey, orphanDraft.event.id, orphanDraft.registrationId, orphanDraft.reason); setOrphanEvents((current) => current.filter((item) => item.id !== orphanDraft.event.id)); setOrphanDraft(null); await onRefreshAdminData(); }
-    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possivel vincular o evento.'); }
+    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possível vincular o evento.'); }
   };
 
   const openDetails = async (registration: AdminRegistration) => {
     setDetailLoading(true); setActionError('');
     try { setDetails(await getAdminPaymentDetails(adminKey, registration.id)); }
-    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possivel carregar o pagamento.'); }
+    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possível carregar o pagamento.'); }
     finally { setDetailLoading(false); }
   };
 
@@ -996,7 +996,7 @@ function PaymentControlPanel({
       setPaymentRows((current) => current.map((item) => item.id === response.registration.id ? response.registration : item));
       setReason('');
       await onRefreshAdminData();
-    } catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possivel conciliar o pagamento.'); }
+    } catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possível conciliar o pagamento.'); }
     finally { setDetailLoading(false); }
   };
 
@@ -1016,8 +1016,8 @@ function PaymentControlPanel({
 
       <Panel title="Últimos pagamentos" eyebrow="Controle operacional">
         <div className="mb-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <input value={paymentFilters.q} onChange={(event) => setPaymentFilters({ ...paymentFilters, q: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Atleta, inscrição ou transacao" />
-          <input value={paymentFilters.method} onChange={(event) => setPaymentFilters({ ...paymentFilters, method: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Metodo: pix, cartao..." />
+          <input value={paymentFilters.q} onChange={(event) => setPaymentFilters({ ...paymentFilters, q: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Atleta, inscrição ou transação" />
+          <input value={paymentFilters.method} onChange={(event) => setPaymentFilters({ ...paymentFilters, method: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Método: pix, cartão..." />
           <input type="date" value={paymentFilters.dateFrom} onChange={(event) => setPaymentFilters({ ...paymentFilters, dateFrom: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data inicial" />
           <input type="date" value={paymentFilters.dateTo} onChange={(event) => setPaymentFilters({ ...paymentFilters, dateTo: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data final" />
         </div>
@@ -1052,8 +1052,8 @@ function PaymentControlPanel({
                   <td className="p-3 font-mono font-bold">{currencyFormatter.format(registration.amountCents / 100)}</td>
                   <td className="p-3 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(registration.createdAt))}</td>
                   <td className="p-3 text-xs text-zinc-400">
-                    <p>{registration.gatewayStatus || 'Gateway Não informado'}</p>
-                    <p className="mt-1 uppercase">{registration.paymentMethod || 'Metodo Não informado'}</p>
+                    <p>{registration.gatewayStatus || 'Gateway não informado'}</p>
+                    <p className="mt-1 uppercase">{registration.paymentMethod || 'Método não informado'}</p>
                     {registration.paidAt && <p className="mt-1 font-mono">Pago: {dateTimeFormatter.format(new Date(registration.paidAt))}</p>}
                     {registration.hasPaymentDivergence && <p className="mt-1 font-black text-red-300">Inconsistência detectada entre pagamento e inscrição.</p>}
                     <button type="button" onClick={() => void openDetails(registration)} className="mt-2 inline-flex items-center gap-1 border border-white/10 px-2 py-1 hover:border-brand hover:text-brand"><Eye className="h-3 w-3" /> Detalhes</button>
@@ -1065,11 +1065,11 @@ function PaymentControlPanel({
         </div>
         <div className="mt-3 flex items-center justify-between border-t border-white/10 pt-3 text-xs text-zinc-400">
           <button type="button" disabled={paymentPagination.page <= 1} onClick={() => setPaymentFilters({ ...paymentFilters, page: String(paymentPagination.page - 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Anterior</button>
-          <span>{paymentPagination.total} pagamentos · pagina {paymentPagination.page}/{paymentPagination.totalPages}</span>
-          <button type="button" disabled={paymentPagination.page >= paymentPagination.totalPages} onClick={() => setPaymentFilters({ ...paymentFilters, page: String(paymentPagination.page + 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Proxima</button>
+          <span>{paymentPagination.total} pagamentos · página {paymentPagination.page}/{paymentPagination.totalPages}</span>
+          <button type="button" disabled={paymentPagination.page >= paymentPagination.totalPages} onClick={() => setPaymentFilters({ ...paymentFilters, page: String(paymentPagination.page + 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Próxima</button>
         </div>
       </Panel>
-      {orphanEvents.length > 0 && <Panel title="Eventos sem inscrição" eyebrow="Exigem conferencia"><div className="space-y-2">{orphanEvents.slice(0, 20).map((event) => <div key={event.id} className="border border-red-400/20 bg-red-400/5 p-3"><p className="font-bold text-red-200">{event.providerEventId}</p><p className="mt-1 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(event.receivedAt))}</p><pre className="mt-2 max-h-32 overflow-auto text-xs text-zinc-400">{JSON.stringify(event.payload, null, 2)}</pre><button type="button" onClick={() => void linkOrphan(event)} className="mt-2 border border-red-300/30 px-3 py-2 text-xs font-black uppercase text-red-200">Vincular a inscrição</button></div>)}</div></Panel>}
+      {orphanEvents.length > 0 && <Panel title="Eventos sem inscrição" eyebrow="Exigem conferência"><div className="space-y-2">{orphanEvents.slice(0, 20).map((event) => <div key={event.id} className="border border-red-400/20 bg-red-400/5 p-3"><p className="font-bold text-red-200">{event.providerEventId}</p><p className="mt-1 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(event.receivedAt))}</p><pre className="mt-2 max-h-32 overflow-auto text-xs text-zinc-400">{JSON.stringify(event.payload, null, 2)}</pre><button type="button" onClick={() => void linkOrphan(event)} className="mt-2 border border-red-300/30 px-3 py-2 text-xs font-black uppercase text-red-200">Vincular à inscrição</button></div>)}</div></Panel>}
       {(details || detailLoading || actionError) && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/75">
           <button type="button" aria-label="Fechar" className="absolute inset-0" onClick={() => { setDetails(null); setActionError(''); }} />
@@ -1079,9 +1079,9 @@ function PaymentControlPanel({
             {actionError && <p className="mt-4 border border-red-400/20 bg-red-400/10 p-3 text-red-200">{actionError}</p>}
             {details && <>
               <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <Detail label="inscrição" value={details.payment.id} /><Detail label="Atleta" value={details.payment.fullName} />
+                <Detail label="Inscrição" value={details.payment.id} /><Detail label="Atleta" value={details.payment.fullName} />
                 <Detail label="Status sistema" value={statusLabels[details.payment.status]} /><Detail label="Status gateway" value={details.payment.gatewayStatus || 'Não informado'} />
-                <Detail label="Transacao InfinitePay" value={details.payment.gatewayTransactionId || details.payment.providerPaymentId || 'Não informada'} /><Detail label="Metodo" value={details.payment.paymentMethod || 'Não informado'} />
+                <Detail label="Transação InfinitePay" value={details.payment.gatewayTransactionId || details.payment.providerPaymentId || 'Não informada'} /><Detail label="Método" value={details.payment.paymentMethod || 'Não informado'} />
               </div>
               <p className="mb-2 mt-5 text-xs font-black uppercase text-zinc-500">Payload do gateway</p>
               <pre className="max-h-72 overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(details.gatewayPayload, null, 2) || 'Nenhum payload recebido'}</pre>
@@ -1169,7 +1169,7 @@ function OperationControlPanel({
     const registrationId = code.startsWith('funpace:registration:') ? code.slice('funpace:registration:'.length) : code;
     const normalized = normalizeSearch(registrationId);
     const registration = registrations.find((item) => item.id === registrationId || normalizeSearch(item.bibNumber || '') === normalized);
-    if (!registration) { setScanError('inscrição não encontrada. Confira o QR ou número de peito.'); return; }
+    if (!registration) { setScanError('Inscrição não encontrada. Confira o QR ou número de peito.'); return; }
     setScanError(''); setScannerOpen(false); onOpenRegistration(registration);
   };
 
@@ -1244,7 +1244,7 @@ function QrScannerModal({ error, onDetected, onClose }: { error: string; onDetec
     const scanner = new QrScanner(videoRef.current, (result) => onDetectedRef.current(result.data), {
       preferredCamera: 'environment', highlightScanRegion: true, highlightCodeOutline: true, returnDetailedScanResult: true,
     });
-    void scanner.start().catch(() => setCameraError('Não foi possivel acessar a camera. Use HTTPS, permita a camera ou informe o codigo manualmente.'));
+    void scanner.start().catch(() => setCameraError('Não foi possível acessar a câmera. Use HTTPS, permita a câmera ou informe o código manualmente.'));
     return () => { scanner.stop(); scanner.destroy(); };
   }, []);
 
@@ -1395,7 +1395,7 @@ function ReportsPanel({
       const response = await fetch(url, { credentials: 'include' });
       if (!response.ok) {
         const payload = await response.json().catch(() => null) as { message?: string } | null;
-        throw new Error(payload?.message || 'Não foi possivel exportar o relatorio.');
+        throw new Error(payload?.message || 'Não foi possível exportar o relatório.');
       }
       const blob = await response.blob();
       const downloadUrl = URL.createObjectURL(blob);
@@ -1405,7 +1405,7 @@ function ReportsPanel({
       link.click();
       URL.revokeObjectURL(downloadUrl);
     } catch (error) {
-      setExportError(error instanceof Error ? error.message : 'Não foi possivel exportar o relatorio.');
+      setExportError(error instanceof Error ? error.message : 'Não foi possível exportar o relatório.');
     }
   };
   const combinedReportFilters = { ...reportFilters, ...exportFilters };
@@ -1721,12 +1721,12 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
   const [auditError, setAuditError] = useState('');
   const [openingRegistrationId, setOpeningRegistrationId] = useState('');
   useEffect(() => {
-    const timeout = window.setTimeout(() => { void getAdminAuditLogs(adminKey, filters).then((response) => { setLogs(response.logs); setPagination(response.pagination); setAuditError(''); }).catch((error) => setAuditError(error instanceof ApiError ? error.message : 'Não foi possivel carregar a auditoria.')); }, 250);
+    const timeout = window.setTimeout(() => { void getAdminAuditLogs(adminKey, filters).then((response) => { setLogs(response.logs); setPagination(response.pagination); setAuditError(''); }).catch((error) => setAuditError(error instanceof ApiError ? error.message : 'Não foi possível carregar a auditoria.')); }, 250);
     return () => window.clearTimeout(timeout);
   }, [adminKey, filters.q, filters.action, filters.actor, filters.entityType, filters.dateFrom, filters.dateTo, filters.page, filters.pageSize]);
   const exportAudit = async () => {
-    try { const response = await fetch(getAdminAuditLogsCsvUrl(filters), { credentials: 'include' }); if (!response.ok) throw new Error('Não foi possivel exportar a auditoria.'); const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-auditoria.csv'; link.click(); URL.revokeObjectURL(url); }
-    catch (error) { setAuditError(error instanceof Error ? error.message : 'Não foi possivel exportar a auditoria.'); }
+    try { const response = await fetch(getAdminAuditLogsCsvUrl(filters), { credentials: 'include' }); if (!response.ok) throw new Error('Não foi possível exportar a auditoria.'); const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-auditoria.csv'; link.click(); URL.revokeObjectURL(url); }
+    catch (error) { setAuditError(error instanceof Error ? error.message : 'Não foi possível exportar a auditoria.'); }
   };
   const openRegistrationFromLog = async (log: AdminAuditLog) => {
     if (log.entityType !== 'registration') return;
@@ -1734,7 +1734,7 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
     if (registration) { onOpenRegistration(registration); return; }
     setOpeningRegistrationId(log.entityId);
     try { const response = await getAdminRegistrationDetails(adminKey, log.entityId); onOpenRegistration(response.registration); }
-    catch (error) { setAuditError(error instanceof ApiError ? error.message : 'Não foi possivel abrir a inscrição relacionada.'); }
+    catch (error) { setAuditError(error instanceof ApiError ? error.message : 'Não foi possível abrir a inscrição relacionada.'); }
     finally { setOpeningRegistrationId(''); }
   };
   return (
@@ -1751,7 +1751,7 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
         <input value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Buscar em toda auditoria" />
         <input value={filters.action} onChange={(event) => setFilters({ ...filters, action: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Acao" />
         <input value={filters.actor} onChange={(event) => setFilters({ ...filters, actor: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Ator" />
-        <SelectFilter value={filters.entityType} onChange={(value) => setFilters({ ...filters, entityType: value, page: '1' })} options={[{ value: '', label: 'Todas entidades' }, { value: 'registration', label: 'inscrição' }, { value: 'payment', label: 'Pagamento' }, { value: 'partnership', label: 'Parceria' }, { value: 'event', label: 'Evento' }, { value: 'distance', label: 'Distancia' }, { value: 'lot', label: 'Lote' }]} />
+        <SelectFilter value={filters.entityType} onChange={(value) => setFilters({ ...filters, entityType: value, page: '1' })} options={[{ value: '', label: 'Todas entidades' }, { value: 'registration', label: 'Inscrição' }, { value: 'payment', label: 'Pagamento' }, { value: 'partnership', label: 'Parceria' }, { value: 'event', label: 'Evento' }, { value: 'distance', label: 'Distância' }, { value: 'lot', label: 'Lote' }]} />
         <input type="date" value={filters.dateFrom} onChange={(event) => setFilters({ ...filters, dateFrom: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data inicial" />
         <input type="date" value={filters.dateTo} onChange={(event) => setFilters({ ...filters, dateTo: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data final" />
         <button type="button" onClick={() => void exportAudit()} className="min-h-11 border border-brand px-3 text-xs font-black uppercase text-brand">Exportar CSV</button>
@@ -1804,19 +1804,19 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
   const [saveDraft, setSaveDraft] = useState<{ kind: 'event' | 'distance' | 'lot'; id?: string; reason: string } | null>(null);
   const [checkLoading, setCheckLoading] = useState<'email' | 'gateway' | ''>('');
   const [checkResult, setCheckResult] = useState<{ target: 'email' | 'gateway'; summary: string; ok: boolean; checks: Array<{ label: string; ok: boolean; detail: string }> } | null>(null);
-  const load = () => getAdminEventConfig(adminKey).then(setConfig).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Não foi possivel carregar o evento.'));
+  const load = () => getAdminEventConfig(adminKey).then(setConfig).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Não foi possível carregar o evento.'));
   useEffect(() => { void load(); }, [adminKey]);
   if (!config) return <section className="mt-4 border border-white/10 bg-zinc-950 p-6 text-zinc-400">{message || 'Carregando configuracao...'}</section>;
   const availabilityLabel = {
     available: 'Inscricoes disponiveis',
     scheduled: 'Aguardando abertura',
-    closed: 'Inscricoes indisponiveis',
+    closed: 'Inscrições indisponíveis',
   }[config.health.sales.registrationAvailability];
   const now = Date.now();
   const eventAlerts = [
     config.event.status === 'published' && !config.health.database.ok ? { key: 'database', tone: 'warning' as const, title: 'Banco indisponivel', detail: config.health.database.issue || 'Sem conexao valida com o banco principal.' } : null,
-    config.event.status === 'published' && !config.health.email.configured ? { key: 'email', tone: 'warning' as const, title: 'Email pendente', detail: 'O evento esta publicado, mas o email transacional Não esta configurado.' } : null,
-    config.event.status === 'published' && !config.health.gateway.configured ? { key: 'gateway', tone: 'warning' as const, title: 'Gateway pendente', detail: 'O evento esta publicado, mas o gateway Não esta pronto para gerar vendas.' } : null,
+    config.event.status === 'published' && !config.health.email.configured ? { key: 'email', tone: 'warning' as const, title: 'Email pendente', detail: 'O evento está publicado, mas o email transacional não está configurado.' } : null,
+    config.event.status === 'published' && !config.health.gateway.configured ? { key: 'gateway', tone: 'warning' as const, title: 'Gateway pendente', detail: 'O evento está publicado, mas o gateway não está pronto para gerar vendas.' } : null,
     config.event.status === 'published' && !config.health.sales.activeLotId ? { key: 'active-lot', tone: 'warning' as const, title: 'Sem lote ativo', detail: 'Não existe lote ativo para um evento publicado.' } : null,
     config.event.status === 'published' && config.health.sales.activeDistances === 0 ? { key: 'distances', tone: 'warning' as const, title: 'Sem distancias ativas', detail: 'Ative pelo menos uma distancia para liberar inscricoes.' } : null,
     config.lots.some((lot) => lot.status === 'active' && new Date(lot.endsAt).getTime() < now) ? { key: 'expired-lot', tone: 'warning' as const, title: 'Lote ativo vencido', detail: 'Existe lote ativo com encerramento no passado.' } : null,
@@ -1864,7 +1864,7 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
   return <section className="mt-4 space-y-4">
     {message && <p className="border border-brand/20 bg-brand/10 p-3 text-sm text-brand">{message}</p>}
     {eventAlerts.length > 0 && <Panel title="Alertas automaticos" eyebrow="Prioridade"><div className="grid gap-3 lg:grid-cols-2">{eventAlerts.map((alert) => <div key={alert.key} className="border border-amber-400/20 bg-amber-400/10 p-4"><p className="text-xs font-black uppercase tracking-widest text-amber-300">{alert.title}</p><p className="mt-2 text-sm text-amber-50">{alert.detail}</p></div>)}</div></Panel>}
-    <Panel title="Saude do sistema" eyebrow="operação">
+    <Panel title="Saúde do sistema" eyebrow="Operação">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <MetricBox label="Banco" value={config.health.database.ok ? 'Online' : 'Falha'} detail={config.health.database.provider} tone={config.health.database.ok ? 'default' : 'warning'} />
         <MetricBox label="Email" value={config.health.email.configured ? 'Configurado' : 'Pendente'} detail={config.health.email.provider} tone={config.health.email.configured ? 'default' : 'warning'} />
@@ -1884,9 +1884,9 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
           <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Diagnostico</p>
           <div className="mt-3 space-y-2">
             {!config.health.database.ok && <p className="text-amber-300">Banco indisponivel: {config.health.database.issue || 'sem detalhes'}</p>}
-            {!config.health.email.configured && <p className="text-amber-300">Email transacional Não configurado.</p>}
+            {!config.health.email.configured && <p className="text-amber-300">Email transacional não configurado.</p>}
             {!config.health.gateway.configured && <p className="text-amber-300">Gateway sem provider ou handle configurado.</p>}
-            {config.health.database.ok && config.health.email.configured && config.health.gateway.configured && <p className="text-brand">Servicos principais configurados para operação.</p>}
+            {config.health.database.ok && config.health.email.configured && config.health.gateway.configured && <p className="text-brand">Serviços principais configurados para operação.</p>}
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
             <button type="button" onClick={() => void runCheck('email')} disabled={checkLoading !== ''} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand disabled:opacity-50">{checkLoading === 'email' ? 'Validando email...' : 'Validar email'}</button>
@@ -2283,7 +2283,7 @@ function AthleteDrawer({
               <PaymentStatus status={registration.status} />
             </div>
             <p className="mt-4 font-mono text-2xl font-black">{currencyFormatter.format(registration.amountCents / 100)}</p>
-            <p className="mt-2 text-sm text-zinc-400">inscrição criada em {dateTimeFormatter.format(createdAt)}</p>
+            <p className="mt-2 text-sm text-zinc-400">Inscrição criada em {dateTimeFormatter.format(createdAt)}</p>
           </div>
         </div>
 
@@ -2294,8 +2294,8 @@ function AthleteDrawer({
             <Detail label="Percentual aplicado" value={`${details.partnerHistory.discountPercentage}%`} />
             <Detail label="Link utilizado" value={details.partnerHistory.partnerLink || 'Não registrado'} />
             <Detail label="Identificada em" value={dateTimeFormatter.format(new Date(details.partnerHistory.identifiedAt))} />
-            <Detail label="Pagamento confirmado" value={details.partnerHistory.paidAt ? dateTimeFormatter.format(new Date(details.partnerHistory.paidAt)) : 'Ainda Não confirmado'} />
-            <Detail label="Usuario responsavel" value={details.partnerHistory.responsibleUser || 'Processo automatico'} />
+            <Detail label="Pagamento confirmado" value={details.partnerHistory.paidAt ? dateTimeFormatter.format(new Date(details.partnerHistory.paidAt)) : 'Ainda não confirmado'} />
+            <Detail label="Usuário responsável" value={details.partnerHistory.responsibleUser || 'Processo automático'} />
           </div>
           <p className="mt-4 text-[10px] font-black uppercase tracking-widest text-zinc-600">Snapshot protegido contra alteracoes apos a confirmacao</p>
         </div>}
@@ -2709,7 +2709,7 @@ function auditActionLabel(action: string) {
     'registration.check_in': 'Check-in registrado',
     'registration.kit_delivered': 'Kit entregue',
     'registration.updated': 'Cadastro atualizado',
-    'registration.cancel': 'inscrição cancelada',
+    'registration.cancel': 'Inscrição cancelada',
     'registration.undo-check-in': 'Check-in desfeito',
     'registration.undo-kit': 'Entrega de kit desfeita',
     'registration.bib_assigned': 'Numero de peito atribuido',
@@ -2724,14 +2724,14 @@ function auditActionLabel(action: string) {
     'email.confirmation.skipped': 'Confirmacao ignorada',
     'partner.link_accessed': 'Link da assessoria acessado',
     'partner.link_rejected': 'Acesso ao link rejeitado',
-    'registration.started': 'inscrição iniciada pela assessoria',
+    'registration.started': 'Inscrição iniciada pela assessoria',
     'discount.applied': 'Desconto da assessoria aplicado',
     'payment.started': 'Pagamento iniciado',
     'webhook.received': 'Webhook recebido',
     'payment.approved': 'Pagamento aprovado',
     'payment.declined': 'Pagamento recusado',
     'payment.refunded': 'Pagamento reembolsado',
-    'registration.cancelled': 'inscrição cancelada',
+    'registration.cancelled': 'Inscrição cancelada',
     'consistency.issue_detected': 'Inconsistencia de parceiro detectada',
   };
 
@@ -2740,7 +2740,7 @@ function auditActionLabel(action: string) {
 
 function auditEntityLabel(entityType: string) {
   const labels: Record<string, string> = {
-    registration: 'inscrição',
+    registration: 'Inscrição',
     payment: 'Pagamento',
     partnership: 'Parceria',
     event: 'Evento',
@@ -2760,9 +2760,9 @@ function summarizeAuditPayload(payload: unknown) {
   const summary = [
     typeof data.reason === 'string' && data.reason ? `Motivo: ${data.reason}` : null,
     typeof data.status === 'string' && data.status ? `Status: ${data.status}` : null,
-    typeof data.transactionId === 'string' && data.transactionId ? `Transacao: ${data.transactionId}` : null,
+    typeof data.transactionId === 'string' && data.transactionId ? `Transação: ${data.transactionId}` : null,
     typeof data.bibNumber === 'string' && data.bibNumber ? `Peito: ${data.bibNumber}` : null,
-    typeof data.method === 'string' && data.method ? `Metodo: ${data.method}` : null,
+    typeof data.method === 'string' && data.method ? `Método: ${data.method}` : null,
     typeof data.amountCents === 'number' ? `Valor: ${currencyFormatter.format(data.amountCents / 100)}` : null,
     typeof data.operator === 'string' && data.operator ? `Operador: ${data.operator}` : null,
   ].filter(Boolean);

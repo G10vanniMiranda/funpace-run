@@ -138,20 +138,20 @@ function updateMetrics(status: number | null, durationMs: number, failed: boolea
 function getFriendlyHttpError(status: number, payload: ApiErrorPayload | null) {
   const fallback: Record<number, string> = {
     400: 'Os dados enviados são inválidos.',
-    401: 'Sua sessão expirou. Faca login novamente.',
+    401: 'Sua sessão expirou. Faça login novamente.',
     403: 'Você não possui permissão para esta ação.',
     404: 'Serviço não encontrado.',
-    409: 'Ja existe uma inscrição ativa para este CPF ou as vagas estão indisponiveis.',
+    409: 'Já existe uma inscrição ativa para este CPF ou as vagas estão indisponíveis.',
     415: 'Formato da requisição inválido.',
     422: 'Existem campos inválidos. Confira os dados destacados.',
     429: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.',
-    500: 'Erro interno. Nossa equipe ja foi notificada.',
-    502: 'Não foi possivel criar o checkout no gateway. Tente novamente em instantes.',
-    503: 'Serviço temporariamente indisponivel. Tente novamente em instantes.',
+    500: 'Erro interno. Nossa equipe já foi notificada.',
+    502: 'Não foi possível criar o checkout no gateway. Tente novamente em instantes.',
+    503: 'Serviço temporariamente indisponível. Tente novamente em instantes.',
     504: 'A conexão demorou mais do que o esperado. Verifique sua internet.',
   };
 
-  return payload?.message || fallback[status] || 'Não foi possivel concluir a solicitacao.';
+  return payload?.message || fallback[status] || 'Não foi possível concluir a solicitação.';
 }
 
 function isRetryableStatus(status: number) {
@@ -272,7 +272,7 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
     await delay(RETRY_DELAYS_MS[attempt - 1]);
   }
 
-  throw lastError || new ApiError('Nao foi possivel concluir a solicitacao.');
+  throw lastError || new ApiError('Não foi possível concluir a solicitação.');
 }
 
 export function createRegistration(data: RegistrationFormData) {
