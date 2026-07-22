@@ -268,7 +268,7 @@ export function AdminPage() {
     event.preventDefault();
     setLoading(true); setError('');
     try { const session = await loginAdmin(draftEmail, draftPassword); setAdminActor(`${session.actor} · ${session.role}`); setAdminRole(session.role); setAdminKey('session'); setDraftPassword(''); await loadAdminData('session'); }
-    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel entrar.'); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível entrar.'); }
     finally { setLoading(false); }
   };
 
@@ -291,7 +291,7 @@ export function AdminPage() {
       const response = await fetch(csvUrl, { credentials: 'include' });
       if (!response.ok) {
         const payload = await response.json().catch(() => null) as { message?: string } | null;
-        throw new Error(payload?.message || 'Nao foi possivel exportar o CSV.');
+        throw new Error(payload?.message || 'Não foi possível exportar o CSV.');
       }
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
@@ -301,7 +301,7 @@ export function AdminPage() {
       link.click();
       window.URL.revokeObjectURL(url);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Nao foi possivel exportar o CSV.');
+      setError(requestError instanceof Error ? requestError.message : 'Não foi possível exportar o CSV.');
     }
   };
 
@@ -353,8 +353,8 @@ export function AdminPage() {
     const needsReason = maintenanceDraft.action !== 'send-email';
     if (needsReason && maintenanceDraft.reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
     setActionLoading(maintenanceDraft.action); setError('');
-    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setActionMessage(response.message || (maintenanceDraft.action === 'cancel' ? 'Inscricao cancelada com sucesso.' : maintenanceDraft.action === 'send-email' ? 'Email de confirmacao enviado com sucesso.' : 'Acao concluida com sucesso.')); setMaintenanceDraft(null); }
-    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel concluir a acao.'); }
+    try { const response = await maintainAdminRegistration(adminKey, maintenanceDraft.registration.id, maintenanceDraft.action, maintenanceDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, maintenanceDraft.registration.id)); await loadAdminData(); setActionMessage(response.message || (maintenanceDraft.action === 'cancel' ? 'inscrição cancelada com sucesso.' : maintenanceDraft.action === 'send-email' ? 'Email de confirmacao enviado com sucesso.' : 'Acao concluida com sucesso.')); setMaintenanceDraft(null); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possivel concluir a ação.'); }
     finally { setActionLoading(''); }
   };
 
@@ -366,7 +366,7 @@ export function AdminPage() {
       setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
       await loadAdminData();
     }
-    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel atualizar a inscricao.'); throw requestError; }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível atualizar a inscrição.'); throw requestError; }
     finally { setActionLoading(''); }
   };
 
@@ -385,7 +385,7 @@ export function AdminPage() {
     if (bibDraft.reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
     setActionLoading('bib');
     try { const response = await assignAdminBibNumber(adminKey, bibDraft.registration.id, bibDraft.bibNumber, bibDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, bibDraft.registration.id)); setBibDraft(null); }
-    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Nao foi possivel atribuir o numero de peito.'); }
+    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível atribuir o número de peito.'); }
     finally { setActionLoading(''); }
   };
 
@@ -492,13 +492,13 @@ export function AdminPage() {
 
       {maintenanceDraft && (
         <ActionModal
-          title={maintenanceDraft.action === 'cancel' ? 'Cancelar inscricao' : maintenanceDraft.action === 'send-email' ? 'Enviar email' : 'Confirmar acao administrativa'}
+          title={maintenanceDraft.action === 'cancel' ? 'Cancelar inscrição' : maintenanceDraft.action === 'send-email' ? 'Enviar email' : 'Confirmar ação administrativa'}
           description={maintenanceDraft.action === 'cancel'
-            ? `A inscricao de ${maintenanceDraft.registration.fullName} sera cancelada e a vaga sera liberada.`
+            ? `A inscrição de ${maintenanceDraft.registration.fullName} será cancelada e a vaga será liberada.`
             : maintenanceDraft.action === 'send-email'
-              ? `A confirmacao sera enviada para ${maintenanceDraft.registration.email}.`
-              : `Confirme a acao para ${maintenanceDraft.registration.fullName}.`}
-          confirmLabel={actionLoading ? 'Processando...' : maintenanceDraft.action === 'cancel' ? 'Cancelar inscricao' : maintenanceDraft.action === 'send-email' ? 'Enviar email' : 'Confirmar'}
+              ? `A confirmação será enviada para ${maintenanceDraft.registration.email}.`
+              : `Confirme a ação para ${maintenanceDraft.registration.fullName}.`}
+          confirmLabel={actionLoading ? 'Processando...' : maintenanceDraft.action === 'cancel' ? 'Cancelar inscrição' : maintenanceDraft.action === 'send-email' ? 'Enviar email' : 'Confirmar'}
           confirmTone={maintenanceDraft.action === 'cancel' ? 'danger' : 'brand'}
           confirmDisabled={actionLoading !== '' || (maintenanceDraft.action !== 'send-email' && maintenanceDraft.reason.trim().length < 5)}
           onConfirm={() => void submitMaintenance()}
@@ -506,7 +506,7 @@ export function AdminPage() {
         >
           {maintenanceDraft.action !== 'send-email' && (
             <label className="block text-xs font-bold text-zinc-400">
-              Motivo da acao <span className="font-normal text-zinc-500">(minimo de 5 caracteres)</span>
+              Motivo da ação <span className="font-normal text-zinc-500">(mínimo de 5 caracteres)</span>
               <textarea value={maintenanceDraft.reason} onChange={(event) => setMaintenanceDraft({ ...maintenanceDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
               <span className="mt-1 block text-right font-mono text-[10px] text-zinc-500">{maintenanceDraft.reason.trim().length}/5</span>
             </label>
@@ -516,16 +516,16 @@ export function AdminPage() {
 
       {bibDraft && (
         <ActionModal
-          title="Atribuir numero de peito"
-          description={`Defina o numero de peito de ${bibDraft.registration.fullName} e registre o motivo da alteracao.`}
-          confirmLabel={actionLoading === 'bib' ? 'Salvando...' : 'Salvar numero'}
+          title="Atribuir número de peito"
+          description={`Defina o número de peito de ${bibDraft.registration.fullName} e registre o motivo da alteração.`}
+          confirmLabel={actionLoading === 'bib' ? 'Salvando...' : 'Salvar número de peito'}
           confirmDisabled={actionLoading === 'bib' || !bibDraft.bibNumber.trim() || bibDraft.reason.trim().length < 5}
           onConfirm={() => void submitBibNumber()}
           onClose={() => setBibDraft(null)}
         >
-          <EditInput label="Numero de peito" value={bibDraft.bibNumber} onChange={(value) => setBibDraft({ ...bibDraft, bibNumber: value.toUpperCase() })} />
+          <EditInput label="Número de peito" value={bibDraft.bibNumber} onChange={(value) => setBibDraft({ ...bibDraft, bibNumber: value.toUpperCase() })} />
           <label className="block text-xs font-bold text-zinc-400">
-            Motivo da atribuicao
+            Motivo da atribuição
             <textarea value={bibDraft.reason} onChange={(event) => setBibDraft({ ...bibDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
           </label>
         </ActionModal>
@@ -576,7 +576,7 @@ function AdminSection({
   if (!canAccessNav(adminRole, activeNav)) {
     return (
       <section className="mt-4">
-        <StatusMessage tone="error" message="Seu perfil nao possui permissao para acessar esta area." />
+        <StatusMessage tone="error" message="Seu perfil não possui permissão para acessar esta área." />
       </section>
     );
   }
@@ -668,9 +668,9 @@ function LoginScreen({
       <form onSubmit={onSubmit} aria-busy={loading} className="relative mx-auto w-full max-w-xl border border-white/10 bg-zinc-950/95 p-5 shadow-2xl sm:p-8 md:p-12">
         <ShieldCheck className="mb-8 h-12 w-12 text-brand" />
         <p className="mb-3 text-xs font-black uppercase tracking-[0.28em] text-brand">Centro de comando</p>
-        <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FunPace Run</h1>
+        <h1 className="mb-4 font-display text-[clamp(2.6rem,12vw,3rem)] font-black uppercase leading-none tracking-tighter">Admin FUNPACE Run</h1>
         <p className="mb-8 font-mono text-sm leading-relaxed text-zinc-400">
-          Acesse vendas, inscricoes, lotes, pagamentos e operacao do evento com email e senha administrativa.
+          Acesse vendas, inscrições, lotes, pagamentos e operação do evento com email e senha administrativa.
         </p>
         <div>
           <input
@@ -707,7 +707,7 @@ function Sidebar({ activeNav, adminRole, onSelect }: { activeNav: AdminNavKey; a
   return (
     <div className="flex h-full flex-col">
       <div className="mb-5 border-b border-white/10 px-3 pb-5">
-        <p className="font-display text-xl font-black uppercase tracking-tighter">FunPace</p>
+        <p className="font-display text-xl font-black uppercase tracking-tighter">FUNPACE</p>
         <p className="mt-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Run Operations</p>
       </div>
 
@@ -780,7 +780,7 @@ function Topbar({
           </button>
           <div className="min-w-0">
             <p className="text-xs font-black uppercase tracking-widest text-brand">{getNavLabel(activeNav)}</p>
-            <h1 className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operações FunPace Run</h1>
+            <h1 className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operações FUNPACE Run</h1>
           </div>
         </div>
 
@@ -958,31 +958,31 @@ function PaymentControlPanel({
   const filtered = paymentRows;
   useEffect(() => {
     const status = filter === 'pending' ? 'pending_payment' : filter === 'all' ? '' : filter;
-    void getAdminPayments(adminKey, { ...paymentFilters, status }).then((response) => { setPaymentRows(response.payments); setPaymentPagination(response.pagination); setOrphanEvents(response.orphanEvents); }).catch((error) => setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel carregar os pagamentos.'));
+    void getAdminPayments(adminKey, { ...paymentFilters, status }).then((response) => { setPaymentRows(response.payments); setPaymentPagination(response.pagination); setOrphanEvents(response.orphanEvents); }).catch((error) => setActionError(error instanceof ApiError ? error.message : 'Não foi possivel carregar os pagamentos.'));
   }, [adminKey, filter, paymentFilters.q, paymentFilters.method, paymentFilters.dateFrom, paymentFilters.dateTo, paymentFilters.page, paymentFilters.pageSize]);
 
   const exportPayments = async () => {
     const status = filter === 'pending' ? 'pending_payment' : filter === 'all' ? '' : filter;
     try {
       const response = await fetch(getAdminPaymentsCsvUrl({ ...paymentFilters, status }), { credentials: 'include' });
-      if (!response.ok) throw new Error('Nao foi possivel exportar pagamentos.');
+      if (!response.ok) throw new Error('Não foi possivel exportar pagamentos.');
       const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-pagamentos.csv'; link.click(); URL.revokeObjectURL(url);
-    } catch (error) { setActionError(error instanceof Error ? error.message : 'Nao foi possivel exportar pagamentos.'); }
+    } catch (error) { setActionError(error instanceof Error ? error.message : 'Não foi possivel exportar pagamentos.'); }
   };
   const linkOrphan = async (event: AdminPaymentEvent) => {
     setOrphanDraft({ event, registrationId: '', reason: '' });
   };
 
   const submitOrphanLink = async () => {
-    if (!orphanDraft?.registrationId.trim() || orphanDraft.reason.trim().length < 5) { setActionError('Informe a inscricao e um motivo com pelo menos 5 caracteres.'); return; }
+    if (!orphanDraft?.registrationId.trim() || orphanDraft.reason.trim().length < 5) { setActionError('Informe a inscrição e um motivo com pelo menos 5 caracteres.'); return; }
     try { await linkAdminOrphanPayment(adminKey, orphanDraft.event.id, orphanDraft.registrationId, orphanDraft.reason); setOrphanEvents((current) => current.filter((item) => item.id !== orphanDraft.event.id)); setOrphanDraft(null); await onRefreshAdminData(); }
-    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel vincular o evento.'); }
+    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possivel vincular o evento.'); }
   };
 
   const openDetails = async (registration: AdminRegistration) => {
     setDetailLoading(true); setActionError('');
     try { setDetails(await getAdminPaymentDetails(adminKey, registration.id)); }
-    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel carregar o pagamento.'); }
+    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possivel carregar o pagamento.'); }
     finally { setDetailLoading(false); }
   };
 
@@ -996,7 +996,7 @@ function PaymentControlPanel({
       setPaymentRows((current) => current.map((item) => item.id === response.registration.id ? response.registration : item));
       setReason('');
       await onRefreshAdminData();
-    } catch (error) { setActionError(error instanceof ApiError ? error.message : 'Nao foi possivel conciliar o pagamento.'); }
+    } catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possivel conciliar o pagamento.'); }
     finally { setDetailLoading(false); }
   };
 
@@ -1016,13 +1016,13 @@ function PaymentControlPanel({
 
       <Panel title="Últimos pagamentos" eyebrow="Controle operacional">
         <div className="mb-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <input value={paymentFilters.q} onChange={(event) => setPaymentFilters({ ...paymentFilters, q: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Atleta, inscricao ou transacao" />
+          <input value={paymentFilters.q} onChange={(event) => setPaymentFilters({ ...paymentFilters, q: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Atleta, inscrição ou transacao" />
           <input value={paymentFilters.method} onChange={(event) => setPaymentFilters({ ...paymentFilters, method: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Metodo: pix, cartao..." />
           <input type="date" value={paymentFilters.dateFrom} onChange={(event) => setPaymentFilters({ ...paymentFilters, dateFrom: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data inicial" />
           <input type="date" value={paymentFilters.dateTo} onChange={(event) => setPaymentFilters({ ...paymentFilters, dateTo: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data final" />
         </div>
         <div className="mb-4 flex flex-wrap gap-2">
-          {([['all','Todos'],['divergent','Divergentes'],['pending','Pendentes'],['expired','Expirados'],['manual','Manuais'],['email','Sem email']] as const).map(([value, label]) => (
+          {([['all', 'Todos'], ['divergent', 'Divergentes'], ['pending', 'Pendentes'], ['expired', 'Expirados'], ['manual', 'Manuais'], ['email', 'Sem email']] as const).map(([value, label]) => (
             <button key={value} type="button" onClick={() => { setFilter(value); setPaymentFilters({ ...paymentFilters, page: '1' }); }} className={`border px-3 py-2 text-xs font-black uppercase ${filter === value ? 'border-brand text-brand' : 'border-white/10 text-zinc-400'}`}>{label}</button>
           ))}
           <button type="button" onClick={() => void exportPayments()} className="ml-auto border border-brand px-3 py-2 text-xs font-black uppercase text-brand"><Download className="mr-1 inline h-3 w-3" /> Exportar</button>
@@ -1052,8 +1052,8 @@ function PaymentControlPanel({
                   <td className="p-3 font-mono font-bold">{currencyFormatter.format(registration.amountCents / 100)}</td>
                   <td className="p-3 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(registration.createdAt))}</td>
                   <td className="p-3 text-xs text-zinc-400">
-                    <p>{registration.gatewayStatus || 'Gateway nao informado'}</p>
-                    <p className="mt-1 uppercase">{registration.paymentMethod || 'Metodo nao informado'}</p>
+                    <p>{registration.gatewayStatus || 'Gateway Não informado'}</p>
+                    <p className="mt-1 uppercase">{registration.paymentMethod || 'Metodo Não informado'}</p>
                     {registration.paidAt && <p className="mt-1 font-mono">Pago: {dateTimeFormatter.format(new Date(registration.paidAt))}</p>}
                     {registration.hasPaymentDivergence && <p className="mt-1 font-black text-red-300">Inconsistência detectada entre pagamento e inscrição.</p>}
                     <button type="button" onClick={() => void openDetails(registration)} className="mt-2 inline-flex items-center gap-1 border border-white/10 px-2 py-1 hover:border-brand hover:text-brand"><Eye className="h-3 w-3" /> Detalhes</button>
@@ -1069,7 +1069,7 @@ function PaymentControlPanel({
           <button type="button" disabled={paymentPagination.page >= paymentPagination.totalPages} onClick={() => setPaymentFilters({ ...paymentFilters, page: String(paymentPagination.page + 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Proxima</button>
         </div>
       </Panel>
-      {orphanEvents.length > 0 && <Panel title="Eventos sem inscricao" eyebrow="Exigem conferencia"><div className="space-y-2">{orphanEvents.slice(0, 20).map((event) => <div key={event.id} className="border border-red-400/20 bg-red-400/5 p-3"><p className="font-bold text-red-200">{event.providerEventId}</p><p className="mt-1 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(event.receivedAt))}</p><pre className="mt-2 max-h-32 overflow-auto text-xs text-zinc-400">{JSON.stringify(event.payload, null, 2)}</pre><button type="button" onClick={() => void linkOrphan(event)} className="mt-2 border border-red-300/30 px-3 py-2 text-xs font-black uppercase text-red-200">Vincular a inscricao</button></div>)}</div></Panel>}
+      {orphanEvents.length > 0 && <Panel title="Eventos sem inscrição" eyebrow="Exigem conferencia"><div className="space-y-2">{orphanEvents.slice(0, 20).map((event) => <div key={event.id} className="border border-red-400/20 bg-red-400/5 p-3"><p className="font-bold text-red-200">{event.providerEventId}</p><p className="mt-1 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(event.receivedAt))}</p><pre className="mt-2 max-h-32 overflow-auto text-xs text-zinc-400">{JSON.stringify(event.payload, null, 2)}</pre><button type="button" onClick={() => void linkOrphan(event)} className="mt-2 border border-red-300/30 px-3 py-2 text-xs font-black uppercase text-red-200">Vincular a inscrição</button></div>)}</div></Panel>}
       {(details || detailLoading || actionError) && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/75">
           <button type="button" aria-label="Fechar" className="absolute inset-0" onClick={() => { setDetails(null); setActionError(''); }} />
@@ -1079,9 +1079,9 @@ function PaymentControlPanel({
             {actionError && <p className="mt-4 border border-red-400/20 bg-red-400/10 p-3 text-red-200">{actionError}</p>}
             {details && <>
               <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <Detail label="Inscricao" value={details.payment.id} /><Detail label="Atleta" value={details.payment.fullName} />
-                <Detail label="Status sistema" value={statusLabels[details.payment.status]} /><Detail label="Status gateway" value={details.payment.gatewayStatus || 'Nao informado'} />
-                <Detail label="Transacao InfinitePay" value={details.payment.gatewayTransactionId || details.payment.providerPaymentId || 'Nao informada'} /><Detail label="Metodo" value={details.payment.paymentMethod || 'Nao informado'} />
+                <Detail label="inscrição" value={details.payment.id} /><Detail label="Atleta" value={details.payment.fullName} />
+                <Detail label="Status sistema" value={statusLabels[details.payment.status]} /><Detail label="Status gateway" value={details.payment.gatewayStatus || 'Não informado'} />
+                <Detail label="Transacao InfinitePay" value={details.payment.gatewayTransactionId || details.payment.providerPaymentId || 'Não informada'} /><Detail label="Metodo" value={details.payment.paymentMethod || 'Não informado'} />
               </div>
               <p className="mb-2 mt-5 text-xs font-black uppercase text-zinc-500">Payload do gateway</p>
               <pre className="max-h-72 overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(details.gatewayPayload, null, 2) || 'Nenhum payload recebido'}</pre>
@@ -1094,16 +1094,16 @@ function PaymentControlPanel({
       )}
       {orphanDraft && (
         <ActionModal
-          title="Vincular evento orfao"
-          description="Informe a inscricao correta e o motivo da vinculacao manual."
+          title="Vincular evento orfão"
+          description="Informe a inscrição correta e o motivo da vinculação manual."
           confirmLabel="Vincular evento"
           confirmDisabled={!orphanDraft.registrationId.trim() || orphanDraft.reason.trim().length < 5}
           onConfirm={() => void submitOrphanLink()}
           onClose={() => setOrphanDraft(null)}
         >
-          <EditInput label="ID da inscricao" value={orphanDraft.registrationId} onChange={(value) => setOrphanDraft({ ...orphanDraft, registrationId: value })} />
+          <EditInput label="ID da inscrição" value={orphanDraft.registrationId} onChange={(value) => setOrphanDraft({ ...orphanDraft, registrationId: value })} />
           <label className="block text-xs font-bold text-zinc-400">
-            Motivo da vinculacao
+            Motivo da vinculação
             <textarea value={orphanDraft.reason} onChange={(event) => setOrphanDraft({ ...orphanDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
           </label>
         </ActionModal>
@@ -1160,7 +1160,7 @@ function OperationControlPanel({
       setOperationRows(refreshed.registrations); setOperationTotals(refreshed.totals); setOperationPagination(refreshed.pagination);
       setQuickActionDraft(null);
       await onRefreshAdminData();
-    } catch (error) { setOperationError(error instanceof ApiError ? error.message : 'Nao foi possivel concluir a operacao.'); }
+    } catch (error) { setOperationError(error instanceof ApiError ? error.message : 'Não foi possível concluir a operação.'); }
     finally { setBusyAction(''); }
   };
 
@@ -1169,7 +1169,7 @@ function OperationControlPanel({
     const registrationId = code.startsWith('funpace:registration:') ? code.slice('funpace:registration:'.length) : code;
     const normalized = normalizeSearch(registrationId);
     const registration = registrations.find((item) => item.id === registrationId || normalizeSearch(item.bibNumber || '') === normalized);
-    if (!registration) { setScanError('Inscricao nao encontrada. Confira o QR ou numero de peito.'); return; }
+    if (!registration) { setScanError('inscrição não encontrada. Confira o QR ou número de peito.'); return; }
     setScanError(''); setScannerOpen(false); onOpenRegistration(registration);
   };
 
@@ -1217,13 +1217,13 @@ function OperationControlPanel({
       {quickActionDraft && (
         <ActionModal
           title={quickActionDraft.action === 'check-in' ? 'Confirmar check-in' : 'Confirmar entrega de kit'}
-          description={`Confirme a operacao para ${quickActionDraft.registration.fullName}.`}
+          description={`Confirme a operação para ${quickActionDraft.registration.fullName}.`}
           confirmLabel={quickActionDraft.action === 'check-in' ? 'Registrar check-in' : 'Registrar entrega'}
           onConfirm={() => void submitQuickAction()}
           onClose={() => setQuickActionDraft(null)}
         >
           <label className="block text-xs font-bold text-zinc-400">
-            Observacao da operacao
+            Observacao da operação
             <textarea value={quickActionDraft.notes} onChange={(event) => setQuickActionDraft({ ...quickActionDraft, notes: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
           </label>
         </ActionModal>
@@ -1244,7 +1244,7 @@ function QrScannerModal({ error, onDetected, onClose }: { error: string; onDetec
     const scanner = new QrScanner(videoRef.current, (result) => onDetectedRef.current(result.data), {
       preferredCamera: 'environment', highlightScanRegion: true, highlightCodeOutline: true, returnDetailedScanResult: true,
     });
-    void scanner.start().catch(() => setCameraError('Nao foi possivel acessar a camera. Use HTTPS, permita a camera ou informe o codigo manualmente.'));
+    void scanner.start().catch(() => setCameraError('Não foi possivel acessar a camera. Use HTTPS, permita a camera ou informe o codigo manualmente.'));
     return () => { scanner.stop(); scanner.destroy(); };
   }, []);
 
@@ -1395,7 +1395,7 @@ function ReportsPanel({
       const response = await fetch(url, { credentials: 'include' });
       if (!response.ok) {
         const payload = await response.json().catch(() => null) as { message?: string } | null;
-        throw new Error(payload?.message || 'Nao foi possivel exportar o relatorio.');
+        throw new Error(payload?.message || 'Não foi possivel exportar o relatorio.');
       }
       const blob = await response.blob();
       const downloadUrl = URL.createObjectURL(blob);
@@ -1405,7 +1405,7 @@ function ReportsPanel({
       link.click();
       URL.revokeObjectURL(downloadUrl);
     } catch (error) {
-      setExportError(error instanceof Error ? error.message : 'Nao foi possivel exportar o relatorio.');
+      setExportError(error instanceof Error ? error.message : 'Não foi possivel exportar o relatorio.');
     }
   };
   const combinedReportFilters = { ...reportFilters, ...exportFilters };
@@ -1721,12 +1721,12 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
   const [auditError, setAuditError] = useState('');
   const [openingRegistrationId, setOpeningRegistrationId] = useState('');
   useEffect(() => {
-    const timeout = window.setTimeout(() => { void getAdminAuditLogs(adminKey, filters).then((response) => { setLogs(response.logs); setPagination(response.pagination); setAuditError(''); }).catch((error) => setAuditError(error instanceof ApiError ? error.message : 'Nao foi possivel carregar a auditoria.')); }, 250);
+    const timeout = window.setTimeout(() => { void getAdminAuditLogs(adminKey, filters).then((response) => { setLogs(response.logs); setPagination(response.pagination); setAuditError(''); }).catch((error) => setAuditError(error instanceof ApiError ? error.message : 'Não foi possivel carregar a auditoria.')); }, 250);
     return () => window.clearTimeout(timeout);
   }, [adminKey, filters.q, filters.action, filters.actor, filters.entityType, filters.dateFrom, filters.dateTo, filters.page, filters.pageSize]);
   const exportAudit = async () => {
-    try { const response = await fetch(getAdminAuditLogsCsvUrl(filters), { credentials: 'include' }); if (!response.ok) throw new Error('Nao foi possivel exportar a auditoria.'); const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-auditoria.csv'; link.click(); URL.revokeObjectURL(url); }
-    catch (error) { setAuditError(error instanceof Error ? error.message : 'Nao foi possivel exportar a auditoria.'); }
+    try { const response = await fetch(getAdminAuditLogsCsvUrl(filters), { credentials: 'include' }); if (!response.ok) throw new Error('Não foi possivel exportar a auditoria.'); const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-auditoria.csv'; link.click(); URL.revokeObjectURL(url); }
+    catch (error) { setAuditError(error instanceof Error ? error.message : 'Não foi possivel exportar a auditoria.'); }
   };
   const openRegistrationFromLog = async (log: AdminAuditLog) => {
     if (log.entityType !== 'registration') return;
@@ -1734,7 +1734,7 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
     if (registration) { onOpenRegistration(registration); return; }
     setOpeningRegistrationId(log.entityId);
     try { const response = await getAdminRegistrationDetails(adminKey, log.entityId); onOpenRegistration(response.registration); }
-    catch (error) { setAuditError(error instanceof ApiError ? error.message : 'Nao foi possivel abrir a inscricao relacionada.'); }
+    catch (error) { setAuditError(error instanceof ApiError ? error.message : 'Não foi possivel abrir a inscrição relacionada.'); }
     finally { setOpeningRegistrationId(''); }
   };
   return (
@@ -1751,7 +1751,7 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
         <input value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Buscar em toda auditoria" />
         <input value={filters.action} onChange={(event) => setFilters({ ...filters, action: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Acao" />
         <input value={filters.actor} onChange={(event) => setFilters({ ...filters, actor: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" placeholder="Ator" />
-        <SelectFilter value={filters.entityType} onChange={(value) => setFilters({ ...filters, entityType: value, page: '1' })} options={[{ value: '', label: 'Todas entidades' }, { value: 'registration', label: 'Inscricao' }, { value: 'payment', label: 'Pagamento' }, { value: 'partnership', label: 'Parceria' }, { value: 'event', label: 'Evento' }, { value: 'distance', label: 'Distancia' }, { value: 'lot', label: 'Lote' }]} />
+        <SelectFilter value={filters.entityType} onChange={(value) => setFilters({ ...filters, entityType: value, page: '1' })} options={[{ value: '', label: 'Todas entidades' }, { value: 'registration', label: 'inscrição' }, { value: 'payment', label: 'Pagamento' }, { value: 'partnership', label: 'Parceria' }, { value: 'event', label: 'Evento' }, { value: 'distance', label: 'Distancia' }, { value: 'lot', label: 'Lote' }]} />
         <input type="date" value={filters.dateFrom} onChange={(event) => setFilters({ ...filters, dateFrom: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data inicial" />
         <input type="date" value={filters.dateTo} onChange={(event) => setFilters({ ...filters, dateTo: event.target.value, page: '1' })} className="min-h-11 border border-white/10 bg-black px-3 text-white" aria-label="Data final" />
         <button type="button" onClick={() => void exportAudit()} className="min-h-11 border border-brand px-3 text-xs font-black uppercase text-brand">Exportar CSV</button>
@@ -1793,7 +1793,7 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
         </div>
       )}
       <div className="flex items-center justify-between border-t border-white/10 p-4 text-xs text-zinc-400"><button disabled={pagination.page <= 1} onClick={() => setFilters({ ...filters, page: String(pagination.page - 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Anterior</button><span>{pagination.total} logs · pagina {pagination.page}/{pagination.totalPages}</span><button disabled={pagination.page >= pagination.totalPages} onClick={() => setFilters({ ...filters, page: String(pagination.page + 1) })} className="border border-white/10 px-3 py-2 disabled:opacity-30">Proxima</button></div>
-      {selectedLog && <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4"><div className="w-full max-w-3xl border border-white/10 bg-zinc-950 p-5"><div className="flex items-start justify-between gap-3"><div><h3 className="text-xl font-black">{auditActionLabel(selectedLog.action)}</h3><p className="mt-1 text-sm text-zinc-400">{summarizeAuditPayload(selectedLog.payload)}</p></div><button onClick={() => setSelectedLog(null)}><X /></button></div><div className="mt-4 grid gap-3 border border-white/10 bg-black/30 p-4 text-xs text-zinc-400 sm:grid-cols-2"><div><p className="font-bold uppercase tracking-widest text-zinc-500">Ator</p><p className="mt-1 text-sm text-zinc-200">{selectedLog.actor}</p><p className="mt-1 uppercase tracking-widest text-zinc-500">{selectedLog.actorRole || 'sistema'}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Data</p><p className="mt-1 font-mono text-sm text-zinc-200">{dateTimeFormatter.format(new Date(selectedLog.createdAt))}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Entidade</p><p className="mt-1 text-sm text-zinc-200">{auditEntityLabel(selectedLog.entityType)}</p><p className="mt-1 font-mono text-[11px] text-zinc-500">{selectedLog.entityId}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Origem</p><p className="mt-1 font-mono text-sm text-zinc-200">{selectedLog.ipAddress || 'IP n/a'}</p><p className="mt-1 font-mono text-[11px] text-zinc-500">{selectedLog.sessionId || 'sessao n/a'}</p></div></div>{selectedLog.entityType === 'registration' && <div className="mt-4 flex justify-end"><button type="button" onClick={() => void openRegistrationFromLog(selectedLog)} className="border border-brand/30 px-3 py-2 text-xs font-black uppercase text-brand">{openingRegistrationId === selectedLog.entityId ? 'Abrindo inscricao...' : 'Abrir inscricao relacionada'}</button></div>}<pre className="mt-4 max-h-[60vh] overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(selectedLog.payload, null, 2)}</pre></div></div>}
+      {selectedLog && <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4"><div className="w-full max-w-3xl border border-white/10 bg-zinc-950 p-5"><div className="flex items-start justify-between gap-3"><div><h3 className="text-xl font-black">{auditActionLabel(selectedLog.action)}</h3><p className="mt-1 text-sm text-zinc-400">{summarizeAuditPayload(selectedLog.payload)}</p></div><button onClick={() => setSelectedLog(null)}><X /></button></div><div className="mt-4 grid gap-3 border border-white/10 bg-black/30 p-4 text-xs text-zinc-400 sm:grid-cols-2"><div><p className="font-bold uppercase tracking-widest text-zinc-500">Ator</p><p className="mt-1 text-sm text-zinc-200">{selectedLog.actor}</p><p className="mt-1 uppercase tracking-widest text-zinc-500">{selectedLog.actorRole || 'sistema'}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Data</p><p className="mt-1 font-mono text-sm text-zinc-200">{dateTimeFormatter.format(new Date(selectedLog.createdAt))}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Entidade</p><p className="mt-1 text-sm text-zinc-200">{auditEntityLabel(selectedLog.entityType)}</p><p className="mt-1 font-mono text-[11px] text-zinc-500">{selectedLog.entityId}</p></div><div><p className="font-bold uppercase tracking-widest text-zinc-500">Origem</p><p className="mt-1 font-mono text-sm text-zinc-200">{selectedLog.ipAddress || 'IP n/a'}</p><p className="mt-1 font-mono text-[11px] text-zinc-500">{selectedLog.sessionId || 'sessao n/a'}</p></div></div>{selectedLog.entityType === 'registration' && <div className="mt-4 flex justify-end"><button type="button" onClick={() => void openRegistrationFromLog(selectedLog)} className="border border-brand/30 px-3 py-2 text-xs font-black uppercase text-brand">{openingRegistrationId === selectedLog.entityId ? 'Abrindo inscrição...' : 'Abrir inscrição relacionada'}</button></div>}<pre className="mt-4 max-h-[60vh] overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(selectedLog.payload, null, 2)}</pre></div></div>}
     </section>
   );
 }
@@ -1804,7 +1804,7 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
   const [saveDraft, setSaveDraft] = useState<{ kind: 'event' | 'distance' | 'lot'; id?: string; reason: string } | null>(null);
   const [checkLoading, setCheckLoading] = useState<'email' | 'gateway' | ''>('');
   const [checkResult, setCheckResult] = useState<{ target: 'email' | 'gateway'; summary: string; ok: boolean; checks: Array<{ label: string; ok: boolean; detail: string }> } | null>(null);
-  const load = () => getAdminEventConfig(adminKey).then(setConfig).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Nao foi possivel carregar o evento.'));
+  const load = () => getAdminEventConfig(adminKey).then(setConfig).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Não foi possivel carregar o evento.'));
   useEffect(() => { void load(); }, [adminKey]);
   if (!config) return <section className="mt-4 border border-white/10 bg-zinc-950 p-6 text-zinc-400">{message || 'Carregando configuracao...'}</section>;
   const availabilityLabel = {
@@ -1815,9 +1815,9 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
   const now = Date.now();
   const eventAlerts = [
     config.event.status === 'published' && !config.health.database.ok ? { key: 'database', tone: 'warning' as const, title: 'Banco indisponivel', detail: config.health.database.issue || 'Sem conexao valida com o banco principal.' } : null,
-    config.event.status === 'published' && !config.health.email.configured ? { key: 'email', tone: 'warning' as const, title: 'Email pendente', detail: 'O evento esta publicado, mas o email transacional nao esta configurado.' } : null,
-    config.event.status === 'published' && !config.health.gateway.configured ? { key: 'gateway', tone: 'warning' as const, title: 'Gateway pendente', detail: 'O evento esta publicado, mas o gateway nao esta pronto para gerar vendas.' } : null,
-    config.event.status === 'published' && !config.health.sales.activeLotId ? { key: 'active-lot', tone: 'warning' as const, title: 'Sem lote ativo', detail: 'Nao existe lote ativo para um evento publicado.' } : null,
+    config.event.status === 'published' && !config.health.email.configured ? { key: 'email', tone: 'warning' as const, title: 'Email pendente', detail: 'O evento esta publicado, mas o email transacional Não esta configurado.' } : null,
+    config.event.status === 'published' && !config.health.gateway.configured ? { key: 'gateway', tone: 'warning' as const, title: 'Gateway pendente', detail: 'O evento esta publicado, mas o gateway Não esta pronto para gerar vendas.' } : null,
+    config.event.status === 'published' && !config.health.sales.activeLotId ? { key: 'active-lot', tone: 'warning' as const, title: 'Sem lote ativo', detail: 'Não existe lote ativo para um evento publicado.' } : null,
     config.event.status === 'published' && config.health.sales.activeDistances === 0 ? { key: 'distances', tone: 'warning' as const, title: 'Sem distancias ativas', detail: 'Ative pelo menos uma distancia para liberar inscricoes.' } : null,
     config.lots.some((lot) => lot.status === 'active' && new Date(lot.endsAt).getTime() < now) ? { key: 'expired-lot', tone: 'warning' as const, title: 'Lote ativo vencido', detail: 'Existe lote ativo com encerramento no passado.' } : null,
     config.lots.some((lot) => new Date(lot.startsAt).getTime() >= new Date(lot.endsAt).getTime()) ? { key: 'invalid-window', tone: 'warning' as const, title: 'Janela de venda invalida', detail: 'Um ou mais lotes possuem inicio maior ou igual ao fim.' } : null,
@@ -1864,7 +1864,7 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
   return <section className="mt-4 space-y-4">
     {message && <p className="border border-brand/20 bg-brand/10 p-3 text-sm text-brand">{message}</p>}
     {eventAlerts.length > 0 && <Panel title="Alertas automaticos" eyebrow="Prioridade"><div className="grid gap-3 lg:grid-cols-2">{eventAlerts.map((alert) => <div key={alert.key} className="border border-amber-400/20 bg-amber-400/10 p-4"><p className="text-xs font-black uppercase tracking-widest text-amber-300">{alert.title}</p><p className="mt-2 text-sm text-amber-50">{alert.detail}</p></div>)}</div></Panel>}
-    <Panel title="Saude do sistema" eyebrow="Operacao">
+    <Panel title="Saude do sistema" eyebrow="operação">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <MetricBox label="Banco" value={config.health.database.ok ? 'Online' : 'Falha'} detail={config.health.database.provider} tone={config.health.database.ok ? 'default' : 'warning'} />
         <MetricBox label="Email" value={config.health.email.configured ? 'Configurado' : 'Pendente'} detail={config.health.email.provider} tone={config.health.email.configured ? 'default' : 'warning'} />
@@ -1884,9 +1884,9 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
           <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Diagnostico</p>
           <div className="mt-3 space-y-2">
             {!config.health.database.ok && <p className="text-amber-300">Banco indisponivel: {config.health.database.issue || 'sem detalhes'}</p>}
-            {!config.health.email.configured && <p className="text-amber-300">Email transacional nao configurado.</p>}
+            {!config.health.email.configured && <p className="text-amber-300">Email transacional Não configurado.</p>}
             {!config.health.gateway.configured && <p className="text-amber-300">Gateway sem provider ou handle configurado.</p>}
-            {config.health.database.ok && config.health.email.configured && config.health.gateway.configured && <p className="text-brand">Servicos principais configurados para operacao.</p>}
+            {config.health.database.ok && config.health.email.configured && config.health.gateway.configured && <p className="text-brand">Servicos principais configurados para operação.</p>}
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
             <button type="button" onClick={() => void runCheck('email')} disabled={checkLoading !== ''} className="border border-brand px-3 py-2 text-xs font-black uppercase text-brand disabled:opacity-50">{checkLoading === 'email' ? 'Validando email...' : 'Validar email'}</button>
@@ -2197,7 +2197,7 @@ function ActionModal({
 function OperationalQr({ registrationId }: { registrationId: string }) {
   const [dataUrl, setDataUrl] = useState('');
   useEffect(() => { void QRCode.toDataURL(`funpace:registration:${registrationId}`, { width: 320, margin: 2, color: { dark: '#000000', light: '#d7ff00' } }).then(setDataUrl); }, [registrationId]);
-  return <div className="flex aspect-square items-center justify-center border border-white/10 bg-brand p-3">{dataUrl ? <img src={dataUrl} alt={`QR Code da inscricao ${registrationId}`} className="h-full w-full" /> : <Loader2 className="h-8 w-8 animate-spin text-black" />}</div>;
+  return <div className="flex aspect-square items-center justify-center border border-white/10 bg-brand p-3">{dataUrl ? <img src={dataUrl} alt={`QR Code da inscrição ${registrationId}`} className="h-full w-full" /> : <Loader2 className="h-8 w-8 animate-spin text-black" />}</div>;
 }
 
 function AthleteDrawer({
@@ -2257,14 +2257,14 @@ function AthleteDrawer({
 
         <div className="grid gap-3 sm:grid-cols-2">
           <Detail label="CPF" value={registration.cpfMasked} />
-          <Detail label="Nascimento" value={registration.birthDate ? formatDateOnly(registration.birthDate) : 'Nao informado'} />
-          <Detail label="Idade" value={registration.age !== null ? `${registration.age} anos` : 'Nao informada'} />
+          <Detail label="Nascimento" value={registration.birthDate ? formatDateOnly(registration.birthDate) : 'Não informado'} />
+          <Detail label="Idade" value={registration.age !== null ? `${registration.age} anos` : 'Não informada'} />
           <Detail label="Sexo" value={genderLabel(registration.gender)} />
           <Detail label="Telefone" value={registration.phone} />
           <Detail label="Email" value={registration.email} />
-          <Detail label="Cidade" value={registration.city || 'Nao coletada'} />
-          <Detail label="Estado" value={registration.state || 'Nao coletado'} />
-          <Detail label="Equipe" value={registration.team || 'Nao coletada'} />
+          <Detail label="Cidade" value={registration.city || 'Não coletada'} />
+          <Detail label="Estado" value={registration.state || 'Não coletado'} />
+          <Detail label="Equipe" value={registration.team || 'Não coletada'} />
           <Detail label="Distancia" value={registration.distance} />
           <Detail label="Lote" value={registration.lot} />
           <Detail label="Numero de peito" value={registration.bibNumber || 'A definir'} />
@@ -2283,7 +2283,7 @@ function AthleteDrawer({
               <PaymentStatus status={registration.status} />
             </div>
             <p className="mt-4 font-mono text-2xl font-black">{currencyFormatter.format(registration.amountCents / 100)}</p>
-            <p className="mt-2 text-sm text-zinc-400">Inscricao criada em {dateTimeFormatter.format(createdAt)}</p>
+            <p className="mt-2 text-sm text-zinc-400">inscrição criada em {dateTimeFormatter.format(createdAt)}</p>
           </div>
         </div>
 
@@ -2292,9 +2292,9 @@ function AthleteDrawer({
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <Detail label={details.partnerHistory.partnerType === 'influencer' ? 'Influenciador responsavel' : 'Assessoria responsavel'} value={details.partnerHistory.partnerName} />
             <Detail label="Percentual aplicado" value={`${details.partnerHistory.discountPercentage}%`} />
-            <Detail label="Link utilizado" value={details.partnerHistory.partnerLink || 'Nao registrado'} />
+            <Detail label="Link utilizado" value={details.partnerHistory.partnerLink || 'Não registrado'} />
             <Detail label="Identificada em" value={dateTimeFormatter.format(new Date(details.partnerHistory.identifiedAt))} />
-            <Detail label="Pagamento confirmado" value={details.partnerHistory.paidAt ? dateTimeFormatter.format(new Date(details.partnerHistory.paidAt)) : 'Ainda nao confirmado'} />
+            <Detail label="Pagamento confirmado" value={details.partnerHistory.paidAt ? dateTimeFormatter.format(new Date(details.partnerHistory.paidAt)) : 'Ainda Não confirmado'} />
             <Detail label="Usuario responsavel" value={details.partnerHistory.responsibleUser || 'Processo automatico'} />
           </div>
           <p className="mt-4 text-[10px] font-black uppercase tracking-widest text-zinc-600">Snapshot protegido contra alteracoes apos a confirmacao</p>
@@ -2329,7 +2329,7 @@ function AthleteDrawer({
             : <button type="button" disabled title="Disponivel somente apos a confirmacao do pagamento" className="cursor-not-allowed border border-white/10 px-3 py-2 text-xs font-black uppercase text-zinc-600">Email disponivel apos pagamento</button>)}
           {canHandleOperation && registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
           {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
-          {canCancelRegistration && !['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscricao</button>}
+          {canCancelRegistration && !['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscrição</button>}
         </div>
 
         {!canOperate && (
@@ -2701,7 +2701,7 @@ function genderLabel(gender: AdminRegistration['gender']) {
     male: 'Masculino',
   };
 
-  return gender ? labels[gender] || gender : 'Nao informado';
+  return gender ? labels[gender] || gender : 'Não informado';
 }
 
 function auditActionLabel(action: string) {
@@ -2709,14 +2709,14 @@ function auditActionLabel(action: string) {
     'registration.check_in': 'Check-in registrado',
     'registration.kit_delivered': 'Kit entregue',
     'registration.updated': 'Cadastro atualizado',
-    'registration.cancel': 'Inscricao cancelada',
+    'registration.cancel': 'inscrição cancelada',
     'registration.undo-check-in': 'Check-in desfeito',
     'registration.undo-kit': 'Entrega de kit desfeita',
     'registration.bib_assigned': 'Numero de peito atribuido',
     'payment.webhook_processed': 'Webhook de pagamento processado',
     'payment.amount_mismatch': 'Divergencia de valor',
     'payment.manual_reconciled': 'Pagamento conciliado manualmente',
-    'payment.orphan_received': 'Evento de pagamento sem inscricao',
+    'payment.orphan_received': 'Evento de pagamento sem inscrição',
     'payment.orphan_linked': 'Evento de pagamento vinculado',
     'email.confirmation.attempted': 'Envio de confirmacao iniciado',
     'email.confirmation.sent': 'Confirmacao enviada',
@@ -2724,14 +2724,14 @@ function auditActionLabel(action: string) {
     'email.confirmation.skipped': 'Confirmacao ignorada',
     'partner.link_accessed': 'Link da assessoria acessado',
     'partner.link_rejected': 'Acesso ao link rejeitado',
-    'registration.started': 'Inscricao iniciada pela assessoria',
+    'registration.started': 'inscrição iniciada pela assessoria',
     'discount.applied': 'Desconto da assessoria aplicado',
     'payment.started': 'Pagamento iniciado',
     'webhook.received': 'Webhook recebido',
     'payment.approved': 'Pagamento aprovado',
     'payment.declined': 'Pagamento recusado',
     'payment.refunded': 'Pagamento reembolsado',
-    'registration.cancelled': 'Inscricao cancelada',
+    'registration.cancelled': 'inscrição cancelada',
     'consistency.issue_detected': 'Inconsistencia de parceiro detectada',
   };
 
@@ -2740,7 +2740,7 @@ function auditActionLabel(action: string) {
 
 function auditEntityLabel(entityType: string) {
   const labels: Record<string, string> = {
-    registration: 'Inscricao',
+    registration: 'inscrição',
     payment: 'Pagamento',
     partnership: 'Parceria',
     event: 'Evento',

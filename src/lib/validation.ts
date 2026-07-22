@@ -66,31 +66,31 @@ export function validateRegistration(data: RegistrationFormData) {
   }
 
   if (!emailIsValid) {
-    errors.email = 'Informe um e-mail valido.';
+    errors.email = 'Informe um e-mail válido.';
   }
 
   if (!isValidCpf(data.cpf)) {
-    errors.cpf = 'Informe um CPF valido.';
+    errors.cpf = 'Informe um CPF válido.';
   }
 
   if (phoneDigits.length < 10) {
-    errors.phone = 'Informe um WhatsApp valido com DDD.';
+    errors.phone = 'Informe um WhatsApp válido com DDD.';
   }
 
-  if (birthDate && (Number.isNaN(birthDate.getTime()) || birthDate > today || birthDate.getFullYear() < today.getFullYear() - 100)) errors.birthDate = 'Informe uma data de nascimento valida.';
+  if (birthDate && (Number.isNaN(birthDate.getTime()) || birthDate > today || birthDate.getFullYear() < today.getFullYear() - 100)) errors.birthDate = 'Informe uma data de nascimento válida.';
   if (data.emergencyContactName.trim() && data.emergencyContactName.trim().split(/\s+/).filter(Boolean).length < 2) errors.emergencyContactName = 'Informe nome e sobrenome do contato.';
-  if (emergencyPhoneDigits.length > 0 && emergencyPhoneDigits.length < 10) errors.emergencyContactPhone = 'Informe um telefone de emergencia valido.';
+  if (emergencyPhoneDigits.length > 0 && emergencyPhoneDigits.length < 10) errors.emergencyContactPhone = 'Informe um telefone de emergência válido.';
 
   if (!data.gender || !allowedGenders.has(data.gender)) {
     errors.gender = 'Selecione feminino ou masculino.';
   }
 
   if (!allowedDistances.has(data.distance)) {
-    errors.distance = 'Selecione uma distancia valida.';
+    errors.distance = 'Selecione uma distancia válida.';
   }
 
   if (!allowedShirtSizes.has(data.shirtSize)) {
-    errors.shirtSize = 'Selecione um tamanho de camisa valido.';
+    errors.shirtSize = 'Selecione um tamanho de camisa válido.';
   }
 
   if (requireRegistrationAcceptances) {

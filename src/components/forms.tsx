@@ -76,7 +76,7 @@ export function RegistrationSection() {
     || availability?.lots[0];
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
   const isSubmitting = status === 'submitting';
-  const checkoutSupportUrl = getWhatsAppUrl('Ola, tentei fazer minha inscricao na FunPace Run, mas nao consegui abrir o checkout.');
+  const checkoutSupportUrl = getWhatsAppUrl('Olá, tentei fazer minha inscrição na FunPace Run, mas não consegui abrir o checkout.');
 
   useEffect(() => {
     let isMounted = true;
@@ -164,14 +164,14 @@ export function RegistrationSection() {
       }
 
       setStatus('api_error');
-      setApiMessage(response.message || 'Inscricao criada, mas o checkout nao retornou uma URL de pagamento.');
+      setApiMessage(response.message || 'Inscrição criada, mas o checkout não retornou uma URL de pagamento.');
     } catch (error) {
       setStatus('api_error');
 
       if (error instanceof ApiError) {
         setApiMessage(
           error.status && error.status >= 500
-            ? 'Nao conseguimos abrir o checkout agora. Tente novamente em alguns instantes ou fale com o suporte pelo WhatsApp.'
+            ? 'Não conseguimos abrir o checkout agora. Tente novamente em alguns instantes ou fale com o suporte pelo WhatsApp.'
             : error.message,
         );
 

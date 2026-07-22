@@ -17,7 +17,7 @@ export function buildPartnerLink(origin: string, slug: string) {
 
 export async function copyPartnerLink(link: string, clipboard?: Pick<Clipboard, 'writeText'>) {
   const target = clipboard ?? globalThis.navigator?.clipboard;
-  if (!target) throw new Error('A area de transferencia nao esta disponivel.');
+  if (!target) throw new Error('A área de transferência não está disponível.');
   await target.writeText(link);
 }
 export const partnerTypeOptions: ReadonlyArray<{ value: PartnerType; label: string }> = [
@@ -31,6 +31,6 @@ export const partnerTypeLabels: Record<PartnerType, string> = {
 };
 
 export const partnerTypeBenefitLabels: Record<PartnerType, string> = {
-  sports_advisory: 'Inscricao atraves da assessoria',
-  influencer: 'Beneficio do influenciador',
+  sports_advisory: 'Inscrição através da assessoria',
+  influencer: 'Benefício do influenciador',
 };

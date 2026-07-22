@@ -137,21 +137,21 @@ function updateMetrics(status: number | null, durationMs: number, failed: boolea
 
 function getFriendlyHttpError(status: number, payload: ApiErrorPayload | null) {
   const fallback: Record<number, string> = {
-    400: 'Os dados enviados sao invalidos.',
-    401: 'Sua sessao expirou. Faca login novamente.',
-    403: 'Voce nao possui permissao para esta acao.',
-    404: 'Servico nao encontrado.',
-    409: 'Ja existe uma inscricao ativa para este CPF ou as vagas estao indisponiveis.',
-    415: 'Formato da requisicao invalido.',
-    422: 'Existem campos invalidos. Confira os dados destacados.',
+    400: 'Os dados enviados são inválidos.',
+    401: 'Sua sessão expirou. Faca login novamente.',
+    403: 'Você não possui permissão para esta ação.',
+    404: 'Serviço não encontrado.',
+    409: 'Ja existe uma inscrição ativa para este CPF ou as vagas estão indisponiveis.',
+    415: 'Formato da requisição inválido.',
+    422: 'Existem campos inválidos. Confira os dados destacados.',
     429: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.',
     500: 'Erro interno. Nossa equipe ja foi notificada.',
-    502: 'Nao foi possivel criar o checkout no gateway. Tente novamente em instantes.',
-    503: 'Servico temporariamente indisponivel. Tente novamente em instantes.',
-    504: 'A conexao demorou mais do que o esperado. Verifique sua internet.',
+    502: 'Não foi possivel criar o checkout no gateway. Tente novamente em instantes.',
+    503: 'Serviço temporariamente indisponivel. Tente novamente em instantes.',
+    504: 'A conexão demorou mais do que o esperado. Verifique sua internet.',
   };
 
-  return payload?.message || fallback[status] || 'Nao foi possivel concluir a solicitacao.';
+  return payload?.message || fallback[status] || 'Não foi possivel concluir a solicitacao.';
 }
 
 function isRetryableStatus(status: number) {
@@ -246,8 +246,8 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
       updateMetrics(null, durationMs, true);
       lastError = new ApiError(
         aborted
-          ? 'A conexao demorou mais do que o esperado. Verifique sua internet.'
-          : 'Nao foi possivel conectar ao servidor. Tente novamente em alguns instantes.',
+          ? 'A conexão demorou mais do que o esperado. Verifique sua internet.'
+          : 'Não foi possível conectar ao servidor. Tente novamente em alguns instantes.',
         {
           code: aborted ? 'timeout' : 'network_error',
           retryable: true,
