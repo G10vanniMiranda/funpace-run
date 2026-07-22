@@ -36,18 +36,18 @@ export function PartnerLandingPage({ slug }: { slug: string }) {
         </div>
         <p className="mt-7 text-xs font-black uppercase tracking-[0.28em] text-brand">Parceiros FunPace</p>
         <h1 className="mt-3 font-display text-4xl font-black uppercase leading-none tracking-tighter sm:text-5xl">
-          {error ? 'Link indisponivel' : 'Beneficio identificado'}
+          {error ? 'Link indisponível' : 'Benefício identificado'}
         </h1>
         <p className="mx-auto mt-5 max-w-md text-sm leading-relaxed text-zinc-400">
-          {error || 'Estamos validando seu parceiro e preparando a inscricao com o desconto automatico.'}
+          {error || 'Estamos validando seu parceiro e preparando a inscrição com o desconto automático.'}
         </p>
         {error ? (
           <a href="/#register" className="mt-8 inline-flex min-h-12 w-full items-center justify-center gap-2 bg-brand px-5 text-xs font-black uppercase tracking-widest text-black hover:bg-white">
-            Continuar sem beneficio <ArrowRight className="h-4 w-4" />
+            Continuar sem benefício <ArrowRight className="h-4 w-4" />
           </a>
         ) : (
           <div className="mt-8 flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-500">
-            <ShieldCheck className="h-4 w-4 text-brand" /> Validacao segura no servidor
+            <ShieldCheck className="h-4 w-4 text-brand" /> Validação segura no servidor
           </div>
         )}
       </section>
