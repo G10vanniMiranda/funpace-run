@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ArrowRight, Loader2, ShieldCheck, Users } from 'lucide-react';
 import { activatePartnerLink, ApiError } from '../lib/api';
+import { buildPartnerRegistrationUrl } from '../lib/partners';
 
 function getPartnerLinkErrorMessage(error: unknown) {
   if (!(error instanceof ApiError)) {
@@ -20,7 +21,7 @@ export function PartnerLandingPage({ slug }: { slug: string }) {
   useEffect(() => {
     let active = true;
     void activatePartnerLink(slug)
-      .then(() => { if (active) window.location.replace('/#register'); })
+      .then(() => { if (active) window.location.replace(buildPartnerRegistrationUrl()); })
       .catch((requestError) => {
         if (active) setError(getPartnerLinkErrorMessage(requestError));
       });

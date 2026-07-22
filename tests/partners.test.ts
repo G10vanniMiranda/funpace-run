@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizePartnerSlug, validatePartnerInput } from '../server/partner-management.js';
-import { buildPartnerLink, copyPartnerLink, partnerTypeBenefitLabels, partnerTypeLabels, slugifyPartnerName } from '../src/lib/partners.js';
+import { buildPartnerLink, buildPartnerRegistrationUrl, copyPartnerLink, hasPartnerActivationMarker, partnerTypeBenefitLabels, partnerTypeLabels, slugifyPartnerName } from '../src/lib/partners.js';
 import { calculatePartnerPricing } from '../server/partner-discount.js';
 import { signPartnerSession, verifyPartnerSession } from '../server/partner-session.js';
 import { getPartnerAuditEventTitle, getPartnerEntityLabel } from '../server/partner-audit-labels.js';
@@ -98,4 +98,11 @@ test('builds and copies the exclusive partner link', async () => {
   await copyPartnerLink(link, { writeText: async (value) => { calls.push(value); } });
   assert.equal(link, 'https://funpace.club/p/runners-club');
   assert.deepEqual(calls, [link]);
+});
+
+test('only preserves a partner session after the explicit partner-link handoff', () => {
+  assert.equal(buildPartnerRegistrationUrl(), '/?partner=active#register');
+  assert.equal(hasPartnerActivationMarker('?partner=active'), true);
+  assert.equal(hasPartnerActivationMarker(''), false);
+  assert.equal(hasPartnerActivationMarker('?partner=other'), false);
 });

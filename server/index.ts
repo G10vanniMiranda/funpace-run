@@ -104,7 +104,10 @@ const adminSessionTtlSeconds = Math.max(Number(process.env.ADMIN_SESSION_TTL_SEC
 const adminCookieName = 'funpace_admin_session';
 const partnerCookieName = 'funpace_partner_session';
 const partnerSessionSecret = process.env.PARTNER_SESSION_SECRET || adminSessionSecret;
-const partnerSessionTtlSeconds = 24 * 60 * 60;
+const partnerSessionTtlInput = Number(process.env.PARTNER_SESSION_TTL_SECONDS || 30 * 60);
+const partnerSessionTtlSeconds = Number.isFinite(partnerSessionTtlInput)
+  ? Math.min(Math.max(Math.trunc(partnerSessionTtlInput), 5 * 60), 60 * 60)
+  : 30 * 60;
 type AdminRole = 'administrator' | 'finance' | 'operation';
 const isProduction = process.env.NODE_ENV === 'production';
 const pendingPaymentTtlMinutesInput = Number(process.env.PENDING_PAYMENT_TTL_MINUTES || 30);
@@ -141,6 +144,13 @@ function setCors(req: IncomingMessage, res: ServerResponse) {
 function json(res: ServerResponse, statusCode: number, payload: unknown) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(payload));
+}
+
+function setPartnerResponseCacheHeaders(res: ServerResponse) {
+  res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+  const vary = String(res.getHeader('Vary') || '').split(',').map((item) => item.trim()).filter(Boolean);
+  if (!vary.some((item) => item.toLowerCase() === 'cookie')) vary.push('Cookie');
+  res.setHeader('Vary', vary.join(', '));
 }
 
 function createErrorId() {
@@ -1341,6 +1351,7 @@ function toPublicPartnerContext(context: NonNullable<ReturnType<typeof resolvePu
 }
 
 async function handleActivatePartnerLink(req: IncomingMessage, res: ServerResponse, rawSlug: string) {
+  setPartnerResponseCacheHeaders(res);
   if (!requireAdminDatabase(res)) return;
   const slug = normalizePartnerSlug(rawSlug);
   const database = await transaction((current) => current, { persist: false, scope: 'availability' });
@@ -1399,6 +1410,7 @@ async function handleActivatePartnerLink(req: IncomingMessage, res: ServerRespon
 }
 
 async function handlePartnerSession(req: IncomingMessage, res: ServerResponse) {
+  setPartnerResponseCacheHeaders(res);
   if (!requireAdminDatabase(res)) return;
   const session = readPartnerSession(req);
   if (!session) { json(res, 200, { partner: null }); return; }
@@ -1409,6 +1421,12 @@ async function handlePartnerSession(req: IncomingMessage, res: ServerResponse) {
     json(res, 200, { partner: null }); return;
   }
   json(res, 200, { partner: toPublicPartnerContext(context) });
+}
+
+function handleClearPartnerSession(res: ServerResponse) {
+  setPartnerResponseCacheHeaders(res);
+  res.setHeader('Set-Cookie', buildPartnerCookie('', 0));
+  json(res, 200, { partner: null });
 }
 
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
@@ -1465,7 +1483,8 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   }
 
   const hash = cpfHash(payload.cpf);
-  const partnerSession = readPartnerSession(req);
+  const presentedPartnerSession = readPartnerSession(req);
+  const partnerSession = parsedBody.partnerBenefitRequested === true ? presentedPartnerSession : null;
 
   logStage('registration_persist_started', { databaseProvider: usesPostgresDatabase() ? 'postgres' : 'json' });
   let response: PendingCheckout;
@@ -1809,6 +1828,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     checkoutStatus: response.checkoutStatus,
   });
   logRequest(req, statusCode, response.registrationId ? 'registration_processed' : 'registration_rejected');
+  if (presentedPartnerSession) res.setHeader('Set-Cookie', buildPartnerCookie('', 0));
   json(res, statusCode, payloadResponse);
 
   // The durable outbox is created before the response. External I/O starts only
@@ -4029,6 +4049,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     }
 
     if (req.method === 'GET' && url.pathname === '/api/partner-session') { await handlePartnerSession(req, res); return; }
+    if (req.method === 'DELETE' && url.pathname === '/api/partner-session') { handleClearPartnerSession(res); return; }
     const partnerLinkActivation = url.pathname.match(/^\/api\/partners\/resolve\/([^/]+)$/);
     if (req.method === 'POST' && partnerLinkActivation) {
       await handleActivatePartnerLink(req, res, decodeURIComponent(partnerLinkActivation[1])); return;

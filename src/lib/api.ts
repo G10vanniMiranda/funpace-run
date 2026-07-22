@@ -301,6 +301,12 @@ export function getPartnerSession() {
   return apiFetch<PublicPartnerSessionResponse>('/api/partner-session', { cache: 'no-store', retry: false });
 }
 
+export function clearPartnerSession() {
+  return apiFetch<PublicPartnerSessionResponse>('/api/partner-session', {
+    method: 'DELETE', cache: 'no-store', retry: false,
+  });
+}
+
 export function getRegistrationStatus(registrationId: string) {
   return apiFetch<RegistrationStatusResponse>(`/api/registrations/${encodeURIComponent(registrationId)}`, {
     retry: true,

@@ -1,5 +1,16 @@
 import type { PartnerType } from '../types/partner';
 
+export const partnerActivationQueryParam = 'partner';
+export const partnerActivationQueryValue = 'active';
+
+export function buildPartnerRegistrationUrl() {
+  return `/?${partnerActivationQueryParam}=${partnerActivationQueryValue}#register`;
+}
+
+export function hasPartnerActivationMarker(search: string) {
+  return new URLSearchParams(search).get(partnerActivationQueryParam) === partnerActivationQueryValue;
+}
+
 export function slugifyPartnerName(value: string) {
   return value
     .normalize('NFD')

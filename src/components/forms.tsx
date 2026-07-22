@@ -3,8 +3,8 @@ import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, ShieldCheck, Us
 import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
-import { ApiError, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
-import { partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
+import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
+import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
 import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
@@ -69,6 +69,8 @@ export function RegistrationSection() {
   const [registrationId, setRegistrationId] = useState('');
   const [availability, setAvailability] = useState<AvailabilityResponse | null>(null);
   const [partnerContext, setPartnerContext] = useState<PublicPartnerContext | null>(null);
+  const [clearingPartner, setClearingPartner] = useState(false);
+  const [partnerActionMessage, setPartnerActionMessage] = useState('');
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [showSlowCheckoutHint, setShowSlowCheckoutHint] = useState(false);
   const activeLot = availability?.lots.find((lot) => lot.name === eventInfo.currentLot)
@@ -100,11 +102,33 @@ export function RegistrationSection() {
 
   useEffect(() => {
     let isMounted = true;
-    getPartnerSession()
-      .then((response) => { if (isMounted) setPartnerContext(response.partner); })
-      .catch(() => { if (isMounted) setPartnerContext(null); });
+    const activatedFromPartnerLink = hasPartnerActivationMarker(window.location.search);
+    const request = activatedFromPartnerLink ? getPartnerSession() : clearPartnerSession();
+
+    request
+      .then((response) => { if (isMounted) setPartnerContext(activatedFromPartnerLink ? response.partner : null); })
+      .catch(() => { if (isMounted) setPartnerContext(null); })
+      .finally(() => {
+        if (!activatedFromPartnerLink) return;
+        const url = new URL(window.location.href);
+        url.searchParams.delete(partnerActivationQueryParam);
+        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+      });
     return () => { isMounted = false; };
   }, []);
+
+  const removePartnerBenefit = async () => {
+    setClearingPartner(true);
+    setPartnerActionMessage('');
+    try {
+      await clearPartnerSession();
+      setPartnerContext(null);
+    } catch {
+      setPartnerActionMessage('NÃ£o foi possÃ­vel remover o benefÃ­cio agora. Tente novamente.');
+    } finally {
+      setClearingPartner(false);
+    }
+  };
 
   useEffect(() => {
     if (status !== 'submitting') {
@@ -153,7 +177,7 @@ export function RegistrationSection() {
     setStatus('submitting');
 
     try {
-      const response = await createRegistration({ ...formData, attribution });
+      const response = await createRegistration({ ...formData, attribution, partnerBenefitRequested: Boolean(partnerContext) });
 
       setRegistrationId(response.registrationId);
       setApiMessage(response.message);
@@ -232,6 +256,10 @@ export function RegistrationSection() {
                   <PriceItem label="Desconto" value={`- ${(partnerContext.discountAmountCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`} />
                   <PriceItem label="Total" value={(partnerContext.finalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} strong />
                 </div>
+                <button type="button" disabled={clearingPartner} onClick={() => void removePartnerBenefit()} className="mt-4 text-[10px] font-black uppercase tracking-widest underline underline-offset-4 disabled:opacity-50">
+                  {clearingPartner ? 'Removendo benefÃ­cio...' : 'Continuar sem benefÃ­cio'}
+                </button>
+                {partnerActionMessage && <p className="mt-2 text-xs font-bold text-red-700">{partnerActionMessage}</p>}
               </div>
             )}
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">

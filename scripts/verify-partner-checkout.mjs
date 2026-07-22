@@ -90,20 +90,30 @@ try {
   assert.equal(activated.payload.partner.discountPercentage, 10);
   const setCookie = activated.response.headers.get('set-cookie');
   assert.ok(setCookie?.includes('funpace_partner_session='));
+  assert.match(setCookie, /Max-Age=(?:[3-9]\d{2}|[1-2]\d{3}|3[0-5]\d{2}|3600)/);
   const cookie = setCookie.split(';')[0];
 
   const session = await request(baseUrl, '/api/partner-session', { headers: { Cookie: cookie } });
   assert.equal(session.payload.partner.partnerType, 'sports_advisory');
   assert.equal('id' in session.payload.partner, false);
+  assert.match(session.response.headers.get('cache-control') || '', /private/);
+  assert.match(session.response.headers.get('cache-control') || '', /no-store/);
+  assert.match(session.response.headers.get('vary') || '', /Cookie/i);
 
   const malicious = { partnerId: inactivePartnerId, discountPercentage: 99, discountAmount: 999_999, originalPrice: 1, finalPrice: 1, amountCents: 1 };
   const created = await request(baseUrl, '/api/registrations', {
-    method: 'POST', headers: { Cookie: cookie }, body: JSON.stringify(athletePayload(validCpf(`12345${suffix}`), `phase3-${suffix}@example.com`, malicious)),
+    method: 'POST', headers: { Cookie: cookie }, body: JSON.stringify(athletePayload(validCpf(`12345${suffix}`), `phase3-${suffix}@example.com`, { ...malicious, partnerBenefitRequested: true })),
   });
   assert.equal(created.response.status, 201, JSON.stringify(created.payload));
   registrationIds.push(created.payload.registrationId); paymentIds.push(created.payload.paymentId);
   assert.equal(created.payload.partner.partnerType, 'sports_advisory');
   assert.equal(created.payload.partner.finalPriceCents, created.payload.partner.originalPriceCents - created.payload.partner.discountAmountCents);
+  assert.match(created.response.headers.get('set-cookie') || '', /funpace_partner_session=.*Max-Age=0/);
+
+  const cleared = await request(baseUrl, '/api/partner-session', { method: 'DELETE', headers: { Cookie: cookie } });
+  assert.equal(cleared.response.status, 200);
+  assert.equal(cleared.payload.partner, null);
+  assert.match(cleared.response.headers.get('set-cookie') || '', /funpace_partner_session=.*Max-Age=0/);
 
   const persisted = await database.query(
     `select r.partner_id, r.partner_name, r.partner_type, r.discount_percentage::float8, r.discount_amount, r.original_price, r.final_price, r.amount_cents,
@@ -145,7 +155,7 @@ try {
   assert.equal(afterWebhook.rows[0].final_price, row.final_price);
 
   const plain = await request(baseUrl, '/api/registrations', {
-    method: 'POST', body: JSON.stringify(athletePayload(validCpf(`98765${suffix}`), `phase3-plain-${suffix}@example.com`, malicious)),
+    method: 'POST', headers: { Cookie: cookie }, body: JSON.stringify(athletePayload(validCpf(`98765${suffix}`), `phase3-plain-${suffix}@example.com`, malicious)),
   });
   assert.equal(plain.response.status, 201, JSON.stringify(plain.payload));
   registrationIds.push(plain.payload.registrationId); paymentIds.push(plain.payload.paymentId);

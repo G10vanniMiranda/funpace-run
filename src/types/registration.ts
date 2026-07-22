@@ -23,6 +23,7 @@ export type RegistrationFormData = {
   termsAccepted: boolean;
   regulationAccepted: boolean;
   privacyAccepted: boolean;
+  partnerBenefitRequested?: boolean;
   attribution?: {
     source?: string;
     medium?: string;
