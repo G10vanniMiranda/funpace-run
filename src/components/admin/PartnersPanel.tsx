@@ -106,7 +106,7 @@ export function PartnersPanel({ adminKey }: { adminKey: string }) {
 
   const changeStatus = async (partner: AdminPartner) => {
     const status: PartnerStatus = partner.status === 'active' ? 'inactive' : 'active';
-    setError('');
+    setError(''); setMessage('');
     try {
       const response = await updateAdminPartnerStatus(adminKey, partner.id, status);
       setPartners((current) => current.map((item) => item.id === partner.id ? response.partner : item));
