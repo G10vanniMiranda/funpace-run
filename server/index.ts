@@ -3611,6 +3611,7 @@ function toAdminPartner(partner: PartnerRecord) {
     slug: partner.slug,
     partnerType: partner.partnerType,
     discountPercentage: partner.discountPercentage,
+    athleteLimit: partner.athleteLimit,
     status: partner.status,
     description: partner.description,
     createdAt: partner.createdAt,
@@ -3668,11 +3669,15 @@ async function handleAdminPartnerWrite(req: IncomingMessage, res: ServerResponse
   const adminSession = await requireAdmin(req, res, ['administrator']);
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<Record<string, unknown>>(await readBody(req));
-  if (partnerId && body && body.partnerType === undefined && body.partner_type === undefined) {
+  if (partnerId && body && (
+    (body.partnerType === undefined && body.partner_type === undefined)
+    || (body.athleteLimit === undefined && body.athlete_limit === undefined)
+  )) {
     const database = await transaction((current) => current, { persist: false, scope: 'partners' });
     const currentPartner = database.partners.find((partner) => partner.id === partnerId && !partner.deletedAt);
     if (!currentPartner) { json(res, 404, { message: 'Parceiro nao encontrado.' }); return; }
-    body.partnerType = currentPartner.partnerType;
+    if (body.partnerType === undefined && body.partner_type === undefined) body.partnerType = currentPartner.partnerType;
+    if (body.athleteLimit === undefined && body.athlete_limit === undefined) body.athleteLimit = currentPartner.athleteLimit;
   }
   const validation = validatePartnerInput(body);
   if ('errors' in validation) { json(res, 422, { message: 'Revise os dados do parceiro.', errors: validation.errors }); return; }

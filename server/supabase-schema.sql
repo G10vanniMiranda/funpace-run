@@ -189,6 +189,7 @@ create table if not exists "run-partners" (
   slug text not null,
   partner_type text not null default 'sports_advisory',
   discount_percentage numeric(5, 2) not null,
+  athlete_limit integer,
   status text not null default 'active',
   description text,
   created_at text not null default (now()::text),
@@ -197,6 +198,7 @@ create table if not exists "run-partners" (
   constraint "run-partners_slug_key" unique (slug),
   constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer')),
   constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100),
+  constraint "run-partners_athlete_limit_check" check (athlete_limit is null or athlete_limit > 0),
   constraint "run-partners_status_check" check (status in ('active', 'inactive'))
 );
 
@@ -208,6 +210,9 @@ alter table "run-partners" drop constraint if exists "run-partners_partner_type_
 alter table "run-partners" add constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer'));
 alter table "run-partners" drop constraint if exists "run-partners_discount_percentage_check";
 alter table "run-partners" add constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100);
+alter table "run-partners" add column if not exists athlete_limit integer;
+alter table "run-partners" drop constraint if exists "run-partners_athlete_limit_check";
+alter table "run-partners" add constraint "run-partners_athlete_limit_check" check (athlete_limit is null or athlete_limit > 0);
 
 alter table "run-registrations" add column if not exists partner_type text;
 update "run-registrations" registration set partner_type = partner.partner_type

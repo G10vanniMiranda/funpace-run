@@ -6,6 +6,7 @@ export type PartnerManagementInput = {
   name: string;
   slug: string;
   discountPercentage: number;
+  athleteLimit: number | null;
   description: string | null;
   status: PartnerManagementStatus;
   partnerType: PartnerType;
@@ -30,6 +31,12 @@ export function validatePartnerInput(input: Record<string, unknown> | null): Par
   const name = String(input?.name ?? '').trim().replace(/\s+/g, ' ').slice(0, 120);
   const slug = normalizePartnerSlug(input?.slug);
   const discountPercentage = Number(input?.discountPercentage);
+  const athleteLimitValue = Object.prototype.hasOwnProperty.call(input ?? {}, 'athleteLimit')
+    ? input?.athleteLimit
+    : input?.athlete_limit;
+  const athleteLimit = athleteLimitValue === undefined || athleteLimitValue === null || athleteLimitValue === ''
+    ? null
+    : Number(athleteLimitValue);
   const descriptionValue = String(input?.description ?? '').trim().slice(0, 1000);
   const description = descriptionValue || null;
   const status = String(input?.status ?? 'active') as PartnerManagementStatus;
@@ -41,10 +48,13 @@ export function validatePartnerInput(input: Record<string, unknown> | null): Par
   if (!Number.isFinite(discountPercentage) || discountPercentage <= 0 || discountPercentage >= 100) {
     errors.discountPercentage = 'O desconto deve ser maior que 0 e menor que 100.';
   }
+  if (athleteLimit !== null && (!Number.isInteger(athleteLimit) || athleteLimit <= 0)) {
+    errors.athleteLimit = 'O limite de atletas deve ser um numero inteiro maior que zero.';
+  }
   if (!['active', 'inactive'].includes(status)) errors.status = 'Status invalido.';
   if (!partnerTypes.includes(partnerType)) errors.partnerType = 'Tipo de parceiro invalido.';
 
   return Object.keys(errors).length
     ? { ok: false, errors }
-    : { ok: true, value: { name, slug, discountPercentage, description, status, partnerType } };
+    : { ok: true, value: { name, slug, discountPercentage, athleteLimit, description, status, partnerType } };
 }

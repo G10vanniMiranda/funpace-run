@@ -201,6 +201,7 @@ export type PartnerRecord = {
   slug: string;
   partnerType: PartnerType;
   discountPercentage: number;
+  athleteLimit: number | null;
   status: PartnerStatus;
   description: string | null;
   createdAt: string;
@@ -492,7 +493,10 @@ function normalizeDatabase(database: Partial<Database>): Database {
     adminSessions: database.adminSessions || [],
     adminUsers: database.adminUsers || [],
     partnershipLeads: database.partnershipLeads || [],
-    partners: database.partners || [],
+    partners: (database.partners || []).map((partner) => ({
+      ...partner,
+      athleteLimit: partner.athleteLimit ?? null,
+    })),
   };
 }
 
@@ -693,6 +697,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       slug text not null,
       partner_type text not null default 'sports_advisory',
       discount_percentage numeric(5, 2) not null,
+      athlete_limit integer,
       status text not null default 'active',
       description text,
       created_at text not null default (now()::text),
@@ -701,6 +706,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       constraint "run-partners_slug_key" unique (slug),
       constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer')),
       constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100),
+      constraint "run-partners_athlete_limit_check" check (athlete_limit is null or athlete_limit > 0),
       constraint "run-partners_status_check" check (status in ('active', 'inactive'))
     );
 
@@ -808,6 +814,9 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.partners} add constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer'))`);
   await client.query(`alter table ${table.partners} drop constraint if exists "run-partners_discount_percentage_check"`);
   await client.query(`alter table ${table.partners} add constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100)`);
+  await client.query(`alter table ${table.partners} add column if not exists athlete_limit integer`);
+  await client.query(`alter table ${table.partners} drop constraint if exists "run-partners_athlete_limit_check"`);
+  await client.query(`alter table ${table.partners} add constraint "run-partners_athlete_limit_check" check (athlete_limit is null or athlete_limit > 0)`);
   await client.query(`create index if not exists "run-partners_type_status_idx" on ${table.partners}(partner_type, status) where deleted_at is null`);
   await client.query(`alter table ${table.registrations} add column if not exists expires_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists paid_at text`);
@@ -1096,7 +1105,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const adminSessions = include.adminSessions ? await client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`) : emptyRows;
   const adminUsers = include.adminUsers ? await client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`) : emptyRows;
   const partnershipLeads = include.partnershipLeads ? await client.query(`select id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at from ${table.partnershipLeads}`) : emptyRows;
-  const partners = include.partners ? await client.query(`select id, name, slug, partner_type, discount_percentage, status, description, created_at, updated_at, deleted_at from ${table.partners}`) : emptyRows;
+  const partners = include.partners ? await client.query(`select id, name, slug, partner_type, discount_percentage, athlete_limit, status, description, created_at, updated_at, deleted_at from ${table.partners}`) : emptyRows;
 
   return {
     events: events.rows.map((row) => ({
@@ -1253,6 +1262,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       slug: row.slug,
       partnerType: row.partner_type,
       discountPercentage: Number(row.discount_percentage),
+      athleteLimit: row.athlete_limit === null || row.athlete_limit === undefined ? null : Number(row.athlete_limit),
       status: row.status,
       description: row.description,
       createdAt: row.created_at,
@@ -1577,18 +1587,19 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.partners) {
     await client.query(
-      `insert into ${table.partners} (id, name, slug, partner_type, discount_percentage, status, description, created_at, updated_at, deleted_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `insert into ${table.partners} (id, name, slug, partner_type, discount_percentage, athlete_limit, status, description, created_at, updated_at, deleted_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        on conflict (id) do update set
          name = excluded.name,
          slug = excluded.slug,
          partner_type = excluded.partner_type,
          discount_percentage = excluded.discount_percentage,
+         athlete_limit = excluded.athlete_limit,
          status = excluded.status,
          description = excluded.description,
          updated_at = excluded.updated_at,
          deleted_at = excluded.deleted_at`,
-      [item.id, item.name, item.slug, item.partnerType, item.discountPercentage, item.status, item.description, item.createdAt, item.updatedAt, item.deletedAt],
+      [item.id, item.name, item.slug, item.partnerType, item.discountPercentage, item.athleteLimit, item.status, item.description, item.createdAt, item.updatedAt, item.deletedAt],
     );
   }
 }
@@ -2762,7 +2773,7 @@ export async function getPartnerDetailInPostgres(partnerId: string, filters: Par
   const total = Number(registrationsResult.rows[0]?.total_count || 0);
   return {
     generatedAt: new Date().toISOString(),
-    partner: { id: String(partner.id), name: String(partner.name), slug: String(partner.slug), partnerType: partner.partner_type as PartnerType, discountPercentage: Number(partner.discount_percentage), status: partner.status, description: partner.description || null, createdAt: String(partner.created_at), updatedAt: String(partner.updated_at) },
+    partner: { id: String(partner.id), name: String(partner.name), slug: String(partner.slug), partnerType: partner.partner_type as PartnerType, discountPercentage: Number(partner.discount_percentage), athleteLimit: partner.athlete_limit === null || partner.athlete_limit === undefined ? null : Number(partner.athlete_limit), status: partner.status, description: partner.description || null, createdAt: String(partner.created_at), updatedAt: String(partner.updated_at) },
     metrics: { registrations: Number(metrics.registrations || 0), paidRegistrations: Number(metrics.paid_registrations || 0), grossRevenueCents: Number(metrics.gross_revenue_cents || 0), discountAmountCents: Number(metrics.discount_amount_cents || 0), netRevenueCents: Number(metrics.net_revenue_cents || 0), averageTicketCents: Number(metrics.average_ticket_cents || 0), lastRegistrationAt: metrics.last_registration_at ? String(metrics.last_registration_at) : null },
     monthly: monthlyResult.rows.map(mapPartnerMetric),
     registrations: registrationsResult.rows.map((row) => ({ id: String(row.id), athleteName: String(row.athlete_name), eventName: String(row.event_name), city: String(row.city), createdAt: String(row.created_at), originalPriceCents: Number(row.original_price), discountAmountCents: Number(row.discount_amount), finalPriceCents: Number(row.final_price), paymentStatus: String(row.status) })),
@@ -2839,7 +2850,7 @@ export async function appendPartnerPaymentStatusAuditInPostgres(registrationId: 
 }
 
 function mapPartnerRow(row: Record<string, unknown>): PartnerRecord {
-  return { id: String(row.id), name: String(row.name), slug: String(row.slug), partnerType: row.partner_type as PartnerType, discountPercentage: Number(row.discount_percentage), status: row.status as PartnerRecord['status'], description: row.description ? String(row.description) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at), deletedAt: row.deleted_at ? String(row.deleted_at) : null };
+  return { id: String(row.id), name: String(row.name), slug: String(row.slug), partnerType: row.partner_type as PartnerType, discountPercentage: Number(row.discount_percentage), athleteLimit: row.athlete_limit === null || row.athlete_limit === undefined ? null : Number(row.athlete_limit), status: row.status as PartnerRecord['status'], description: row.description ? String(row.description) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at), deletedAt: row.deleted_at ? String(row.deleted_at) : null };
 }
 
 export async function listAdminPartnersInPostgres(
@@ -2880,7 +2891,7 @@ export class PartnerTypeChangeBlockedError extends Error {
 }
 
 export async function mutatePartnerWithAuditInPostgres(input: {
-  mode: 'create' | 'update' | 'status' | 'delete'; partnerId?: string; partner?: Pick<PartnerRecord, 'name' | 'slug' | 'partnerType' | 'discountPercentage' | 'status' | 'description'>;
+  mode: 'create' | 'update' | 'status' | 'delete'; partnerId?: string; partner?: Pick<PartnerRecord, 'name' | 'slug' | 'partnerType' | 'discountPercentage' | 'athleteLimit' | 'status' | 'description'>;
   status?: PartnerRecord['status']; actor: string; actorRole: string; sessionId: string; ipAddress: string | null; userAgent: string | null;
 }) {
   const client = await requirePool().connect();
@@ -2891,7 +2902,7 @@ export async function mutatePartnerWithAuditInPostgres(input: {
     let before: PartnerRecord | null = null; let after: PartnerRecord | null = null; let action: PartnerAuditAction;
     if (input.mode === 'create') {
       const id = randomUUID(); const partner = input.partner!;
-      const result = await client.query(`insert into ${table.partners} (id,name,slug,partner_type,discount_percentage,status,description,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$8,null) returning *`, [id,partner.name,partner.slug,partner.partnerType,partner.discountPercentage,partner.status,partner.description,now]);
+      const result = await client.query(`insert into ${table.partners} (id,name,slug,partner_type,discount_percentage,athlete_limit,status,description,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,null) returning *`, [id,partner.name,partner.slug,partner.partnerType,partner.discountPercentage,partner.athleteLimit,partner.status,partner.description,now]);
       after = mapPartnerRow(result.rows[0]); action = 'partner.created';
     } else {
       const current = await client.query(`select * from ${table.partners} where id=$1::uuid and deleted_at is null for update`, [input.partnerId]);
@@ -2920,7 +2931,7 @@ export async function mutatePartnerWithAuditInPostgres(input: {
             throw new PartnerTypeChangeBlockedError(details);
           }
         }
-        const result = await client.query(`update ${table.partners} set name=$1,slug=$2,partner_type=$3,discount_percentage=$4,status=$5,description=$6,updated_at=$7 where id=$8::uuid returning *`, [partner.name,partner.slug,partner.partnerType,partner.discountPercentage,partner.status,partner.description,now,input.partnerId]);
+        const result = await client.query(`update ${table.partners} set name=$1,slug=$2,partner_type=$3,discount_percentage=$4,athlete_limit=$5,status=$6,description=$7,updated_at=$8 where id=$9::uuid returning *`, [partner.name,partner.slug,partner.partnerType,partner.discountPercentage,partner.athleteLimit,partner.status,partner.description,now,input.partnerId]);
         after = mapPartnerRow(result.rows[0]); action = partner.partnerType === before.partnerType ? 'partner.updated' : 'partner.type_changed';
       } else if (input.mode === 'status') {
         const result = await client.query(`update ${table.partners} set status=$1,updated_at=$2 where id=$3::uuid returning *`, [input.status,now,input.partnerId]);

@@ -6,6 +6,7 @@ export type AdminPartner = {
   name: string;
   slug: string;
   discountPercentage: number;
+  athleteLimit: number | null;
   status: PartnerStatus;
   partnerType: PartnerType;
   description: string | null;
@@ -13,7 +14,7 @@ export type AdminPartner = {
   updatedAt: string;
 };
 
-export type PartnerInput = Pick<AdminPartner, 'name' | 'slug' | 'partnerType' | 'discountPercentage' | 'status' | 'description'>;
+export type PartnerInput = Pick<AdminPartner, 'name' | 'slug' | 'partnerType' | 'discountPercentage' | 'athleteLimit' | 'status' | 'description'>;
 export type AdminPartnersResponse = {
   partners: AdminPartner[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };

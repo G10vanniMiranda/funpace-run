@@ -19,8 +19,30 @@ test('validates and normalizes a valid partner payload', () => {
   assert.equal(result.ok, true);
   if (result.ok) assert.deepEqual(result.value, {
     name: 'Runners Club', slug: 'runners-club', discountPercentage: 10,
-    description: 'Assessoria de corrida', status: 'active', partnerType: 'sports_advisory',
+    athleteLimit: null, description: 'Assessoria de corrida', status: 'active', partnerType: 'sports_advisory',
   });
+});
+
+test('accepts a positive athlete limit and treats omitted or empty limits as unlimited', () => {
+  for (const [payload, expected] of [
+    [{ athleteLimit: 25 }, 25],
+    [{ athlete_limit: '30' }, 30],
+    [{ athleteLimit: null }, null],
+    [{ athleteLimit: '' }, null],
+    [{}, null],
+  ] as const) {
+    const result = validatePartnerInput({ name: 'Partner', slug: 'partner', discountPercentage: 10, status: 'active', ...payload });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.value.athleteLimit, expected);
+  }
+});
+
+test('rejects non-positive, fractional, and invalid athlete limits', () => {
+  for (const athleteLimit of [0, -1, 1.5, 'invalid', Number.NaN]) {
+    const result = validatePartnerInput({ name: 'Partner', slug: 'partner', discountPercentage: 10, status: 'active', athleteLimit });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.ok(result.errors.athleteLimit);
+  }
 });
 
 test('accepts both partner type API conventions and preserves legacy defaults', () => {
@@ -63,6 +85,7 @@ test('calculates partner pricing from the original backend price', () => {
   const influencer = { ...partner, partnerType: 'influencer' as const };
   const sportsAdvisory = { ...partner, partnerType: 'sports_advisory' as const };
   assert.deepEqual(calculatePartnerPricing(12_000, influencer), calculatePartnerPricing(12_000, sportsAdvisory));
+  assert.deepEqual(calculatePartnerPricing(12_000, { ...partner, athleteLimit: 1 }), calculatePartnerPricing(12_000, partner));
 });
 
 test('signs partner sessions and rejects tampering or expiration', () => {
