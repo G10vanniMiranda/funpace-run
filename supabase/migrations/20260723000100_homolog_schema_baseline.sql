@@ -1,3 +1,9 @@
+-- Schema-only baseline for a clean FunPace Run environment.
+-- Consolidates the historical migrations through influencer analytics.
+-- Deliberately excludes production seeds, business rows, and athlete_limit.
+
+begin;
+
 create table if not exists "run-events" (
   id text primary key,
   name text not null,
@@ -51,10 +57,8 @@ create table if not exists "run-registrations" (
   confirmation_email_last_attempt_at text,
   confirmation_email_provider text,
   confirmation_email_id text,
-  confirmation_email_error text,
-  pending_email_sent_at text,
-  pending_email_last_attempt_at text,
-  bib_number text,
+  confirmation_email_error text
+  ,bib_number text,
   partner_id uuid,
   partner_name text,
   partner_type text,
@@ -191,7 +195,6 @@ create table if not exists "run-partners" (
   slug text not null,
   partner_type text not null default 'sports_advisory',
   discount_percentage numeric(5, 2) not null,
-  athlete_limit integer,
   status text not null default 'active',
   description text,
   created_at text not null default (now()::text),
@@ -200,25 +203,18 @@ create table if not exists "run-partners" (
   constraint "run-partners_slug_key" unique (slug),
   constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer')),
   constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100),
-  constraint "run-partners_athlete_limit_check" check (athlete_limit is null or athlete_limit > 0),
   constraint "run-partners_status_check" check (status in ('active', 'inactive'))
 );
 
 alter table "run-partners" add column if not exists partner_type text;
-update "run-partners" set partner_type = 'sports_advisory' where partner_type is null or btrim(partner_type) = '';
 alter table "run-partners" alter column partner_type set default 'sports_advisory';
 alter table "run-partners" alter column partner_type set not null;
 alter table "run-partners" drop constraint if exists "run-partners_partner_type_check";
 alter table "run-partners" add constraint "run-partners_partner_type_check" check (partner_type in ('sports_advisory', 'influencer'));
 alter table "run-partners" drop constraint if exists "run-partners_discount_percentage_check";
 alter table "run-partners" add constraint "run-partners_discount_percentage_check" check (discount_percentage > 0 and discount_percentage < 100);
-alter table "run-partners" add column if not exists athlete_limit integer;
-alter table "run-partners" drop constraint if exists "run-partners_athlete_limit_check";
-alter table "run-partners" add constraint "run-partners_athlete_limit_check" check (athlete_limit is null or athlete_limit > 0);
 
 alter table "run-registrations" add column if not exists partner_type text;
-update "run-registrations" registration set partner_type = partner.partner_type
-from "run-partners" partner where registration.partner_id = partner.id and registration.partner_type is null;
 alter table "run-registrations" drop constraint if exists "run-registrations_partner_type_check";
 alter table "run-registrations" add constraint "run-registrations_partner_type_check" check (partner_type is null or partner_type in ('sports_advisory', 'influencer'));
 alter table "run-registrations" drop constraint if exists "run-registrations_partner_metadata_check";
@@ -315,8 +311,6 @@ alter table "run-registrations" add column if not exists confirmation_email_last
 alter table "run-registrations" add column if not exists confirmation_email_provider text;
 alter table "run-registrations" add column if not exists confirmation_email_id text;
 alter table "run-registrations" add column if not exists confirmation_email_error text;
-alter table "run-registrations" add column if not exists pending_email_sent_at text;
-alter table "run-registrations" add column if not exists pending_email_last_attempt_at text;
 alter table "run-registrations" add column if not exists bib_number text;
 alter table "run-registrations" add column if not exists partner_id uuid references "run-partners"(id);
 alter table "run-registrations" add column if not exists partner_name text;
@@ -325,7 +319,6 @@ alter table "run-registrations" add column if not exists discount_percentage num
 alter table "run-registrations" add column if not exists discount_amount integer default 0;
 alter table "run-registrations" add column if not exists original_price integer;
 alter table "run-registrations" add column if not exists final_price integer;
-update "run-registrations" set discount_percentage = coalesce(discount_percentage, 0), discount_amount = coalesce(discount_amount, 0), original_price = coalesce(original_price, amount_cents), final_price = coalesce(final_price, amount_cents);
 alter table "run-registrations" alter column discount_percentage set not null;
 alter table "run-registrations" alter column discount_amount set not null;
 alter table "run-registrations" alter column original_price set not null;
@@ -406,111 +399,6 @@ alter table "run-audit-logs" add column if not exists session_id text;
 alter table "run-audit-logs" add column if not exists ip_address text;
 alter table "run-audit-logs" add column if not exists user_agent text;
 
-insert into "run-events" (id, name, slug, status, date, start_time, location_name, city, state)
-values (
-  'funpace-run-2026',
-  'FunPace Run 2026',
-  'funpace-run-2026',
-  'published',
-  '2026-09-20',
-  '06:00',
-  'Complexo Madeira Mamore',
-  'Porto Velho',
-  'RO'
-)
-on conflict (id) do nothing;
-
-update "run-events"
-set
-  date = '2026-09-20',
-  start_time = '06:00',
-  location_name = 'Complexo Madeira Mamore',
-  city = 'Porto Velho',
-  state = 'RO'
-where id = 'funpace-run-2026';
-
-insert into "run-distances" (id, event_id, name, distance_km, capacity, status)
-values
-  ('distance-10k', 'funpace-run-2026', '10K', 10, 300, 'active'),
-  ('distance-5k', 'funpace-run-2026', '5K', 5, 500, 'active')
-on conflict (id) do nothing;
-
-insert into "run-lots" (id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity)
-values
-  ('lot-1', 'funpace-run-2026', 'Lote 1', 7990, 100, 0, 'inactive', '2026-06-01T00:00:00-04:00', '2026-07-31T23:59:59-04:00', 1, false),
-  ('lot-2', 'funpace-run-2026', 'Lote 2', 9990, 400, 0, 'active', '2026-08-01T00:00:00-04:00', '2026-08-31T23:59:59-04:00', 2, false),
-  ('lot-3', 'funpace-run-2026', 'Lote 3', 13990, 100, 0, 'inactive', '2026-09-01T00:00:00-04:00', '2026-09-10T23:59:59-04:00', 3, false),
-  ('lot-4', 'funpace-run-2026', 'Lote 4', 16990, 100, 0, 'inactive', '2026-09-11T00:00:00-04:00', '2026-09-20T23:59:59-04:00', 4, true)
-on conflict (id) do update set
-  event_id = excluded.event_id,
-  name = excluded.name,
-  price_cents = excluded.price_cents,
-  capacity = excluded.capacity,
-  status = case
-    when "run-lots".status = 'inactive' then "run-lots".status
-    when excluded.continues_after_capacity and excluded.status = 'active' then 'active'
-    when "run-lots".sold_count >= excluded.capacity then 'sold_out'
-    else excluded.status
-  end,
-  starts_at = excluded.starts_at,
-  ends_at = excluded.ends_at,
-  order_index = excluded.order_index,
-  continues_after_capacity = excluded.continues_after_capacity;
-
-insert into "run-partners" (name, slug, discount_percentage, status)
-values
-  ('Runners Club', 'runners', 10, 'active'),
-  ('Pace Team', 'pace', 10, 'active'),
-  ('Alpha Running', 'alpha', 10, 'active')
-on conflict (slug) do update set
-  name = excluded.name,
-  discount_percentage = excluded.discount_percentage,
-  status = excluded.status,
-  updated_at = now()::text;
-
-with stale_pending as (
-  select registration.id, registration.lot_id
-  from "run-registrations" registration
-  join "run-lots" lot on lot.id = registration.lot_id
-  left join "run-payments" payment on payment.registration_id = registration.id
-  where registration.status = 'pending_payment'
-    and (
-      lot.status <> 'active'
-      or registration.original_price <> lot.price_cents
-      or registration.amount_cents <> registration.final_price
-      or payment.id is null
-      or payment.amount_cents <> registration.final_price
-    )
-),
-expired_registrations as (
-  update "run-registrations" registration
-  set
-    status = 'expired',
-    updated_at = now()::text,
-    expires_at = coalesce(registration.expires_at, now()::text)
-  from stale_pending
-  where registration.id = stale_pending.id
-  returning registration.id
-)
-select count(*) from expired_registrations;
-
-update "run-payments" payment
-set
-  status = 'expired',
-  checkout_url = null,
-  provider_payment_id = null,
-  updated_at = now()::text,
-  expires_at = coalesce(payment.expires_at, now()::text)
-from "run-registrations" registration
-where payment.registration_id = registration.id
-  and registration.status = 'expired'
-  and payment.status = 'pending_payment'
-  and (
-    payment.checkout_url is not null
-    or payment.provider_payment_id is not null
-    or payment.amount_cents <> registration.amount_cents
-  );
-
 create table if not exists "run-reconciliation-runs" (
   id text primary key, trigger_source text not null,
   mode text not null check (mode in ('dry_run', 'apply')),
@@ -544,3 +432,45 @@ create table if not exists "run-operational-alerts" (
 create index if not exists "run-reconciliation-runs_started_idx" on "run-reconciliation-runs"(started_at desc);
 create index if not exists "run-payment-reconciliations_status_idx" on "run-payment-reconciliations"(resolution_status, severity);
 create index if not exists "run-operational-alerts_status_idx" on "run-operational-alerts"(status, severity, detected_at desc);
+
+create table if not exists "run-schema-migrations" (
+  name text primary key,
+  applied_at text not null
+);
+
+create index if not exists "run-payment-reconciliations_registration_idx"
+  on "run-payment-reconciliations"(registration_id);
+create index if not exists "run-registrations_paid_at_idx"
+  on "run-registrations"(paid_at) where status = 'paid';
+create index if not exists "run-registrations_created_at_idx"
+  on "run-registrations"(created_at desc);
+create index if not exists "run-registrations_lot_status_expires_idx"
+  on "run-registrations"(lot_id, status, expires_at);
+create index if not exists "run-payments_status_paid_at_idx"
+  on "run-payments"(status, paid_at desc);
+create index if not exists "run-payment-events_received_at_idx"
+  on "run-payment-events"(received_at desc);
+create index if not exists "run-audit-logs_created_at_idx"
+  on "run-audit-logs"(created_at desc);
+
+revoke update, delete, truncate on "run-partner-audit-logs" from public;
+
+do $$
+declare
+  relation record;
+begin
+  for relation in
+    select tablename
+    from pg_tables
+    where schemaname = 'public' and tablename like 'run-%'
+  loop
+    execute format('alter table public.%I enable row level security', relation.tablename);
+    execute format(
+      'grant all privileges on table public.%I to anon, authenticated, service_role',
+      relation.tablename
+    );
+  end loop;
+end;
+$$;
+
+commit;

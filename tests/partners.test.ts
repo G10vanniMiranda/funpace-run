@@ -84,8 +84,9 @@ test('calculates partner pricing from the original backend price', () => {
   assert.equal(calculatePartnerPricing(10_800, { ...partner, deletedAt: '2026-07-21T00:00:00.000Z' }), null);
   const influencer = { ...partner, partnerType: 'influencer' as const };
   const sportsAdvisory = { ...partner, partnerType: 'sports_advisory' as const };
+  const partnerWithAthleteLimit = { ...partner, athleteLimit: 1 };
   assert.deepEqual(calculatePartnerPricing(12_000, influencer), calculatePartnerPricing(12_000, sportsAdvisory));
-  assert.deepEqual(calculatePartnerPricing(12_000, { ...partner, athleteLimit: 1 }), calculatePartnerPricing(12_000, partner));
+  assert.deepEqual(calculatePartnerPricing(12_000, partnerWithAthleteLimit), calculatePartnerPricing(12_000, partner));
 });
 
 test('signs partner sessions and rejects tampering or expiration', () => {

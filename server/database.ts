@@ -568,8 +568,10 @@ async function ensurePostgresDatabase(client: Queryable) {
       confirmation_email_last_attempt_at text,
       confirmation_email_provider text,
       confirmation_email_id text,
-      confirmation_email_error text
-      ,bib_number text,
+      confirmation_email_error text,
+      pending_email_sent_at text,
+      pending_email_last_attempt_at text,
+      bib_number text,
       partner_id uuid,
       partner_name text,
       partner_type text,
@@ -826,6 +828,8 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_provider text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_id text`);
   await client.query(`alter table ${table.registrations} add column if not exists confirmation_email_error text`);
+  await client.query(`alter table ${table.registrations} add column if not exists pending_email_sent_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists pending_email_last_attempt_at text`);
   await client.query(`alter table ${table.registrations} add column if not exists bib_number text`);
   await client.query(`alter table ${table.registrations} add column if not exists partner_id uuid`);
   await client.query(`alter table ${table.registrations} add column if not exists partner_name text`);
