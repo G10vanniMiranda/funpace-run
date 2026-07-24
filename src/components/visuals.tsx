@@ -1,6 +1,6 @@
 import { AnimatePresence, motion, useScroll, useTransform } from 'motion/react';
-import { useId, useRef, useState } from 'react';
-import { ChevronDown, Flag, MapPin, RotateCcw } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Flag, MapPin, RotateCcw } from 'lucide-react';
 import { Reveal } from './premium';
 
 type CourseId = '5k' | '10k';
@@ -13,8 +13,6 @@ type CourseDefinition = {
   start: string;
   finish: string;
   returnPoint?: string;
-  note: string;
-  instructions: string[];
   diagram: {
     path: string;
     start: { x: number; y: number };
@@ -37,14 +35,6 @@ const courses: Record<CourseId, CourseDefinition> = {
     start: 'Complexo Madeira-Mamoré',
     finish: 'Complexo Madeira-Mamoré',
     returnPoint: 'Avenida Imigrantes',
-    note: 'A largada e a chegada acontecem no mesmo local.',
-    instructions: [
-      'Saída do Complexo Madeira-Mamoré.',
-      'Seguir pela Avenida Farquar.',
-      'Ao chegar à Avenida Imigrantes, realizar o retorno.',
-      'Voltar pela Avenida Farquar no sentido do Complexo Madeira-Mamoré.',
-      'Finalizar no Complexo Madeira-Mamoré.',
-    ],
     diagram: {
       path: 'M 16 76 C 24 58 31 45 43 38 C 56 30 69 35 84 22 C 72 41 58 36 45 44 C 33 51 25 63 16 76',
       start: { x: 16, y: 76 },
@@ -62,23 +52,6 @@ const courses: Record<CourseId, CourseDefinition> = {
     distance: '10 km',
     start: 'Complexo Madeira-Mamoré',
     finish: 'Complexo Madeira-Mamoré',
-    note: 'A largada e a chegada acontecem no mesmo local.',
-    instructions: [
-      'Saída do Complexo Madeira-Mamoré.',
-      'Seguir pela Avenida Farquar.',
-      'Virar à direita na Avenida Imigrantes.',
-      'Virar à direita na Avenida Lauro Sodré.',
-      'Virar à direita na Avenida Calama.',
-      'Virar à direita na Rua Jamary.',
-      'Virar à direita na Avenida Imigrantes.',
-      'Virar à direita na Avenida Lauro Sodré.',
-      'Virar à direita na Rua José Camacho.',
-      'Virar à direita na Avenida Dutra.',
-      'Virar à esquerda na Rua Padre Chiquinho.',
-      'Virar à esquerda na Avenida Farquar.',
-      'Seguir até o Complexo Madeira-Mamoré.',
-      'Finalizar no Complexo Madeira-Mamoré.',
-    ],
     diagram: {
       path: 'M 16 78 L 22 46 L 42 25 L 70 27 L 84 43 L 70 55 L 82 73 L 61 84 L 43 69 L 28 84 L 16 78',
       start: { x: 16, y: 78 },
@@ -95,14 +68,7 @@ const courses: Record<CourseId, CourseDefinition> = {
 
 export function CourseMap() {
   const [activeCourseId, setActiveCourseId] = useState<CourseId>('5k');
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const detailsId = useId();
   const activeCourse = courses[activeCourseId];
-
-  const selectCourse = (courseId: CourseId) => {
-    setActiveCourseId(courseId);
-    setDetailsOpen(false);
-  };
 
   return (
     <section id="map" className="relative scroll-mt-24 overflow-hidden border-t border-zinc-900 bg-zinc-950 px-4 py-16 sm:px-6 md:py-24 lg:py-32">
@@ -128,7 +94,7 @@ export function CourseMap() {
                     key={course.id}
                     type="button"
                     aria-pressed={isActive}
-                    onClick={() => selectCourse(courseId)}
+                    onClick={() => setActiveCourseId(courseId)}
                     className={`min-h-11 px-4 py-3 font-mono text-xs font-bold tracking-[0.18em] transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${
                       isActive
                         ? 'bg-brand text-black shadow-[0_0_24px_rgba(215,255,0,0.16)]'
@@ -186,65 +152,9 @@ export function CourseMap() {
               <AnimatePresence mode="wait">
                 <RouteDiagram key={activeCourse.id} course={activeCourse} />
               </AnimatePresence>
-
-              <div className="absolute bottom-3 left-3 right-3 z-30 flex flex-col gap-3 border border-white/10 bg-black/85 p-3 backdrop-blur-sm sm:bottom-5 sm:left-auto sm:right-5 sm:w-64 sm:p-4">
-                <div>
-                  <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">
-                    Rota selecionada
-                  </div>
-                  <div className="mt-1 text-sm font-bold uppercase text-white">{activeCourse.title}</div>
-                </div>
-                <button
-                  type="button"
-                  aria-expanded={detailsOpen}
-                  aria-controls={detailsId}
-                  onClick={() => setDetailsOpen((open) => !open)}
-                  className="flex min-h-10 items-center justify-between gap-3 border border-brand/40 px-3 py-2 text-left font-mono text-[10px] font-bold uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
-                >
-                  Ver detalhes do percurso
-                  <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${detailsOpen ? 'rotate-180' : ''}`} />
-                </button>
-              </div>
             </div>
           </Reveal>
         </div>
-
-        <AnimatePresence initial={false}>
-          {detailsOpen && (
-            <motion.div
-              id={detailsId}
-              key={activeCourse.id}
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.32, ease: 'easeInOut' }}
-              className="overflow-hidden"
-            >
-              <div className="premium-card mt-6 p-5 sm:p-6 lg:ml-[calc(38%+3.5rem)] xl:ml-[calc(38%+5rem)]">
-                <div className="flex flex-col gap-2 border-b border-white/10 pb-4 sm:flex-row sm:items-end sm:justify-between">
-                  <div>
-                    <p className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-brand">
-                      Instruções oficiais
-                    </p>
-                    <h3 className="mt-1 font-display text-2xl font-bold uppercase">{activeCourse.title}</h3>
-                  </div>
-                  <p className="font-mono text-xs text-zinc-500">{activeCourse.note}</p>
-                </div>
-
-                <ol className="mt-5 grid gap-3 md:grid-cols-2">
-                  {activeCourse.instructions.map((instruction, index) => (
-                    <li key={`${index}-${instruction}`} className="flex gap-3 text-sm leading-relaxed text-zinc-300">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center bg-brand font-mono text-[10px] font-bold text-black">
-                        {String(index + 1).padStart(2, '0')}
-                      </span>
-                      <span>{instruction}</span>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
     </section>
   );
@@ -275,7 +185,7 @@ function RouteDiagram({ course }: { course: CourseDefinition }) {
 
   return (
     <motion.svg
-      className="absolute inset-0 z-10 h-full w-full p-5 pb-28 sm:p-8 sm:pb-20"
+      className="absolute inset-0 z-10 h-full w-full p-5 sm:p-8"
       viewBox="0 0 100 100"
       preserveAspectRatio="xMidYMid meet"
       role="img"
