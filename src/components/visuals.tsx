@@ -1,52 +1,377 @@
-import { motion, useScroll, useTransform } from 'motion/react';
-import { useRef } from 'react';
-import { ArrowRight } from 'lucide-react';
+import { AnimatePresence, motion, useScroll, useTransform } from 'motion/react';
+import { useId, useRef, useState } from 'react';
+import { ChevronDown, Flag, MapPin, RotateCcw } from 'lucide-react';
 import { Reveal } from './premium';
 
+type CourseId = '5k' | '10k';
+
+type CourseDefinition = {
+  id: CourseId;
+  selectorLabel: string;
+  title: string;
+  distance: string;
+  start: string;
+  finish: string;
+  returnPoint?: string;
+  note: string;
+  instructions: string[];
+  diagram: {
+    path: string;
+    start: { x: number; y: number };
+    returnPoint?: { x: number; y: number };
+    labels: Array<{
+      text: string;
+      x: number;
+      y: number;
+      anchor?: 'start' | 'middle' | 'end';
+    }>;
+  };
+};
+
+const courses: Record<CourseId, CourseDefinition> = {
+  '5k': {
+    id: '5k',
+    selectorLabel: '5 KM',
+    title: 'Percurso 5 km',
+    distance: '5 km',
+    start: 'Complexo Madeira-Mamoré',
+    finish: 'Complexo Madeira-Mamoré',
+    returnPoint: 'Avenida Imigrantes',
+    note: 'A largada e a chegada acontecem no mesmo local.',
+    instructions: [
+      'Saída do Complexo Madeira-Mamoré.',
+      'Seguir pela Avenida Farquar.',
+      'Ao chegar à Avenida Imigrantes, realizar o retorno.',
+      'Voltar pela Avenida Farquar no sentido do Complexo Madeira-Mamoré.',
+      'Finalizar no Complexo Madeira-Mamoré.',
+    ],
+    diagram: {
+      path: 'M 16 76 C 24 58 31 45 43 38 C 56 30 69 35 84 22 C 72 41 58 36 45 44 C 33 51 25 63 16 76',
+      start: { x: 16, y: 76 },
+      returnPoint: { x: 84, y: 22 },
+      labels: [
+        { text: 'AV. FARQUAR', x: 48, y: 30, anchor: 'middle' },
+        { text: 'AV. IMIGRANTES', x: 82, y: 15, anchor: 'end' },
+      ],
+    },
+  },
+  '10k': {
+    id: '10k',
+    selectorLabel: '10 KM',
+    title: 'Percurso 10 km',
+    distance: '10 km',
+    start: 'Complexo Madeira-Mamoré',
+    finish: 'Complexo Madeira-Mamoré',
+    note: 'A largada e a chegada acontecem no mesmo local.',
+    instructions: [
+      'Saída do Complexo Madeira-Mamoré.',
+      'Seguir pela Avenida Farquar.',
+      'Virar à direita na Avenida Imigrantes.',
+      'Virar à direita na Avenida Lauro Sodré.',
+      'Virar à direita na Avenida Calama.',
+      'Virar à direita na Rua Jamary.',
+      'Virar à direita na Avenida Imigrantes.',
+      'Virar à direita na Avenida Lauro Sodré.',
+      'Virar à direita na Rua José Camacho.',
+      'Virar à direita na Avenida Dutra.',
+      'Virar à esquerda na Rua Padre Chiquinho.',
+      'Virar à esquerda na Avenida Farquar.',
+      'Seguir até o Complexo Madeira-Mamoré.',
+      'Finalizar no Complexo Madeira-Mamoré.',
+    ],
+    diagram: {
+      path: 'M 16 78 L 22 46 L 42 25 L 70 27 L 84 43 L 70 55 L 82 73 L 61 84 L 43 69 L 28 84 L 16 78',
+      start: { x: 16, y: 78 },
+      labels: [
+        { text: 'AV. FARQUAR', x: 16, y: 39 },
+        { text: 'AV. IMIGRANTES', x: 48, y: 19, anchor: 'middle' },
+        { text: 'AV. LAURO SODRÉ', x: 84, y: 36, anchor: 'end' },
+        { text: 'AV. CALAMA', x: 75, y: 66, anchor: 'middle' },
+        { text: 'AV. DUTRA', x: 44, y: 92, anchor: 'middle' },
+      ],
+    },
+  },
+};
+
 export function CourseMap() {
+  const [activeCourseId, setActiveCourseId] = useState<CourseId>('5k');
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = useId();
+  const activeCourse = courses[activeCourseId];
+
+  const selectCourse = (courseId: CourseId) => {
+    setActiveCourseId(courseId);
+    setDetailsOpen(false);
+  };
+
   return (
     <section id="map" className="relative scroll-mt-24 overflow-hidden border-t border-zinc-900 bg-zinc-950 px-4 py-16 sm:px-6 md:py-24 lg:py-32">
       <div className="premium-aurora opacity-30" />
-      <div className="mx-auto flex max-w-7xl flex-col items-center gap-10 lg:flex-row lg:gap-20 xl:gap-24">
-        <Reveal className="flex w-full min-w-0 flex-col gap-6 lg:w-1/3">
-          <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase leading-[0.9] tracking-tighter">
-            Percurso
-          </h2>
+      <div className="relative mx-auto max-w-7xl">
+        <div className="flex flex-col items-start gap-10 lg:flex-row lg:gap-14 xl:gap-20">
+          <Reveal className="flex w-full min-w-0 flex-col gap-6 lg:w-[38%]">
+            <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase leading-[0.9] tracking-tighter">
+              Percurso
+            </h2>
 
-          <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:mt-6 lg:grid-cols-1 lg:gap-4">
-            <div className="premium-card p-4">
-              <h4 className="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Postos de Hidratação</h4>
-              <p className="font-mono text-xl font-bold text-white">A cada 2.5km</p>
+            <div
+              className="grid grid-cols-2 gap-1 border border-white/10 bg-black/40 p-1"
+              role="group"
+              aria-label="Selecionar percurso"
+            >
+              {(Object.keys(courses) as CourseId[]).map((courseId) => {
+                const course = courses[courseId];
+                const isActive = courseId === activeCourseId;
+
+                return (
+                  <button
+                    key={course.id}
+                    type="button"
+                    aria-pressed={isActive}
+                    onClick={() => selectCourse(courseId)}
+                    className={`min-h-11 px-4 py-3 font-mono text-xs font-bold tracking-[0.18em] transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${
+                      isActive
+                        ? 'bg-brand text-black shadow-[0_0_24px_rgba(215,255,0,0.16)]'
+                        : 'text-zinc-400 hover:bg-white/5 hover:text-white'
+                    }`}
+                  >
+                    {course.selectorLabel}
+                  </button>
+                );
+              })}
             </div>
-          </div>
-        </Reveal>
 
-        <Reveal className="premium-card group relative aspect-4/3 w-full overflow-hidden rounded-sm sm:aspect-video lg:w-2/3" delay={0.08}>
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_2px,transparent_2px),linear-gradient(to_bottom,#80808012_2px,transparent_2px)] bg-size-[40px_40px]" />
-          <div className="absolute left-1/4 top-1/2 z-20 h-4 w-4 rounded-full bg-brand shadow-[0_0_15px_#dfff00]" />
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={activeCourse.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.22 }}
+                className="space-y-4"
+                aria-live="polite"
+              >
+                <div>
+                  <p className="font-mono text-xs font-bold uppercase tracking-[0.2em] text-brand">
+                    {activeCourse.distance}
+                  </p>
+                  <h3 className="mt-1 font-display text-2xl font-bold uppercase text-white">
+                    {activeCourse.title}
+                  </h3>
+                </div>
 
-          <svg className="absolute inset-0 z-10 h-full w-full pl-[18%] sm:pl-[25%]" viewBox="0 0 100 100" preserveAspectRatio="none">
-            <motion.path
-              d="M 5,50 Q 20,20 40,50 T 70,30 T 90,60"
-              fill="transparent"
-              stroke="#dfff00"
-              strokeWidth="0.8"
-              initial={{ pathLength: 0 }}
-              whileInView={{ pathLength: 1 }}
-              viewport={{ once: true }}
-              transition={{ duration: 2, ease: 'easeInOut' }}
-            />
-          </svg>
+                <div className="space-y-3 border-l border-brand/40 pl-4">
+                  <CourseLocation icon={MapPin} label="Largada" value={activeCourse.start} />
+                  {activeCourse.returnPoint && (
+                    <CourseLocation icon={RotateCcw} label="Retorno" value={activeCourse.returnPoint} />
+                  )}
+                  <CourseLocation icon={Flag} label="Chegada" value={activeCourse.finish} />
+                </div>
+              </motion.div>
+            </AnimatePresence>
 
-          <div className="absolute bottom-3 left-3 right-3 z-30 border border-white/10 bg-black/80 p-3 backdrop-blur-sm sm:bottom-6 sm:left-auto sm:right-6 sm:p-4">
-            <div className="text-xs font-bold uppercase tracking-widest">MAPA OFICIAL EM BREVE</div>
-            <a href="#" className="mt-2 flex items-center gap-2 text-xs text-brand hover:underline">
-              Download GPX <ArrowRight className="h-3 w-3" />
-            </a>
-          </div>
-        </Reveal>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
+              <div className="premium-card p-4">
+                <h4 className="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Postos de Hidratação</h4>
+                <p className="font-mono text-xl font-bold text-white">A cada 2,5 km</p>
+              </div>
+            </div>
+          </Reveal>
+
+          <Reveal className="w-full lg:w-[62%]" delay={0.08}>
+            <div className="premium-card group relative aspect-4/3 w-full overflow-hidden rounded-sm sm:aspect-video">
+              <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808012_2px,transparent_2px),linear-gradient(to_bottom,#80808012_2px,transparent_2px)] bg-size-[40px_40px]" />
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(215,255,0,0.08),transparent_58%)]" />
+
+              <AnimatePresence mode="wait">
+                <RouteDiagram key={activeCourse.id} course={activeCourse} />
+              </AnimatePresence>
+
+              <div className="absolute bottom-3 left-3 right-3 z-30 flex flex-col gap-3 border border-white/10 bg-black/85 p-3 backdrop-blur-sm sm:bottom-5 sm:left-auto sm:right-5 sm:w-64 sm:p-4">
+                <div>
+                  <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">
+                    Rota selecionada
+                  </div>
+                  <div className="mt-1 text-sm font-bold uppercase text-white">{activeCourse.title}</div>
+                </div>
+                <button
+                  type="button"
+                  aria-expanded={detailsOpen}
+                  aria-controls={detailsId}
+                  onClick={() => setDetailsOpen((open) => !open)}
+                  className="flex min-h-10 items-center justify-between gap-3 border border-brand/40 px-3 py-2 text-left font-mono text-[10px] font-bold uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+                >
+                  Ver detalhes do percurso
+                  <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${detailsOpen ? 'rotate-180' : ''}`} />
+                </button>
+              </div>
+            </div>
+          </Reveal>
+        </div>
+
+        <AnimatePresence initial={false}>
+          {detailsOpen && (
+            <motion.div
+              id={detailsId}
+              key={activeCourse.id}
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.32, ease: 'easeInOut' }}
+              className="overflow-hidden"
+            >
+              <div className="premium-card mt-6 p-5 sm:p-6 lg:ml-[calc(38%+3.5rem)] xl:ml-[calc(38%+5rem)]">
+                <div className="flex flex-col gap-2 border-b border-white/10 pb-4 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <p className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-brand">
+                      Instruções oficiais
+                    </p>
+                    <h3 className="mt-1 font-display text-2xl font-bold uppercase">{activeCourse.title}</h3>
+                  </div>
+                  <p className="font-mono text-xs text-zinc-500">{activeCourse.note}</p>
+                </div>
+
+                <ol className="mt-5 grid gap-3 md:grid-cols-2">
+                  {activeCourse.instructions.map((instruction, index) => (
+                    <li key={`${index}-${instruction}`} className="flex gap-3 text-sm leading-relaxed text-zinc-300">
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center bg-brand font-mono text-[10px] font-bold text-black">
+                        {String(index + 1).padStart(2, '0')}
+                      </span>
+                      <span>{instruction}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
-    </section >
+    </section>
+  );
+}
+
+function CourseLocation({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: typeof MapPin;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-brand" aria-hidden="true" />
+      <div>
+        <p className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">{label}</p>
+        <p className="mt-0.5 text-sm font-semibold text-zinc-200">{value}</p>
+      </div>
+    </div>
+  );
+}
+
+function RouteDiagram({ course }: { course: CourseDefinition }) {
+  const { diagram } = course;
+
+  return (
+    <motion.svg
+      className="absolute inset-0 z-10 h-full w-full p-5 pb-28 sm:p-8 sm:pb-20"
+      viewBox="0 0 100 100"
+      preserveAspectRatio="xMidYMid meet"
+      role="img"
+      aria-label={`Representação esquemática do ${course.title}`}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2 }}
+    >
+      <defs>
+        <filter id={`route-glow-${course.id}`} x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="1.6" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+
+      {diagram.labels.map((label) => (
+        <text
+          key={label.text}
+          x={label.x}
+          y={label.y}
+          textAnchor={label.anchor ?? 'start'}
+          fill="rgba(255,255,255,0.42)"
+          fontSize="2.7"
+          fontFamily="JetBrains Mono, monospace"
+          fontWeight="700"
+          letterSpacing="0.08em"
+        >
+          {label.text}
+        </text>
+      ))}
+
+      <motion.path
+        d={diagram.path}
+        fill="transparent"
+        stroke="#d7ff00"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        filter={`url(#route-glow-${course.id})`}
+        initial={{ pathLength: 0, opacity: 0.4 }}
+        animate={{ pathLength: 1, opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ pathLength: { duration: 1.35, ease: 'easeInOut' }, opacity: { duration: 0.2 } }}
+      />
+
+      <RouteMarker x={diagram.start.x} y={diagram.start.y} label="LARGADA / CHEGADA" align="start" />
+
+      {diagram.returnPoint && (
+        <RouteMarker
+          x={diagram.returnPoint.x}
+          y={diagram.returnPoint.y}
+          label="RETORNO"
+          align="end"
+          variant="return"
+        />
+      )}
+    </motion.svg>
+  );
+}
+
+function RouteMarker({
+  x,
+  y,
+  label,
+  align,
+  variant = 'start',
+}: {
+  x: number;
+  y: number;
+  label: string;
+  align: 'start' | 'end';
+  variant?: 'start' | 'return';
+}) {
+  const labelX = align === 'start' ? x + 3 : x - 3;
+
+  return (
+    <motion.g initial={{ opacity: 0, scale: 0.7 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.8 }}>
+      <circle cx={x} cy={y} r="3.2" fill={variant === 'return' ? '#ffffff' : '#d7ff00'} opacity="0.16" />
+      <circle cx={x} cy={y} r="1.45" fill={variant === 'return' ? '#ffffff' : '#d7ff00'} />
+      <text
+        x={labelX}
+        y={y + 0.9}
+        textAnchor={align}
+        fill={variant === 'return' ? '#ffffff' : '#d7ff00'}
+        fontSize="2.6"
+        fontFamily="JetBrains Mono, monospace"
+        fontWeight="700"
+        letterSpacing="0.06em"
+      >
+        {label}
+      </text>
+    </motion.g>
   );
 }
 

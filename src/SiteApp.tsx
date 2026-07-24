@@ -13,7 +13,7 @@ import { PrivacyPage, TermsPage } from "./pages/Privacy";
 import { SuccessPage } from "./pages/Success";
 import { PartnerLandingPage } from "./pages/PartnerLanding";
 
-const showCourseMap = false;
+const showCourseMap = true;
 
 export default function SiteApp() {
   const pathname = window.location.pathname;
