@@ -30,7 +30,7 @@ function MarqueeGroup({ ariaHidden = false }: { ariaHidden?: boolean }) {
     >
       <span className="inline-flex items-center gap-2">
         <PartyPopper className="h-[1em] w-[1em] shrink-0" strokeWidth={2.75} aria-hidden="true" />
-        <span>1 ano de movimento</span>
+        <span>1 ANO DE FUNPACE</span>
       </span>
       <span aria-hidden="true">•</span>
       <span>Funpace Run 2026</span>
