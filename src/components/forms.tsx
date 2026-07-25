@@ -4,6 +4,7 @@ import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
 import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
+import { trackMetaEvent, trackMetaEventOnce } from '../lib/metaPixel';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
 import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
@@ -77,6 +78,7 @@ export function RegistrationSection() {
     || availability?.lots.find((lot) => lot.status === 'active')
     || availability?.lots[0];
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
+  const registrationPrice = (partnerContext?.finalPriceCents ?? lotPriceCents) / 100;
   const isSubmitting = status === 'submitting';
   const checkoutSupportUrl = getWhatsAppUrl('Olá, tentei fazer minha inscrição na FunPace Run, mas não consegui abrir o checkout.');
 
@@ -116,6 +118,23 @@ export function RegistrationSection() {
       });
     return () => { isMounted = false; };
   }, []);
+
+  useEffect(() => {
+    if (!availability?.event.id || !activeLot) return;
+
+    trackMetaEventOnce(
+      `view-content:${availability.event.id}`,
+      'ViewContent',
+      {
+        content_name: availability.event.name,
+        content_category: 'Corrida de rua',
+        content_type: 'product',
+        content_ids: [availability.event.id],
+        currency: 'BRL',
+        value: registrationPrice,
+      },
+    );
+  }, [activeLot, availability, registrationPrice]);
 
   const removePartnerBenefit = async () => {
     setClearingPartner(true);
@@ -174,6 +193,17 @@ export function RegistrationSection() {
       return;
     }
 
+    if (availability?.event.id) {
+      trackMetaEvent('InitiateCheckout', {
+        content_name: availability.event.name,
+        content_ids: [availability.event.id],
+        content_type: 'product',
+        currency: 'BRL',
+        value: registrationPrice,
+        num_items: 1,
+      });
+    }
+
     setStatus('submitting');
 
     try {
@@ -183,6 +213,16 @@ export function RegistrationSection() {
       setApiMessage(response.message);
 
       if (response.checkoutUrl) {
+        if (availability?.event.id) {
+          trackMetaEventOnce(
+            `lead:${response.registrationId}`,
+            'Lead',
+            {
+              content_name: availability.event.name,
+              content_category: 'Inscrição em corrida',
+            },
+          );
+        }
         window.location.href = response.checkoutUrl;
         return;
       }

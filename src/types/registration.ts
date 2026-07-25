@@ -73,6 +73,8 @@ export type CreateRegistrationResponse = {
 
 export type RegistrationStatusResponse = {
   registrationId: string;
+  eventId: string;
+  eventName: string;
   status: RegistrationStatus;
   paymentStatus?: RegistrationStatus;
   amountCents: number;

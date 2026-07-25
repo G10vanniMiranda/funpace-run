@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { Analytics } from "@vercel/analytics/react";
 import { MaintenancePage } from "./components/maintenance";
+import { MetaPixelTracker } from "./components/MetaPixelTracker";
 
 const SiteApp = lazy(() => import("./SiteApp"));
 
@@ -11,6 +12,7 @@ export default function App() {
     return (
       <>
         <MaintenancePage />
+        <MetaPixelTracker />
         <Analytics />
       </>
     );
@@ -21,6 +23,7 @@ export default function App() {
       <Suspense fallback={null}>
         <SiteApp />
       </Suspense>
+      <MetaPixelTracker />
       <Analytics />
     </>
   );

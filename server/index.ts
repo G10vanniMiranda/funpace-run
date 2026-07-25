@@ -2243,11 +2243,14 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     return;
   }
   const payment = database.payments.find((item) => item.registrationId === registration.id);
+  const event = database.events.find((item) => item.id === registration.eventId);
   const registrationIsClosed = ['cancelled', 'refunded'].includes(registration.status);
   const paymentProvesPaid = !registrationIsClosed && (payment?.status === 'paid' || Boolean(payment?.paidAt));
 
   json(res, 200, {
     registrationId: registration.id,
+    eventId: registration.eventId,
+    eventName: event?.name || '',
     status: paymentProvesPaid ? 'paid' : registration.status,
     paymentStatus: payment?.status || registration.status,
     amountCents: registration.amountCents,

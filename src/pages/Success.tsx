@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { getWhatsAppUrl } from '../config/whatsapp';
 import { ApiError, confirmInfinitePayReturn, getRegistrationStatus } from '../lib/api';
+import { trackMetaPurchase } from '../lib/metaPixel';
 import type { RegistrationStatus } from '../types/registration';
 
 const statusLabels: Record<RegistrationStatus, string> = {
@@ -71,6 +72,16 @@ export function SuccessPage() {
           setStatus(nextStatus);
 
           if (nextStatus === 'paid') {
+            if (registration.eventId && registration.eventName) {
+              trackMetaPurchase(registration.registrationId, {
+                content_name: registration.eventName,
+                content_ids: [registration.eventId],
+                content_type: 'product',
+                currency: 'BRL',
+                value: registration.amountCents / 100,
+                num_items: 1,
+              });
+            }
             setMessage('Pagamento aprovado. Sua inscrição está confirmada.');
             setIsPolling(false);
             return;
