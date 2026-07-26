@@ -4,14 +4,18 @@ import { loadEnvFile } from 'node:process';
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
+import type { MetaServerEvent, MetaUserData, MetaCustomData } from './meta-conversions-api.js';
 import { selectAvailableLotCandidate } from './lot-capacity.js';
 import { calculatePartnerPricing } from './partner-discount.js';
+import { assertDatabaseEnvironmentIsolation } from './environment.js';
 
 const { Pool } = pg;
 
 if (!process.env.VERCEL && existsSync(resolve('.env'))) {
   loadEnvFile(resolve('.env'));
 }
+
+assertDatabaseEnvironmentIsolation();
 
 export type EventRecord = {
   id: string;
@@ -103,6 +107,32 @@ export type PaymentEventRecord = {
   eventType: string;
   payload: unknown;
   receivedAt: string;
+};
+
+export type IntegrationEventStatus = 'pending' | 'processing' | 'sent' | 'failed';
+
+export type IntegrationEventRecord = {
+  id: string;
+  provider: 'meta';
+  eventName: MetaServerEvent['event_name'];
+  eventId: string;
+  entityType: 'registration';
+  entityId: string;
+  eventTime: number;
+  eventSourceUrl: string;
+  userData: MetaUserData;
+  clientContext: MetaUserData;
+  customData: MetaCustomData;
+  status: IntegrationEventStatus;
+  attemptCount: number;
+  nextAttemptAt: string | null;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+  responseCode: number | null;
+  eventsReceived: number | null;
+  sentAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type GoogleSheetSyncRecord = {
@@ -343,6 +373,7 @@ const table = {
   reconciliationRuns: '"run-reconciliation-runs"',
   paymentReconciliations: '"run-payment-reconciliations"',
   operationalAlerts: '"run-operational-alerts"',
+  integrationEvents: '"run-integration-events"',
 } as const;
 
 const initialDatabase: Database = {
@@ -624,6 +655,31 @@ async function ensurePostgresDatabase(client: Queryable) {
       created_at text not null,
       updated_at text not null,
       unique (entity_type, entity_id, sheet_name)
+    );
+
+    create table if not exists ${table.integrationEvents} (
+      id text primary key,
+      provider text not null check (provider in ('meta')),
+      event_name text not null check (event_name in ('InitiateCheckout', 'CompleteRegistration', 'Purchase')),
+      event_id text not null,
+      entity_type text not null check (entity_type in ('registration')),
+      entity_id text not null references ${table.registrations}(id),
+      event_time bigint not null,
+      event_source_url text not null,
+      user_data jsonb not null default '{}'::jsonb,
+      client_context jsonb not null default '{}'::jsonb,
+      custom_data jsonb not null default '{}'::jsonb,
+      status text not null check (status in ('pending', 'processing', 'sent', 'failed')),
+      attempt_count integer not null default 0,
+      next_attempt_at text,
+      last_attempt_at text,
+      last_error text,
+      response_code integer,
+      events_received integer,
+      sent_at text,
+      created_at text not null,
+      updated_at text not null,
+      unique (provider, event_name, event_id)
     );
 
     create table if not exists ${table.checkIns} (
@@ -939,6 +995,8 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.auditLogs} add column if not exists session_id text`);
   await client.query(`alter table ${table.auditLogs} add column if not exists ip_address text`);
   await client.query(`alter table ${table.auditLogs} add column if not exists user_agent text`);
+  await client.query(`create index if not exists "run-integration-events_retry_idx" on ${table.integrationEvents}(status, next_attempt_at)`);
+  await client.query(`create index if not exists "run-integration-events_entity_idx" on ${table.integrationEvents}(entity_type, entity_id, created_at)`);
 
   const existingEvents = await client.query(`select count(*)::int as count from ${table.events}`);
 
@@ -3544,4 +3602,237 @@ export async function pingDatabase() {
   } finally {
     client.release();
   }
+}
+
+function mapIntegrationEvent(row: Record<string, unknown>): IntegrationEventRecord {
+  return {
+    id: String(row.id),
+    provider: 'meta',
+    eventName: row.event_name as IntegrationEventRecord['eventName'],
+    eventId: String(row.event_id),
+    entityType: 'registration',
+    entityId: String(row.entity_id),
+    eventTime: Number(row.event_time),
+    eventSourceUrl: String(row.event_source_url),
+    userData: (row.user_data || {}) as MetaUserData,
+    clientContext: (row.client_context || {}) as MetaUserData,
+    customData: (row.custom_data || {}) as MetaCustomData,
+    status: row.status as IntegrationEventStatus,
+    attemptCount: Number(row.attempt_count || 0),
+    nextAttemptAt: row.next_attempt_at ? String(row.next_attempt_at) : null,
+    lastAttemptAt: row.last_attempt_at ? String(row.last_attempt_at) : null,
+    lastError: row.last_error ? String(row.last_error) : null,
+    responseCode: row.response_code === null || row.response_code === undefined ? null : Number(row.response_code),
+    eventsReceived: row.events_received === null || row.events_received === undefined ? null : Number(row.events_received),
+    sentAt: row.sent_at ? String(row.sent_at) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export async function enqueueMetaIntegrationEventInPostgres(
+  entityId: string,
+  event: MetaServerEvent,
+) {
+  await ensurePostgresReady();
+  const now = new Date().toISOString();
+  const {
+    client_ip_address,
+    client_user_agent,
+    fbc,
+    fbp,
+    ...hashedUserData
+  } = event.user_data;
+  const clientContext = {
+    ...(client_ip_address ? { client_ip_address } : {}),
+    ...(client_user_agent ? { client_user_agent } : {}),
+    ...(fbc ? { fbc } : {}),
+    ...(fbp ? { fbp } : {}),
+  };
+  const result = await requirePool().query(
+    `insert into ${table.integrationEvents}
+      (id,provider,event_name,event_id,entity_type,entity_id,event_time,event_source_url,user_data,client_context,custom_data,status,attempt_count,next_attempt_at,last_attempt_at,last_error,response_code,events_received,sent_at,created_at,updated_at)
+     values ($1,'meta',$2,$3,'registration',$4,$5,$6,$7,$8,$9,'pending',0,$10,null,null,null,null,null,$10,$10)
+     on conflict (provider,event_name,event_id) do nothing
+     returning id`,
+    [
+      randomUUID(),
+      event.event_name,
+      event.event_id,
+      entityId,
+      event.event_time,
+      event.event_source_url,
+      hashedUserData,
+      clientContext,
+      event.custom_data,
+      now,
+    ],
+  );
+  return Boolean(result.rowCount);
+}
+
+export async function claimMetaIntegrationEventsInPostgres(limit: number, maxAttempts: number) {
+  await ensurePostgresReady();
+  const now = new Date().toISOString();
+  const staleBefore = new Date(Date.now() - 5 * 60_000).toISOString();
+  const result = await requirePool().query(
+    `with candidates as (
+       select id
+       from ${table.integrationEvents}
+       where attempt_count < $1
+         and event_time >= extract(epoch from now() - interval '7 days')::bigint
+         and (
+           status = 'pending'
+           or (status = 'failed' and next_attempt_at is not null and next_attempt_at::timestamptz <= $2::timestamptz)
+           or (status = 'processing' and last_attempt_at::timestamptz <= $3::timestamptz)
+         )
+       order by created_at asc
+       for update skip locked
+       limit $4
+     )
+     update ${table.integrationEvents} target
+     set status='processing',attempt_count=target.attempt_count+1,last_attempt_at=$2,updated_at=$2
+     from candidates
+     where target.id=candidates.id
+     returning target.*`,
+    [maxAttempts, now, staleBefore, Math.max(1, Math.min(limit, 20))],
+  );
+  return result.rows.map(mapIntegrationEvent);
+}
+
+export async function completeMetaIntegrationEventInPostgres(
+  id: string,
+  result: { responseCode: number; eventsReceived: number },
+) {
+  await ensurePostgresReady();
+  const now = new Date().toISOString();
+  await requirePool().query(
+    `update ${table.integrationEvents}
+     set status='sent',next_attempt_at=null,last_error=null,response_code=$1,events_received=$2,sent_at=$3,updated_at=$3
+     where id=$4 and status='processing'`,
+    [result.responseCode, result.eventsReceived, now, id],
+  );
+}
+
+export async function failMetaIntegrationEventInPostgres(input: {
+  id: string;
+  errorCode: string;
+  responseCode: number | null;
+  retryAt: string | null;
+}) {
+  await ensurePostgresReady();
+  const now = new Date().toISOString();
+  const errorCode = /^[A-Z0-9_-]{1,100}$/.test(input.errorCode) ? input.errorCode : 'META_UNKNOWN_ERROR';
+  await requirePool().query(
+    `update ${table.integrationEvents}
+     set status='failed',next_attempt_at=$1,last_error=$2,response_code=$3,events_received=null,updated_at=$4
+     where id=$5 and status='processing'`,
+    [input.retryAt, errorCode, input.responseCode, now, input.id],
+  );
+}
+
+export async function getMetaRegistrationSnapshotInPostgres(registrationId: string) {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `select registration.id,registration.status,registration.amount_cents,registration.created_at,
+            registration.paid_at,registration.confirmed_at,registration.payload,
+            event.id event_id,event.name event_name,
+            payment.status payment_status,payment.amount_cents payment_amount_cents,payment.paid_at payment_paid_at,
+            context.client_context,context.event_source_url
+     from ${table.registrations} registration
+     join ${table.events} event on event.id=registration.event_id
+     left join ${table.payments} payment on payment.registration_id=registration.id
+     left join lateral (
+       select client_context,event_source_url
+       from ${table.integrationEvents}
+       where provider='meta' and entity_id=registration.id and client_context <> '{}'::jsonb
+       order by created_at asc
+       limit 1
+     ) context on true
+     where registration.id=$1
+     limit 1`,
+    [registrationId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    registrationId: String(row.id),
+    status: row.status as RegistrationStatus,
+    paymentStatus: row.payment_status as RegistrationStatus | undefined,
+    amountCents: Number(row.payment_amount_cents ?? row.amount_cents),
+    createdAt: String(row.created_at),
+    paidAt: row.payment_paid_at || row.paid_at || row.confirmed_at
+      ? String(row.payment_paid_at || row.paid_at || row.confirmed_at)
+      : null,
+    payload: row.payload as RegistrationFormData,
+    eventId: String(row.event_id),
+    eventName: String(row.event_name),
+    clientContext: (row.client_context || {}) as MetaUserData,
+    eventSourceUrl: row.event_source_url ? String(row.event_source_url) : null,
+  };
+}
+
+export async function listPaidRegistrationsMissingMetaPurchaseInPostgres(limit = 20) {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `select registration.id
+     from ${table.registrations} registration
+     join ${table.payments} payment on payment.registration_id=registration.id
+     where registration.status='paid' and payment.status='paid'
+       and coalesce(payment.paid_at,registration.paid_at,registration.confirmed_at)::timestamptz >= now() - interval '7 days'
+       and not exists (
+         select 1 from ${table.integrationEvents} integration
+         where integration.provider='meta'
+           and integration.event_name='Purchase'
+           and integration.event_id='purchase_' || registration.id
+       )
+     order by coalesce(payment.paid_at,registration.paid_at,registration.confirmed_at) asc
+     limit $1`,
+    [Math.max(1, Math.min(limit, 100))],
+  );
+  return result.rows.map((row) => String(row.id));
+}
+
+export async function cleanupMetaClientContextInPostgres() {
+  await ensurePostgresReady();
+  const now = new Date().toISOString();
+  const result = await requirePool().query(
+    `update ${table.integrationEvents} integration
+     set client_context='{}'::jsonb,updated_at=$1
+     where client_context <> '{}'::jsonb
+       and (
+         event_time < extract(epoch from now() - interval '7 days')::bigint
+         or exists (
+           select 1 from ${table.integrationEvents} purchase
+           where purchase.entity_id=integration.entity_id
+             and purchase.provider='meta'
+             and purchase.event_name='Purchase'
+             and purchase.status='sent'
+         )
+         or exists (
+           select 1 from ${table.registrations} registration
+           where registration.id=integration.entity_id
+             and registration.status in ('expired','cancelled','payment_failed','refunded')
+             and registration.updated_at::timestamptz < now() - interval '24 hours'
+         )
+       )`,
+    [now],
+  );
+  return result.rowCount || 0;
+}
+
+export async function getMetaIntegrationStatusInPostgres() {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `select
+       max(sent_at) filter (where status='sent') last_successful_event_at,
+       count(*) filter (where status='failed' and updated_at::timestamptz >= now() - interval '24 hours')::int recent_failures,
+       count(*) filter (where status='pending')::int pending_events
+     from ${table.integrationEvents}`,
+  );
+  return {
+    lastSuccessfulEventAt: result.rows[0]?.last_successful_event_at || null,
+    recentFailures: Number(result.rows[0]?.recent_failures || 0),
+    pendingEvents: Number(result.rows[0]?.pending_events || 0),
+  };
 }

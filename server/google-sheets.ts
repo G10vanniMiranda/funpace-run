@@ -1,4 +1,5 @@
 import { createSign } from 'node:crypto';
+import { isGoogleSheetsAllowed } from './environment.js';
 import {
   claimGoogleSheetSync,
   completeGoogleSheetSync,
@@ -87,7 +88,7 @@ export function normalizeGooglePrivateKey(value: string | undefined) {
 }
 
 export function getGoogleSheetsConfig(environment: NodeJS.ProcessEnv = process.env): GoogleSheetsConfig {
-  const enabled = environment.GOOGLE_SHEETS_ENABLED === 'true';
+  const enabled = isGoogleSheetsAllowed(environment);
   const spreadsheetId = (environment.GOOGLE_SHEETS_SPREADSHEET_ID || '').trim();
   const serviceAccountEmail = (environment.GOOGLE_SERVICE_ACCOUNT_EMAIL || '').trim();
   const privateKey = normalizeGooglePrivateKey(environment.GOOGLE_PRIVATE_KEY);

@@ -1,8 +1,17 @@
 export type MetaPixelEventValue = string | number | boolean | string[] | undefined;
 export type MetaPixelEventParams = Record<string, MetaPixelEventValue>;
 
-type MetaPixelEventOptions = {
+export type MetaPixelEventOptions = {
   eventID?: string;
+};
+
+export type MetaBrowserContext = {
+  initiateCheckoutEventId: string;
+  initiatedAt: number;
+  fbp?: string;
+  fbc?: string;
+  sourceUrl: string;
+  marketingConsent: boolean;
 };
 
 type MetaPixelArguments =
@@ -36,6 +45,56 @@ const initializedPixelIds = new Set<string>();
 const sessionEvents = new Set<string>();
 let lastPagePath = '';
 
+function readCookieValue(name: string) {
+  const prefix = `${name}=`;
+  const entry = document.cookie.split(';').map((item) => item.trim()).find((item) => item.startsWith(prefix));
+  if (!entry) return undefined;
+
+  try {
+    return decodeURIComponent(entry.slice(prefix.length));
+  } catch {
+    return undefined;
+  }
+}
+
+function validMetaCookie(value: string | undefined, type: 'fbp' | 'fbc') {
+  if (!value || value.length > 255) return undefined;
+  const pattern = type === 'fbp'
+    ? /^fb\.1\.\d{10,13}\.[A-Za-z0-9_-]{1,160}$/
+    : /^fb\.1\.\d{10,13}\.[A-Za-z0-9._-]{1,180}$/;
+  return pattern.test(value) ? value : undefined;
+}
+
+function getFbc() {
+  const cookie = validMetaCookie(readCookieValue('_fbc'), 'fbc');
+  if (cookie) return cookie;
+
+  const fbclid = new URL(window.location.href).searchParams.get('fbclid')?.trim();
+  if (!fbclid || fbclid.length > 180 || !/^[A-Za-z0-9._-]+$/.test(fbclid)) return undefined;
+  return `fb.1.${Date.now()}.${fbclid}`;
+}
+
+export function createMetaInitiateCheckoutId() {
+  const id = globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  return `initiate_checkout_${id}`;
+}
+
+export function getMetaBrowserContext(initiateCheckoutEventId: string): MetaBrowserContext {
+  const fbp = validMetaCookie(readCookieValue('_fbp'), 'fbp');
+  const fbc = getFbc();
+
+  return {
+    initiateCheckoutEventId,
+    initiatedAt: Math.floor(Date.now() / 1000),
+    ...(fbp ? { fbp } : {}),
+    ...(fbc ? { fbc } : {}),
+    sourceUrl: window.location.href.slice(0, 500),
+    marketingConsent: hasMarketingConsent(),
+  };
+}
+
 function isBrowser() {
   return typeof window !== 'undefined' && typeof document !== 'undefined';
 }
@@ -45,12 +104,13 @@ function hasValidPixelId() {
 }
 
 function hasMarketingConsent() {
-  if (!requiresConsent) return true;
-
   try {
-    return window.localStorage.getItem(MARKETING_CONSENT_KEY) === 'granted';
+    const storedConsent = window.localStorage.getItem(MARKETING_CONSENT_KEY);
+    if (storedConsent === 'denied') return false;
+    if (storedConsent === 'granted') return true;
+    return !requiresConsent;
   } catch {
-    return false;
+    return !requiresConsent;
   }
 }
 
@@ -155,9 +215,10 @@ export function trackMetaEventOnce(
   dedupeKey: string,
   eventName: string,
   params?: MetaPixelEventParams,
+  options?: MetaPixelEventOptions,
 ) {
   if (!dedupeKey || sessionEvents.has(dedupeKey)) return false;
-  if (!trackMetaEvent(eventName, params)) return false;
+  if (!trackMetaEvent(eventName, params, options)) return false;
 
   sessionEvents.add(dedupeKey);
   return true;

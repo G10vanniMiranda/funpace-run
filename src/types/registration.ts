@@ -24,6 +24,14 @@ export type RegistrationFormData = {
   regulationAccepted: boolean;
   privacyAccepted: boolean;
   partnerBenefitRequested?: boolean;
+  meta?: {
+    initiateCheckoutEventId?: string;
+    initiatedAt?: number;
+    fbp?: string;
+    fbc?: string;
+    sourceUrl?: string;
+    marketingConsent?: boolean;
+  };
   attribution?: {
     source?: string;
     medium?: string;

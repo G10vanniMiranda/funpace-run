@@ -4,7 +4,7 @@ import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
 import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
-import { trackMetaEvent, trackMetaEventOnce } from '../lib/metaPixel';
+import { createMetaInitiateCheckoutId, getMetaBrowserContext, trackMetaEvent, trackMetaEventOnce } from '../lib/metaPixel';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
 import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
@@ -74,6 +74,7 @@ export function RegistrationSection() {
   const [partnerActionMessage, setPartnerActionMessage] = useState('');
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [showSlowCheckoutHint, setShowSlowCheckoutHint] = useState(false);
+  const [initiateCheckoutEventId] = useState(() => createMetaInitiateCheckoutId());
   const activeLot = availability?.lots.find((lot) => lot.name === eventInfo.currentLot)
     || availability?.lots.find((lot) => lot.status === 'active')
     || availability?.lots[0];
@@ -193,6 +194,8 @@ export function RegistrationSection() {
       return;
     }
 
+    const meta = getMetaBrowserContext(initiateCheckoutEventId);
+
     if (availability?.event.id) {
       trackMetaEvent('InitiateCheckout', {
         content_name: availability.event.name,
@@ -201,13 +204,18 @@ export function RegistrationSection() {
         currency: 'BRL',
         value: registrationPrice,
         num_items: 1,
-      });
+      }, { eventID: initiateCheckoutEventId });
     }
 
     setStatus('submitting');
 
     try {
-      const response = await createRegistration({ ...formData, attribution, partnerBenefitRequested: Boolean(partnerContext) });
+      const response = await createRegistration({
+        ...formData,
+        attribution,
+        partnerBenefitRequested: Boolean(partnerContext),
+        meta,
+      });
 
       setRegistrationId(response.registrationId);
       setApiMessage(response.message);
@@ -215,12 +223,18 @@ export function RegistrationSection() {
       if (response.checkoutUrl) {
         if (availability?.event.id) {
           trackMetaEventOnce(
-            `lead:${response.registrationId}`,
-            'Lead',
+            `complete-registration:${response.registrationId}`,
+            'CompleteRegistration',
             {
               content_name: availability.event.name,
               content_category: 'Inscrição em corrida',
+              currency: 'BRL',
+              value: registrationPrice,
+              content_ids: [availability.event.id],
+              content_type: 'product',
+              status: true,
             },
+            { eventID: `complete_registration_${response.registrationId}` },
           );
         }
         window.location.href = response.checkoutUrl;

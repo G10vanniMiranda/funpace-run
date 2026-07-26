@@ -74,6 +74,19 @@ import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAl
 import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { readCookie, signPartnerSession, verifyPartnerSession } from './partner-session.js';
+import {
+  getMetaIntegrationStatus,
+  processMetaIntegrationQueue,
+  queueMetaPurchaseEvent,
+  queueMetaRegistrationEvents,
+  recoverMetaIntegrationEvents,
+} from './meta-events.js';
+import {
+  areExternalPaymentsAllowed,
+  areOutboundWebhooksAllowed,
+  getEnvironmentSafeguards,
+  isCronExecutionAllowed,
+} from './environment.js';
 
 const port = Number(process.env.API_PORT || 3001);
 const defaultAllowedOrigins = [
@@ -90,11 +103,14 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || defaultAllowedOrigins.joi
   .filter(Boolean);
 const appUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
 const apiPublicUrl = (process.env.API_PUBLIC_URL || appUrl).replace(/\/$/, '');
-const paymentProvider = process.env.PAYMENT_PROVIDER || '';
-const infinitePayHandle = process.env.INFINITEPAY_HANDLE || process.env.INFINITIPAY_HANDLE || '';
-const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
-const cronSecret = process.env.CRON_SECRET || '';
-const partnershipWebhookUrl = process.env.PARTNERSHIP_WEBHOOK_URL || '';
+const externalPaymentsAllowed = areExternalPaymentsAllowed();
+const paymentProvider = externalPaymentsAllowed ? process.env.PAYMENT_PROVIDER || '' : '';
+const infinitePayHandle = externalPaymentsAllowed
+  ? process.env.INFINITEPAY_HANDLE || process.env.INFINITIPAY_HANDLE || ''
+  : '';
+const webhookSecret = externalPaymentsAllowed ? process.env.PAYMENT_WEBHOOK_SECRET || '' : '';
+const cronSecret = isCronExecutionAllowed() ? process.env.CRON_SECRET || '' : '';
+const partnershipWebhookUrl = areOutboundWebhooksAllowed() ? process.env.PARTNERSHIP_WEBHOOK_URL || '' : '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
 const adminBootstrapEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 const adminBootstrapPassword = String(process.env.ADMIN_PASSWORD || '');
@@ -652,6 +668,7 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
     termsAccepted: Boolean(input.termsAccepted),
     regulationAccepted: Boolean(input.regulationAccepted),
     privacyAccepted: Boolean(input.privacyAccepted),
+    meta: input.meta?.marketingConsent === false ? { marketingConsent: false } : undefined,
     attribution: input.attribution ? {
       source: compactText(input.attribution.source, 80),
       medium: compactText(input.attribution.medium, 80),
@@ -665,6 +682,41 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
       landingPage: compactText(input.attribution.landingPage, 300),
     } : undefined,
   };
+}
+
+function sanitizeMetaRegistrationContext(input: RegistrationFormData['meta']) {
+  if (!input) return undefined;
+  const initiateCheckoutEventId = compactText(input.initiateCheckoutEventId, 180);
+  const initiatedAt = Number(input.initiatedAt);
+  const fbp = compactText(input.fbp, 255);
+  const fbc = compactText(input.fbc, 255);
+  const sourceUrl = compactText(input.sourceUrl, 500);
+  const marketingConsent = input.marketingConsent !== false;
+  return {
+    ...(initiateCheckoutEventId ? { initiateCheckoutEventId } : {}),
+    ...(Number.isInteger(initiatedAt) ? { initiatedAt } : {}),
+    ...(fbp ? { fbp } : {}),
+    ...(fbc ? { fbc } : {}),
+    ...(sourceUrl ? { sourceUrl } : {}),
+    marketingConsent,
+  };
+}
+
+async function queueConfirmedMetaPurchase(registrationId: string) {
+  try {
+    const queued = await queueMetaPurchaseEvent(registrationId);
+    if (queued) await processMetaIntegrationQueue(5);
+  } catch (error) {
+    console.error(JSON.stringify({
+      at: new Date().toISOString(),
+      provider: 'meta',
+      eventName: 'Purchase',
+      eventId: `purchase_${registrationId}`,
+      registrationId,
+      status: 'queue_failed',
+      errorCode: error instanceof Error ? error.message.slice(0, 100) : 'META_QUEUE_FAILED',
+    }));
+  }
 }
 
 type PartnershipLeadPayload = {
@@ -1474,6 +1526,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   }
 
   const payload = sanitizeRegistration(parsedBody);
+  const metaContext = sanitizeMetaRegistrationContext(parsedBody.meta);
   const errors = validateRegistration(payload);
   logStage('payload_validated', { valid: Object.keys(errors).length === 0 });
 
@@ -1815,6 +1868,22 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     }
   }
 
+  let metaEventsQueued = false;
+  if (response.checkoutUrl && response.registrationId && response.statusCode < 300) {
+    try {
+      const queued = await queueMetaRegistrationEvents(req, response.registrationId, metaContext);
+      metaEventsQueued = queued.length > 0;
+    } catch (error) {
+      console.error(JSON.stringify({
+        at: new Date().toISOString(),
+        provider: 'meta',
+        registrationId: response.registrationId,
+        status: 'queue_failed',
+        errorCode: error instanceof Error ? error.message.slice(0, 100) : 'META_QUEUE_FAILED',
+      }));
+    }
+  }
+
   const { statusCode, amountCents: _amountCents, description: _description, shouldCreateCheckout: _shouldCreateCheckout, ...payloadResponse } = response;
 
   const googleSheetSync = registrationWasCreated && response.registrationId
@@ -1837,6 +1906,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     await processGoogleSheetSync(googleSheetSync.id);
   }
   if (lotSheetSync) await processGoogleSheetSync(lotSheetSync.id);
+  if (metaEventsQueued) await processMetaIntegrationQueue(5).catch(() => undefined);
 }
 
 async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse) {
@@ -1915,6 +1985,11 @@ async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse
 
 async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   const processingStartedAt = Date.now();
+  if (!externalPaymentsAllowed) {
+    json(res, 503, { success: false, message: 'Pagamentos externos desabilitados neste ambiente.' });
+    return;
+  }
+
   if (!requireJson(req, res)) {
     return;
   }
@@ -2050,6 +2125,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     await Promise.allSettled([
       result.registrationId ? processPaymentConfirmationEmail(req, result.registrationId) : Promise.resolve(),
       processQueuedGoogleSheetSyncs(googleSheetSyncs),
+      result.registrationId ? queueConfirmedMetaPurchase(result.registrationId) : Promise.resolve(),
     ]);
     return;
   }
@@ -2339,6 +2415,7 @@ async function handleHealth(req: IncomingMessage, res: ServerResponse) {
     infinitePayEffectiveHandleConfigured: Boolean(infinitePayHandle),
     webhookSecretConfigured: Boolean(webhookSecret),
     adminApiKeyConfigured: Boolean(adminApiKey && adminApiKey !== 'change-me'),
+    safeguards: getEnvironmentSafeguards(),
   };
 
   try {
@@ -2652,10 +2729,18 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
     : [];
   await processPaymentConfirmationEmail(req, registrationId);
   json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration) });
-  await processQueuedGoogleSheetSyncs(googleSheetSyncs);
+  await Promise.allSettled([
+    processQueuedGoogleSheetSyncs(googleSheetSyncs),
+    queueConfirmedMetaPurchase(registrationId),
+  ]);
 }
 
 async function handlePaymentConfirmation(req: IncomingMessage, res: ServerResponse) {
+  if (!externalPaymentsAllowed) {
+    json(res, 503, { message: 'Pagamentos externos desabilitados neste ambiente.' });
+    return;
+  }
+
   if (!requireJson(req, res)) return;
   const body = parseJsonBody<{ orderNsu?: string; transactionNsu?: string; slug?: string }>(await readBody(req));
   const orderNsu = compactText(body?.orderNsu, 100);
@@ -2691,7 +2776,10 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
       await processPaymentConfirmationEmail(req, confirmed.registrationId);
     }
     json(res, 200, { status: 'paid' });
-    await processQueuedGoogleSheetSyncs(googleSheetSyncs);
+    await Promise.allSettled([
+      processQueuedGoogleSheetSyncs(googleSheetSyncs),
+      queueConfirmedMetaPurchase(confirmed.registrationId || orderNsu),
+    ]);
     return;
   }
 
@@ -2810,6 +2898,7 @@ async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) 
         const tasks = await queueConfirmedPaymentGoogleSheetSync(registration.id, confirmed.paymentId);
         await processQueuedGoogleSheetSyncs(tasks);
       }
+      if (confirmed.registrationId) await queueConfirmedMetaPurchase(confirmed.registrationId);
     } catch (error) {
       summary.errors += 1;
       console.error(JSON.stringify({
@@ -2841,7 +2930,10 @@ async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) 
   console.log(JSON.stringify({ at: new Date().toISOString(), message: 'payment_recovery_completed', ...summary, elapsedMs: Date.now() - startedAt }));
   const reconciliation = await persistCurrentReconciliation('cron', 'apply', 'system:cron');
   const partnerConsistency = await runPartnerConsistencyCheckInPostgres('system:cron');
-  json(res, 200, { success: true, ...summary, reconciliation, partnerConsistency, elapsedMs: Date.now() - startedAt });
+  const metaRecovery = await recoverMetaIntegrationEvents().catch((error) => ({
+    error: error instanceof Error ? error.message.slice(0, 100) : 'META_RECOVERY_FAILED',
+  }));
+  json(res, 200, { success: true, ...summary, reconciliation, partnerConsistency, meta: metaRecovery, elapsedMs: Date.now() - startedAt });
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
@@ -2935,6 +3027,12 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     shirtSizes,
     daily,
   });
+}
+
+async function handleAdminMetaIntegrationStatus(req: IncomingMessage, res: ServerResponse) {
+  const session = await requireAdmin(req, res, ['administrator']);
+  if (!session || !requireAdminDatabase(res)) return;
+  json(res, 200, await getMetaIntegrationStatus());
 }
 
 async function refreshOperationalAlerts(database: Database) {
@@ -4084,6 +4182,10 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/executive-dashboard') { await handleAdminExecutiveDashboard(req, res); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/monitoring') { await handleAdminMonitoring(req, res); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/integrations/meta/status') {
+      await handleAdminMetaIntegrationStatus(req, res);
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/admin/alerts') { await handleAdminAlerts(req, res, url); return; }
     const adminAlertUpdate = url.pathname.match(/^\/api\/admin\/alerts\/([^/]+)$/);
     if (req.method === 'PATCH' && adminAlertUpdate) { await handleAdminAlertUpdate(req, res, decodeURIComponent(adminAlertUpdate[1])); return; }
