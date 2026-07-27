@@ -100,7 +100,11 @@ test('homologation response is controlled and InfinitePay remains server-gated',
   const source = readFileSync('server/index.ts', 'utf8');
   const queuePosition = source.indexOf('enqueueMetaRegistrationFlow(metaFlow');
   const providerPosition = source.indexOf('const checkout = await createInfinitePayCheckout');
+  const processPosition = source.indexOf('if (metaEventsQueued) await processMetaIntegrationQueue');
+  const responsePosition = source.indexOf('json(res, statusCode, payloadResponse)');
   assert.ok(queuePosition >= 0 && providerPosition > queuePosition);
+  assert.ok(processPosition > queuePosition && responsePosition > processPosition);
+  assert.match(source, /processMetaIntegrationQueue\(5\)\.catch\(\(\) => undefined\)/);
   assert.match(source, /paymentProvider === 'infinitepay'/);
   assert.match(source, /isHomologationEnvironment\(\)\s*&&\s*!externalPaymentsAllowed/);
   assert.match(source, /Pagamento externo desabilitado em homologacao\./);

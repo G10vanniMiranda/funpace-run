@@ -1953,6 +1953,11 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     : null;
   const lotSheetSync = registrationWasCreated ? await queueLotSummaryGoogleSheetSync() : null;
 
+  // Vercel may suspend a serverless invocation as soon as the response finishes.
+  // Complete the isolated Meta outbox attempt first, while keeping any provider
+  // failure unable to change the registration or the response below.
+  if (metaEventsQueued) await processMetaIntegrationQueue(5).catch(() => undefined);
+
   logStage('response_ready', {
     statusCode,
     registrationId: response.registrationId || null,
@@ -1968,7 +1973,6 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     await processGoogleSheetSync(googleSheetSync.id);
   }
   if (lotSheetSync) await processGoogleSheetSync(lotSheetSync.id);
-  if (metaEventsQueued) await processMetaIntegrationQueue(5).catch(() => undefined);
 }
 
 async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse) {
