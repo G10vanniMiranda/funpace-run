@@ -1816,6 +1816,25 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   });
   const metaEventsQueued = metaQueue.completeRegistrationQueued
     || metaQueue.initiateCheckoutQueued;
+  if (isHomologationEnvironment()) {
+    try {
+      const metaStatus = await getMetaIntegrationStatus();
+      logStage('meta_queue_finished', {
+        registrationId: response.registrationId,
+        enabled: metaStatus.enabled,
+        pixelConfigured: metaStatus.pixelConfigured,
+        tokenConfigured: metaStatus.tokenConfigured,
+        apiVersionConfigured: metaStatus.apiVersionConfigured,
+        testMode: metaStatus.testMode,
+        completeRegistrationQueued: metaQueue.completeRegistrationQueued,
+        initiateCheckoutQueued: metaQueue.initiateCheckoutQueued,
+      });
+    } catch {
+      logStage('meta_queue_status_unavailable', {
+        registrationId: response.registrationId,
+      });
+    }
+  }
   for (const failure of metaQueue.failures) {
     console.error(JSON.stringify({
       at: new Date().toISOString(),
