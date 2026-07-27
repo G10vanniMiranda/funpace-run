@@ -4,7 +4,7 @@ import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
 import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
-import { createMetaInitiateCheckoutId, getMetaBrowserContext, trackMetaEvent, trackMetaEventOnce } from '../lib/metaPixel';
+import { getMetaBrowserContext, trackMetaEventOnce } from '../lib/metaPixel';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
 import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
@@ -74,7 +74,6 @@ export function RegistrationSection() {
   const [partnerActionMessage, setPartnerActionMessage] = useState('');
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [showSlowCheckoutHint, setShowSlowCheckoutHint] = useState(false);
-  const [initiateCheckoutEventId] = useState(() => createMetaInitiateCheckoutId());
   const activeLot = availability?.lots.find((lot) => lot.name === eventInfo.currentLot)
     || availability?.lots.find((lot) => lot.status === 'active')
     || availability?.lots[0];
@@ -194,18 +193,7 @@ export function RegistrationSection() {
       return;
     }
 
-    const meta = getMetaBrowserContext(initiateCheckoutEventId);
-
-    if (availability?.event.id) {
-      trackMetaEvent('InitiateCheckout', {
-        content_name: availability.event.name,
-        content_ids: [availability.event.id],
-        content_type: 'product',
-        currency: 'BRL',
-        value: registrationPrice,
-        num_items: 1,
-      }, { eventID: initiateCheckoutEventId });
-    }
+    const meta = getMetaBrowserContext();
 
     setStatus('submitting');
 
@@ -214,34 +202,52 @@ export function RegistrationSection() {
         ...formData,
         attribution,
         partnerBenefitRequested: Boolean(partnerContext),
+        checkoutRequested: true,
         meta,
       });
 
       setRegistrationId(response.registrationId);
       setApiMessage(response.message);
 
-      if (response.checkoutUrl) {
-        if (availability?.event.id) {
+      if (availability?.event.id) {
+        trackMetaEventOnce(
+          `complete-registration:${response.registrationId}`,
+          'CompleteRegistration',
+          {
+            content_name: availability.event.name,
+            content_category: 'Inscrição em corrida',
+            currency: 'BRL',
+            value: registrationPrice,
+            content_ids: [availability.event.id],
+            content_type: 'product',
+            status: true,
+          },
+          { eventID: `complete_registration_${response.registrationId}` },
+        );
+
+        if (response.attemptId) {
           trackMetaEventOnce(
-            `complete-registration:${response.registrationId}`,
-            'CompleteRegistration',
+            `initiate-checkout:${response.attemptId}`,
+            'InitiateCheckout',
             {
               content_name: availability.event.name,
-              content_category: 'Inscrição em corrida',
-              currency: 'BRL',
-              value: registrationPrice,
               content_ids: [availability.event.id],
               content_type: 'product',
-              status: true,
+              currency: 'BRL',
+              value: registrationPrice,
+              num_items: 1,
             },
-            { eventID: `complete_registration_${response.registrationId}` },
+            { eventID: response.attemptId },
           );
         }
+      }
+
+      if (response.checkoutUrl) {
         window.location.href = response.checkoutUrl;
         return;
       }
 
-      setStatus('api_error');
+      setStatus(response.checkoutEnabled === false ? 'checkout_pending' : 'api_error');
       setApiMessage(response.message || 'Inscrição criada, mas o checkout não retornou uma URL de pagamento.');
     } catch (error) {
       setStatus('api_error');

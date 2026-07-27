@@ -76,23 +76,15 @@ function storedClientContext(context: Record<string, unknown>): MetaClientContex
   };
 }
 
-export async function queueMetaRegistrationEvents(
+async function getMetaRegistrationEventContext(
   req: IncomingMessage,
   registrationId: string,
   metaContext?: MetaRegistrationRequestContext,
 ) {
-  if (!usesPostgresDatabase() || !isMetaCapiReady()) return [];
-  if (metaContext?.marketingConsent === false) return [];
+  if (!usesPostgresDatabase() || !isMetaCapiReady()) return null;
+  if (metaContext?.marketingConsent === false) return null;
   const snapshot = await getMetaRegistrationSnapshotInPostgres(registrationId);
-  if (!snapshot || snapshot.status !== 'pending_payment') return [];
-
-  const requestedInitiateId = String(metaContext?.initiateCheckoutEventId || '');
-  const initiateEventId = validateMetaEventId('InitiateCheckout', requestedInitiateId)
-    ? requestedInitiateId
-    : `initiate_checkout_${registrationId}`;
-  const eventTime = normalizeEventTime(metaContext?.initiatedAt || 0)
-    || normalizeEventTime(snapshot.createdAt);
-  if (!eventTime) return [];
+  if (!snapshot || snapshot.status !== 'pending_payment') return null;
 
   const clientContext = getMetaClientContext(req, metaContext);
   const userData = buildMetaUserData(getIdentity(snapshot.payload, registrationId), clientContext);
@@ -104,30 +96,51 @@ export async function queueMetaRegistrationEvents(
     content_ids: [snapshot.eventId],
     content_type: 'product' as const,
   };
-  const events: MetaServerEvent[] = [
-    buildMetaServerEvent({
-      eventName: 'InitiateCheckout',
-      eventId: initiateEventId,
-      eventTime,
-      eventSourceUrl: sourceUrl,
-      userData,
-      customData: { ...commonCustomData, num_items: 1 },
-    }),
-    buildMetaServerEvent({
-      eventName: 'CompleteRegistration',
-      eventId: `complete_registration_${registrationId}`,
-      eventTime: snapshot.createdAt,
-      eventSourceUrl: sourceUrl,
-      userData,
-      customData: { ...commonCustomData, status: true },
-    }),
-  ];
+  return { snapshot, userData, sourceUrl, commonCustomData };
+}
 
-  const queued: string[] = [];
-  for (const event of events) {
-    if (await enqueueMetaIntegrationEventInPostgres(registrationId, event)) queued.push(event.event_id);
-  }
-  return queued;
+export async function queueMetaCompleteRegistrationEvent(
+  req: IncomingMessage,
+  registrationId: string,
+  eventId: string,
+  metaContext?: MetaRegistrationRequestContext,
+) {
+  if (!validateMetaEventId('CompleteRegistration', eventId)) return false;
+  const context = await getMetaRegistrationEventContext(req, registrationId, metaContext);
+  if (!context) return false;
+  const event = buildMetaServerEvent({
+    eventName: 'CompleteRegistration',
+    eventId,
+    eventTime: context.snapshot.createdAt,
+    eventSourceUrl: context.sourceUrl,
+    userData: context.userData,
+    customData: { ...context.commonCustomData, status: true },
+  });
+  return enqueueMetaIntegrationEventInPostgres(registrationId, event);
+}
+
+export async function queueMetaInitiateCheckoutEvent(
+  req: IncomingMessage,
+  registrationId: string,
+  eventId: string,
+  initiatedAt: number,
+  metaContext?: MetaRegistrationRequestContext,
+) {
+  if (!validateMetaEventId('InitiateCheckout', eventId)) return false;
+  const context = await getMetaRegistrationEventContext(req, registrationId, metaContext);
+  if (!context) return false;
+  const eventTime = normalizeEventTime(initiatedAt)
+    || normalizeEventTime(context.snapshot.createdAt);
+  if (!eventTime) return false;
+  const event = buildMetaServerEvent({
+    eventName: 'InitiateCheckout',
+    eventId,
+    eventTime,
+    eventSourceUrl: context.sourceUrl,
+    userData: context.userData,
+    customData: { ...context.commonCustomData, num_items: 1 },
+  });
+  return enqueueMetaIntegrationEventInPostgres(registrationId, event);
 }
 
 export async function queueMetaPurchaseEvent(registrationId: string) {

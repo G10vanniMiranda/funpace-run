@@ -24,8 +24,8 @@ export type RegistrationFormData = {
   regulationAccepted: boolean;
   privacyAccepted: boolean;
   partnerBenefitRequested?: boolean;
+  checkoutRequested?: boolean;
   meta?: {
-    initiateCheckoutEventId?: string;
     initiatedAt?: number;
     fbp?: string;
     fbc?: string;
@@ -74,6 +74,10 @@ export type CreateRegistrationResponse = {
   registrationStatus: RegistrationStatus;
   checkoutStatus: CheckoutStatus;
   checkoutUrl: string | null;
+  checkoutEnabled?: boolean;
+  checkoutSimulated?: false;
+  paymentProviderCalled?: boolean;
+  attemptId?: string | null;
   message: string;
   expiresAt?: string | null;
   partner?: RegistrationPartnerPricing | null;

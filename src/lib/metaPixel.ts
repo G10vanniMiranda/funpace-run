@@ -6,7 +6,6 @@ export type MetaPixelEventOptions = {
 };
 
 export type MetaBrowserContext = {
-  initiateCheckoutEventId: string;
   initiatedAt: number;
   fbp?: string;
   fbc?: string;
@@ -74,19 +73,11 @@ function getFbc() {
   return `fb.1.${Date.now()}.${fbclid}`;
 }
 
-export function createMetaInitiateCheckoutId() {
-  const id = globalThis.crypto?.randomUUID
-    ? globalThis.crypto.randomUUID()
-    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
-  return `initiate_checkout_${id}`;
-}
-
-export function getMetaBrowserContext(initiateCheckoutEventId: string): MetaBrowserContext {
+export function getMetaBrowserContext(): MetaBrowserContext {
   const fbp = validMetaCookie(readCookieValue('_fbp'), 'fbp');
   const fbc = getFbc();
 
   return {
-    initiateCheckoutEventId,
     initiatedAt: Math.floor(Date.now() / 1000),
     ...(fbp ? { fbp } : {}),
     ...(fbc ? { fbc } : {}),

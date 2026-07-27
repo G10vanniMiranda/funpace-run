@@ -77,14 +77,20 @@ import { readCookie, signPartnerSession, verifyPartnerSession } from './partner-
 import {
   getMetaIntegrationStatus,
   processMetaIntegrationQueue,
+  queueMetaCompleteRegistrationEvent,
+  queueMetaInitiateCheckoutEvent,
   queueMetaPurchaseEvent,
-  queueMetaRegistrationEvents,
   recoverMetaIntegrationEvents,
 } from './meta-events.js';
+import {
+  enqueueMetaRegistrationFlow,
+  resolveMetaRegistrationFlow,
+} from './meta-registration-flow.js';
 import {
   areExternalPaymentsAllowed,
   areOutboundWebhooksAllowed,
   getEnvironmentSafeguards,
+  isHomologationEnvironment,
   isCronExecutionAllowed,
 } from './environment.js';
 
@@ -686,14 +692,12 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
 
 function sanitizeMetaRegistrationContext(input: RegistrationFormData['meta']) {
   if (!input) return undefined;
-  const initiateCheckoutEventId = compactText(input.initiateCheckoutEventId, 180);
   const initiatedAt = Number(input.initiatedAt);
   const fbp = compactText(input.fbp, 255);
   const fbc = compactText(input.fbc, 255);
   const sourceUrl = compactText(input.sourceUrl, 500);
   const marketingConsent = input.marketingConsent !== false;
   return {
-    ...(initiateCheckoutEventId ? { initiateCheckoutEventId } : {}),
     ...(Number.isInteger(initiatedAt) ? { initiatedAt } : {}),
     ...(fbp ? { fbp } : {}),
     ...(fbc ? { fbc } : {}),
@@ -1527,6 +1531,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
   const payload = sanitizeRegistration(parsedBody);
   const metaContext = sanitizeMetaRegistrationContext(parsedBody.meta);
+  const checkoutRequested = parsedBody.checkoutRequested === true;
   const errors = validateRegistration(payload);
   logStage('payload_validated', { valid: Object.keys(errors).length === 0 });
 
@@ -1778,6 +1783,51 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     checkoutStatus: response.checkoutStatus,
   });
   const registrationWasCreated = response.statusCode === 201;
+  const metaFlow = resolveMetaRegistrationFlow({
+    registrationId: response.registrationId,
+    statusCode: response.statusCode,
+    success: response.success,
+    checkoutRequested,
+    marketingConsent: metaContext?.marketingConsent,
+  });
+  response.checkoutEnabled = Boolean(
+    externalPaymentsAllowed
+    && paymentProvider === 'infinitepay'
+    && infinitePayHandle,
+  );
+  response.checkoutSimulated = false;
+  response.paymentProviderCalled = false;
+  response.attemptId = metaFlow.initiateCheckoutEventId;
+
+  const metaQueue = await enqueueMetaRegistrationFlow(metaFlow, {
+    queueCompleteRegistration: (eventId) => queueMetaCompleteRegistrationEvent(
+      req,
+      response.registrationId,
+      eventId,
+      metaContext,
+    ),
+    queueInitiateCheckout: (eventId) => queueMetaInitiateCheckoutEvent(
+      req,
+      response.registrationId,
+      eventId,
+      Math.floor(startedAt / 1000),
+      metaContext,
+    ),
+  });
+  const metaEventsQueued = metaQueue.completeRegistrationQueued
+    || metaQueue.initiateCheckoutQueued;
+  for (const failure of metaQueue.failures) {
+    console.error(JSON.stringify({
+      at: new Date().toISOString(),
+      provider: 'meta',
+      eventName: failure.eventName,
+      registrationId: response.registrationId,
+      status: 'queue_failed',
+      errorCode: failure.error instanceof Error
+        ? failure.error.message.slice(0, 100)
+        : 'META_QUEUE_FAILED',
+    }));
+  }
 
   if (
     response.shouldCreateCheckout
@@ -1800,6 +1850,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
           registrationId: response.registrationId,
           amountCents: response.amountCents,
         });
+        response.paymentProviderCalled = true;
         const checkout = await createInfinitePayCheckout({
           handle: infinitePayHandle,
           orderNsu: response.registrationId,
@@ -1868,20 +1919,12 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     }
   }
 
-  let metaEventsQueued = false;
-  if (response.checkoutUrl && response.registrationId && response.statusCode < 300) {
-    try {
-      const queued = await queueMetaRegistrationEvents(req, response.registrationId, metaContext);
-      metaEventsQueued = queued.length > 0;
-    } catch (error) {
-      console.error(JSON.stringify({
-        at: new Date().toISOString(),
-        provider: 'meta',
-        registrationId: response.registrationId,
-        status: 'queue_failed',
-        errorCode: error instanceof Error ? error.message.slice(0, 100) : 'META_QUEUE_FAILED',
-      }));
-    }
+  if (
+    metaFlow.shouldQueueInitiateCheckout
+    && isHomologationEnvironment()
+    && !externalPaymentsAllowed
+  ) {
+    response.message = 'Pagamento externo desabilitado em homologacao.';
   }
 
   const { statusCode, amountCents: _amountCents, description: _description, shouldCreateCheckout: _shouldCreateCheckout, ...payloadResponse } = response;
