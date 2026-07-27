@@ -189,6 +189,18 @@ test('accepts a valid Meta response', async () => {
   if (result.ok) assert.equal(result.eventsReceived, 1);
 });
 
+test('normalizes whitespace and casing in the Meta CAPI enable flag', async () => {
+  configureMeta();
+  process.env.META_CAPI_ENABLED = '  TRUE\r\n';
+  let calls = 0;
+  const result = await sendMetaServerEvent(validEvent(), async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ events_received: 1 }), { status: 200 });
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 1);
+});
+
 for (const [status, retryable] of [[400, false], [401, false], [429, true], [500, true]] as const) {
   test(`classifies HTTP ${status} correctly`, async () => {
     configureMeta();

@@ -97,13 +97,14 @@ function clampInteger(value: string | undefined, fallback: number, min: number, 
 }
 
 export function getMetaCapiConfig() {
+  const enabled = (process.env.META_CAPI_ENABLED || '').trim().toLowerCase();
   const pixelId = (process.env.META_PIXEL_ID || '').trim();
   const accessToken = (process.env.META_CONVERSIONS_API_TOKEN || '').trim();
   const graphApiVersion = (process.env.META_GRAPH_API_VERSION || '').trim();
   const testEventCode = (process.env.META_TEST_EVENT_CODE || '').trim();
 
   return {
-    enabled: process.env.META_CAPI_ENABLED === 'true',
+    enabled: enabled === 'true',
     pixelId: /^\d+$/.test(pixelId) ? pixelId : '',
     accessToken,
     graphApiVersion: /^v\d+\.\d+$/.test(graphApiVersion) ? graphApiVersion : '',
