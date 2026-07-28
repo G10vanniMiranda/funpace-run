@@ -34,17 +34,12 @@ export const regulationChapters: RegulationChapter[] = [
       {
         kind: 'schedule',
         title: 'PROGRAMAÇÃO:',
-        location: 'LOCAL DE LARGADA NO COMPLEXO MADEIRA MAMORÉ',
+        location: '',
         items: [
-          '05h:00m - Abertura do evento.',
-          '05h:30m - Concentração dos atletas.',
+          '05h:00m - Concentração dos atletas.',
+          '05h:30m - Abertura do evento.',
           '06h:00m - Largada geral 5km e 10km.',
         ],
-      },
-      {
-        kind: 'highlight',
-        title: 'kit do atleta:',
-        text: 'Não é apenas um kit. É parte de uma experiência que vai entrar para a história!',
       },
       {
         kind: 'highlight',
@@ -73,10 +68,6 @@ export const regulationChapters: RegulationChapter[] = [
     title: 'Premiação',
     blocks: [
       {
-        kind: 'highlight',
-        title: 'PÓDIUM GERAL: PARA OS ATLETAS DE 1º AO 3º LUGAR.',
-      },
-      {
         kind: 'clause',
         number: '2.1.',
         text: 'Todos os atletas que cruzarem a linha de chegada de forma legal, que estiverem regularmente inscritos e sem o descumprimento deste regulamento, receberão 01 (uma) medalha de participação.',
@@ -84,7 +75,7 @@ export const regulationChapters: RegulationChapter[] = [
       {
         kind: 'clause',
         number: '2.2.',
-        text: 'A distância de 5km e 10km terá premiação a todos participantes inscritos que concluírem a prova entre a 1ª e a 3ª colocação nas categorias Público Geral do 1ª ao a 3ª, nos gêneros masculino e feminino, receberão, além da medalha de participação, 1 (um) troféu.',
+        text: 'A distância de 5km e 10km terá premiação a todos participantes inscritos que concluírem a prova entre a 1ª e a 3ª colocação nas categorias público geral, nos gêneros masculino e feminino. Receberão além da medalha de participação, 1 (um) troféu.',
       },
       {
         kind: 'clause',
@@ -126,22 +117,22 @@ export const regulationChapters: RegulationChapter[] = [
       {
         kind: 'clause',
         number: '3.2.',
-        text: 'No ato da inscrição, ao concordar com o regulamento geral da - FUNPACE RUN - EXPERIENCE 2026, por meio da opção disponibilizada no sistema online, o participante declara estar de acordo com todos os termos e regras do evento, assumindo total responsabilidade por sua participação na prova, conforme descrito no Termo de Responsabilidade, parte integrante deste regulamento.',
+        text: 'No ato da inscrição, ao concordar com o regulamento geral da FUNPACE RUN EXPERIENCE 2026, por meio da opção disponibilizada no sistema online, o participante declara estar de acordo com todos os termos e regras do evento, assumindo total responsabilidade por sua participação na prova, conforme descrito no Termo de Responsabilidade, parte integrante deste regulamento.',
       },
       {
         kind: 'clause',
         number: '3.3.',
-        text: 'A organização da - FUNPACE RUN- EXPERIENCE 2026 se compromete a cumprir todas as disposições da Lei nº 13.709/2018 (Lei Geral de Proteção de Dados Pessoais – LGPD), observando rigorosamente os princípios da finalidade, adequação, necessidade, transparência, livre acesso, segurança, prevenção, não discriminação e responsabilização no tratamento dos dados pessoais dos participantes.',
+        text: 'A organização da FUNPACE RUN EXPERIENCE 2026 se compromete a cumprir todas as disposições da Lei nº 13.709/2018 (Lei Geral de Proteção de Dados Pessoais – LGPD), observando rigorosamente os princípios da finalidade, adequação, necessidade, transparência, livre acesso, segurança, prevenção, não discriminação e responsabilização no tratamento dos dados pessoais dos participantes.',
       },
       {
         kind: 'clause',
         number: '3.4.',
-        text: 'As inscrições serão realizadas somente através do site https://com.br, não havendo outros postos de inscrição.',
+        text: 'As inscrições serão realizadas somente através do site https://funpance.club, não havendo outros postos de inscrição.',
       },
       {
         kind: 'clause',
         number: '3.5.',
-        text: 'RETIRADA DO KIT Retirada do Kit Atleta: LOCAL E DATA A DEFINIR KIT ATLETA: ...... A retirada de kits só poderá ser efetivada por terceiros mediante a apresentação do documento com foto de identificação do inscrito que poderá ser digitalizada.',
+        text: 'Retirada do Kit Atleta: O local, a data e o horário para a retirada dos kits serão divulgados aproximadamente 1 semana antes do evento. Todas as informações oficiais serão publicadas em nossos canais de comunicação e enviadas aos atletas inscritos. Fique atento ao seu e-mail e às redes sociais da Funpace para acompanhar as atualizações.',
       },
     ],
   },
@@ -163,16 +154,11 @@ export const regulationChapters: RegulationChapter[] = [
       {
         kind: 'clause',
         number: '4.3.',
-        text: 'A utilização inadequada do número de peito acarreta a não marcação do tempo, isentando a Comissão Organizadora na divulgação dos resultados.',
-      },
-      {
-        kind: 'clause',
-        number: '4.7.',
         text: 'Somente o atleta com Número de Peito tem acesso às áreas de largada, chegada, medalha e serviços de prova.',
       },
       {
         kind: 'clause',
-        number: '4.8.',
+        number: '4.4.',
         text: 'Ao final da prova, o participante que cruzar a linha de chegada portando o número de peito e a etiqueta nele presente para recebimento da premiação, receberá 01 medalha de participação.',
       },
     ],
@@ -199,42 +185,37 @@ export const regulationChapters: RegulationChapter[] = [
       },
       {
         kind: 'clause',
-        number: '§1º',
+        number: '5.4.',
         text: 'O atleta que ceder seu número de peito para outra pessoa será responsável por qualquer acidente ou dano que esta venha a sofrer, isentando o atendimento e qualquer responsabilidade da empresa organizadora, seus patrocinadores, apoiadores e órgãos públicos.',
       },
       {
         kind: 'clause',
-        number: '5.4.',
+        number: '5.5.',
         text: 'Os atletas com idade igual ou maior a 14 anos poderão participar da corrida de 5 km e 10km mediante autorização por escrito dos pais ou de um responsável. A autorização deverá estar acompanhada de cópia de um documento de Identidade do menor de idade, que será retida pela empresa organizadora, no ato de entrega dos kits. A idade a ser considerada, obrigatoriamente, para os efeitos de inscrição e classificação por faixa etária é a que o atleta terá em dezembro do ano em que for realizada a corrida.',
       },
       {
         kind: 'clause',
-        number: '5.5.',
-        text: 'A entrega dos kits acontecerá em local, data e horário a ser informados pela organização, pela página de inscrição e pelas redes sociais oficiais do FUNPACE, e pelo e-mail cadastrado na inscrição.',
-      },
-      {
-        kind: 'clause',
-        number: '5.6.',
+        number: '5.7.',
         text: 'O (a) atleta que não retirar o seu kit na data e horário estipulado pela organização não terá direito do mesmo após o evento.',
       },
       {
         kind: 'clause',
-        number: '5.7.',
+        number: '5.8.',
         text: 'O Kit somente poderá ser retirado pelo (a) atleta inscrito mediante apresentação do documento de confirmação de inscrição, o respectivo recibo de pagamento e documento oficial com foto',
       },
       {
         kind: 'clause',
-        number: '5.8.',
+        number: '5.9.',
         text: 'A retirada de kits só poderá ser efetivada por terceiros mediante a apresentação do documento com foto de identificação do inscrito que poderá ser digitalizada.',
       },
       {
         kind: 'clause',
-        number: '5.9.',
+        number: '5.10.',
         text: 'No momento da retirada do kit o responsável deverá conferir os seus dados e o número do peito.',
       },
       {
         kind: 'clause',
-        number: '5.10.',
+        number: '5.11.',
         text: 'Não serão aceitas reclamações cadastrais como também dos itens que compõe o kit, após sua retirada.',
       },
       {
@@ -251,11 +232,6 @@ export const regulationChapters: RegulationChapter[] = [
         kind: 'clause',
         number: '5.13.',
         text: 'A empresa organizadora poderá, a seu critério ou conforme as necessidades da corrida, alterar ou revogar este regulamento, total ou parcialmente, informando as mudanças pelo site oficial da corrida.',
-      },
-      {
-        kind: 'clause',
-        number: '5.14.',
-        text: 'O participante que ceder seu número de peito para outra pessoa será responsável por qualquer acidente ou dano que esta venha a sofrer, isentando qualquer responsabilidade da organização da corrida, seus patrocinadores, apoiadores e órgãos públicos envolvidos na corrida.',
       },
     ],
   },
