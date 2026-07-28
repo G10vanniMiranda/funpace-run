@@ -13,8 +13,7 @@ import { PrivacyPage, TermsPage } from "./pages/Privacy";
 import { SuccessPage } from "./pages/Success";
 import { PartnerLandingPage } from "./pages/PartnerLanding";
 
-// Re-enable only after the official course map is available.
-const showCourseMap = false;
+const showCourseMap = true;
 
 export default function SiteApp() {
   const pathname = window.location.pathname;
