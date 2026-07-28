@@ -1,3 +1,5 @@
+import { isMarketingConsentGranted } from '../src/lib/privacyConsent.js';
+
 export type MetaRegistrationFlowDecision = {
   registrationId: string;
   completeRegistrationEventId: string | null;
@@ -24,7 +26,7 @@ export function resolveMetaRegistrationFlow(
     && input.statusCode >= 200
     && input.statusCode < 300,
   );
-  const consentGranted = input.marketingConsent !== false;
+  const consentGranted = isMarketingConsentGranted(input.marketingConsent);
   const shouldQueueCompleteRegistration = registrationCommitted && consentGranted;
   const shouldQueueInitiateCheckout = shouldQueueCompleteRegistration && input.checkoutRequested;
 

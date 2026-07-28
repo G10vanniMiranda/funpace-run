@@ -1,3 +1,9 @@
+import {
+  getPrivacyConsentSnapshot,
+  isConsentCategoryAllowed,
+  setPrivacyConsent,
+} from './privacyConsent';
+
 export type MetaPixelEventValue = string | number | boolean | string[] | undefined;
 export type MetaPixelEventParams = Record<string, MetaPixelEventValue>;
 
@@ -36,10 +42,8 @@ declare global {
 }
 
 const META_PIXEL_SCRIPT_ID = 'meta-pixel-script';
-const MARKETING_CONSENT_KEY = 'funpace-marketing-consent';
 const PURCHASE_STORAGE_PREFIX = 'meta_purchase_sent:';
 const pixelId = (import.meta.env.VITE_META_PIXEL_ID || '').trim();
-const requiresConsent = import.meta.env.VITE_META_PIXEL_REQUIRE_CONSENT === 'true';
 const initializedPixelIds = new Set<string>();
 const sessionEvents = new Set<string>();
 let lastPagePath = '';
@@ -74,6 +78,18 @@ function getFbc() {
 }
 
 export function getMetaBrowserContext(): MetaBrowserContext {
+  const marketingConsent = hasMarketingConsent();
+  const sourceUrl = marketingConsent
+    ? window.location.href.slice(0, 500)
+    : `${window.location.origin}${window.location.pathname}`.slice(0, 500);
+  if (!marketingConsent) {
+    return {
+      initiatedAt: Math.floor(Date.now() / 1000),
+      sourceUrl,
+      marketingConsent: false,
+    };
+  }
+
   const fbp = validMetaCookie(readCookieValue('_fbp'), 'fbp');
   const fbc = getFbc();
 
@@ -81,8 +97,8 @@ export function getMetaBrowserContext(): MetaBrowserContext {
     initiatedAt: Math.floor(Date.now() / 1000),
     ...(fbp ? { fbp } : {}),
     ...(fbc ? { fbc } : {}),
-    sourceUrl: window.location.href.slice(0, 500),
-    marketingConsent: hasMarketingConsent(),
+    sourceUrl,
+    marketingConsent: true,
   };
 }
 
@@ -95,14 +111,7 @@ function hasValidPixelId() {
 }
 
 function hasMarketingConsent() {
-  try {
-    const storedConsent = window.localStorage.getItem(MARKETING_CONSENT_KEY);
-    if (storedConsent === 'denied') return false;
-    if (storedConsent === 'granted') return true;
-    return !requiresConsent;
-  } catch {
-    return !requiresConsent;
-  }
+  return isConsentCategoryAllowed(getPrivacyConsentSnapshot(), 'marketing');
 }
 
 function createFbq(): MetaPixelFunction {
@@ -245,18 +254,28 @@ export function trackMetaPurchase(orderId: string, params: MetaPixelEventParams)
 export function setMetaPixelConsent(granted: boolean) {
   if (!isBrowser()) return;
 
-  try {
-    window.localStorage.setItem(MARKETING_CONSENT_KEY, granted ? 'granted' : 'denied');
-  } catch {
-    // Consent remains effective for the current page even without storage.
-  }
+  const current = getPrivacyConsentSnapshot();
+  setPrivacyConsent({
+    statistics: current.preferences.statistics,
+    marketing: granted,
+  });
+  synchronizeMetaPixelConsent(granted);
+}
 
+export function synchronizeMetaPixelConsent(granted: boolean) {
+  if (!isBrowser()) return false;
   if (!granted) {
     window.fbq?.('consent', 'revoke');
-    return;
+    document.getElementById(META_PIXEL_SCRIPT_ID)?.remove();
+    delete window.fbq;
+    delete window._fbq;
+    initializedPixelIds.delete(pixelId);
+    lastPagePath = '';
+    return true;
   }
 
-  initializeMetaPixel();
+  if (!initializeMetaPixel()) return false;
   window.fbq?.('consent', 'grant');
   trackPageView();
+  return true;
 }

@@ -70,6 +70,32 @@ test('negative marketing consent suppresses both registration events', () => {
   assert.equal(flow.initiateCheckoutEventId, null);
 });
 
+test('missing marketing consent fails closed and does not call queue handlers', async () => {
+  const flow = resolveMetaRegistrationFlow({
+    registrationId: committedRegistration.registrationId,
+    statusCode: committedRegistration.statusCode,
+    success: committedRegistration.success,
+    checkoutRequested: true,
+  });
+  let queueCalls = 0;
+  const result = await enqueueMetaRegistrationFlow(flow, {
+    queueCompleteRegistration: async () => {
+      queueCalls += 1;
+      return true;
+    },
+    queueInitiateCheckout: async () => {
+      queueCalls += 1;
+      return true;
+    },
+  });
+
+  assert.equal(flow.shouldQueueCompleteRegistration, false);
+  assert.equal(flow.shouldQueueInitiateCheckout, false);
+  assert.equal(queueCalls, 0);
+  assert.equal(result.completeRegistrationQueued, false);
+  assert.equal(result.initiateCheckoutQueued, false);
+});
+
 test('real checkout intent gets a backend-authoritative deterministic attempt ID', () => {
   const flow = resolveMetaRegistrationFlow({
     ...committedRegistration,

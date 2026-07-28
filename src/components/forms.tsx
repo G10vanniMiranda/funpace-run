@@ -3,6 +3,7 @@ import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, ShieldCheck, Us
 import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
+import { usePrivacyConsent } from '../hooks/usePrivacyConsent';
 import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
 import { getMetaBrowserContext, trackMetaEventOnce } from '../lib/metaPixel';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
@@ -62,6 +63,7 @@ const errorClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-wider te
 const labelClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-widest leading-relaxed';
 
 export function RegistrationSection() {
+  const marketingAllowed = usePrivacyConsent().preferences.marketing;
   const [status, setStatus] = useState<null | 'submitting' | 'checkout_pending' | 'api_error'>(null);
   const [formData, setFormData] = useState<RegistrationFormData>(initialRegistration);
   const [attribution] = useState<RegistrationFormData['attribution']>(() => readMarketingAttribution());
@@ -134,7 +136,7 @@ export function RegistrationSection() {
         value: registrationPrice,
       },
     );
-  }, [activeLot, availability, registrationPrice]);
+  }, [activeLot, availability, marketingAllowed, registrationPrice]);
 
   const removePartnerBenefit = async () => {
     setClearingPartner(true);

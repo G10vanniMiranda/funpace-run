@@ -86,6 +86,7 @@ import {
   enqueueMetaRegistrationFlow,
   resolveMetaRegistrationFlow,
 } from './meta-registration-flow.js';
+import { isMarketingConsentGranted } from '../src/lib/privacyConsent.js';
 import {
   areExternalPaymentsAllowed,
   areOutboundWebhooksAllowed,
@@ -657,6 +658,7 @@ function getAge(birthDate: string) {
 }
 
 function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData {
+  const marketingConsent = isMarketingConsentGranted(input.meta?.marketingConsent);
   return {
     fullName: String(input.fullName || '').trim(),
     email: String(input.email || '').trim().toLowerCase(),
@@ -674,7 +676,7 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
     termsAccepted: Boolean(input.termsAccepted),
     regulationAccepted: Boolean(input.regulationAccepted),
     privacyAccepted: Boolean(input.privacyAccepted),
-    meta: input.meta?.marketingConsent === false ? { marketingConsent: false } : undefined,
+    meta: { marketingConsent },
     attribution: input.attribution ? {
       source: compactText(input.attribution.source, 80),
       medium: compactText(input.attribution.medium, 80),
@@ -691,18 +693,18 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
 }
 
 function sanitizeMetaRegistrationContext(input: RegistrationFormData['meta']) {
-  if (!input) return undefined;
+  const marketingConsent = isMarketingConsentGranted(input?.marketingConsent);
+  if (!marketingConsent) return { marketingConsent: false };
   const initiatedAt = Number(input.initiatedAt);
   const fbp = compactText(input.fbp, 255);
   const fbc = compactText(input.fbc, 255);
   const sourceUrl = compactText(input.sourceUrl, 500);
-  const marketingConsent = input.marketingConsent !== false;
   return {
     ...(Number.isInteger(initiatedAt) ? { initiatedAt } : {}),
     ...(fbp ? { fbp } : {}),
     ...(fbc ? { fbc } : {}),
     ...(sourceUrl ? { sourceUrl } : {}),
-    marketingConsent,
+    marketingConsent: true,
   };
 }
 

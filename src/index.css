@@ -370,3 +370,18 @@ table tbody tr:hover {
     transform: none;
   }
 }
+@keyframes consent-enter {
+  from {
+    opacity: 0;
+    transform: translateY(1.25rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes consent-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

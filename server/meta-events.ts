@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { RegistrationFormData } from '../src/types/registration';
+import { isMarketingConsentGranted } from '../src/lib/privacyConsent.js';
 import {
   buildMetaServerEvent,
   buildMetaUserData,
@@ -82,7 +83,7 @@ async function getMetaRegistrationEventContext(
   metaContext?: MetaRegistrationRequestContext,
 ) {
   if (!usesPostgresDatabase() || !isMetaCapiReady()) return null;
-  if (metaContext?.marketingConsent === false) return null;
+  if (!isMarketingConsentGranted(metaContext?.marketingConsent)) return null;
   const snapshot = await getMetaRegistrationSnapshotInPostgres(registrationId);
   if (!snapshot || snapshot.status !== 'pending_payment') return null;
 
@@ -147,7 +148,7 @@ export async function queueMetaPurchaseEvent(registrationId: string) {
   if (!usesPostgresDatabase() || !isMetaCapiReady()) return false;
   const snapshot = await getMetaRegistrationSnapshotInPostgres(registrationId);
   if (!snapshot || !canQueueMetaPurchase(snapshot.status, snapshot.paymentStatus, snapshot.paidAt)) return false;
-  if (snapshot.payload.meta?.marketingConsent === false) return false;
+  if (!isMarketingConsentGranted(snapshot.payload.meta?.marketingConsent)) return false;
 
   const userData = buildMetaUserData(
     getIdentity(snapshot.payload, registrationId),
@@ -187,6 +188,25 @@ export async function processMetaIntegrationQueue(limit = 10) {
   const summary = { processed: claimed.length, sent: 0, failed: 0 };
 
   for (const record of claimed) {
+    const consentSnapshot = await getMetaRegistrationSnapshotInPostgres(record.entityId);
+    if (!isMarketingConsentGranted(consentSnapshot?.payload.meta?.marketingConsent)) {
+      await failMetaIntegrationEventInPostgres({
+        id: record.id,
+        errorCode: 'MARKETING_CONSENT_NOT_GRANTED',
+        responseCode: null,
+        retryAt: null,
+      });
+      summary.failed += 1;
+      logMetaEvent({
+        eventName: record.eventName,
+        eventId: record.eventId,
+        registrationId: record.entityId,
+        status: 'blocked_by_consent',
+        errorCode: 'MARKETING_CONSENT_NOT_GRANTED',
+      });
+      continue;
+    }
+
     const event: MetaServerEvent = {
       event_name: record.eventName,
       event_time: record.eventTime,
