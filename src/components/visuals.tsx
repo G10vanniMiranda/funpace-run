@@ -12,6 +12,8 @@ type CourseId = '5k' | '10k';
 type CourseDefinition = {
   id: CourseId;
   selectorLabel: string;
+  title: string;
+  distance: string;
   start: string;
   finish: string;
   returnPoint?: string;
@@ -22,6 +24,8 @@ const courses: Record<CourseId, CourseDefinition> = {
   '5k': {
     id: '5k',
     selectorLabel: '5 KM',
+    title: 'Percurso 5 km',
+    distance: '5 km',
     start: 'Complexo Madeira-Mamoré',
     finish: 'Complexo Madeira-Mamoré',
     returnPoint: 'Avenida Imigrantes',
@@ -30,6 +34,8 @@ const courses: Record<CourseId, CourseDefinition> = {
   '10k': {
     id: '10k',
     selectorLabel: '10 KM',
+    title: 'Percurso 10 km',
+    distance: '10 km',
     start: 'Complexo Madeira-Mamoré',
     finish: 'Complexo Madeira-Mamoré',
     route: route10km,
@@ -66,8 +72,8 @@ export function CourseMap() {
                     aria-pressed={isActive}
                     onClick={() => setActiveCourseId(courseId)}
                     className={`min-h-11 px-4 py-3 font-mono text-xs font-bold tracking-[0.18em] transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${isActive
-                        ? 'bg-brand text-black shadow-[0_0_24px_rgba(215,255,0,0.16)]'
-                        : 'text-zinc-400 hover:bg-white/5 hover:text-white'
+                      ? 'bg-brand text-black shadow-[0_0_24px_rgba(215,255,0,0.16)]'
+                      : 'text-zinc-400 hover:bg-white/5 hover:text-white'
                       }`}
                   >
                     {course.selectorLabel}
@@ -86,6 +92,15 @@ export function CourseMap() {
                 className="space-y-4"
                 aria-live="polite"
               >
+                <div>
+                  <p className="font-mono text-xs font-bold uppercase tracking-[0.2em] text-brand">
+                    {activeCourse.distance}
+                  </p>
+                  <h3 className="mt-1 font-display text-2xl font-bold uppercase text-white">
+                    {activeCourse.title}
+                  </h3>
+                </div>
+
                 <div className="space-y-3 border-l border-brand/40 pl-4">
                   <CourseLocation icon={MapPin} label="Largada" value={activeCourse.start} />
                   {activeCourse.returnPoint && (

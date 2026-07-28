@@ -14,27 +14,27 @@ export const regulationChapters: RegulationChapter[] = [
   {
     id: 'capitulo-i',
     indexLabel: 'Capítulo I — A Prova',
-    title: 'Capítulo I — A Prova',
+    title: 'A Prova',
     blocks: [
       {
         kind: 'clause',
         number: '1.1.',
-        text: 'FUNPACE RUN – Experience 2026 será realizada em Porto Velho - RO, no dia 20 de SETEMBRO de 2026, com concentração dos atletas às 05:30. É uma realização do Funpace.',
+        text: 'FUNPACE RUN EXPERIENCE 2026 será realizada em Porto Velho - RO, no dia 20 de SETEMBRO de 2026. É uma realização do movimento Funpace.',
       },
       {
         kind: 'clause',
         number: '1.2.',
-        text: 'A corrida será disputada em duas distâncias, na modalidade de 5 km e 10 km, nos gêneros masculino e feminino, sendo disputada na categoria Público Geral.',
+        text: 'A corrida será disputada em duas distâncias, na modalidade de 5 km e 10 km, nos gêneros masculino e feminino, sendo disputada na categoria público geral.',
       },
       {
         kind: 'clause',
         number: '1.3.',
-        text: 'A largada da prova será no –COMPLEXO MADEIRA MAMORE, com concentração dos atletas às 05:30, sob qualquer condição climática a menos que interfira na segurança dos atletas.',
+        text: 'A largada da prova será no COMPLEXO MADEIRA MAMORÉ, com concentração dos atletas às 05:00, sob qualquer condição climática, a menos que interfira na segurança dos atletas e na logística do evento.',
       },
       {
         kind: 'schedule',
         title: 'PROGRAMAÇÃO:',
-        location: 'LOCAL DE LARGADA: COMPLEXO MADEIRA MAMORÉ',
+        location: 'LOCAL DE LARGADA NO COMPLEXO MADEIRA MAMORÉ',
         items: [
           '05h:00m - Abertura do evento.',
           '05h:30m - Concentração dos atletas.',
@@ -70,7 +70,7 @@ export const regulationChapters: RegulationChapter[] = [
   {
     id: 'capitulo-ii',
     indexLabel: 'Capítulo II — Premiação',
-    title: 'Capítulo II — Premiação',
+    title: 'Premiação',
     blocks: [
       {
         kind: 'highlight',
@@ -116,7 +116,7 @@ export const regulationChapters: RegulationChapter[] = [
   {
     id: 'capitulo-iii',
     indexLabel: 'Capítulo III — Inscrição',
-    title: 'Capítulo III — Inscrição',
+    title: 'Inscrição',
     blocks: [
       {
         kind: 'clause',
@@ -148,7 +148,7 @@ export const regulationChapters: RegulationChapter[] = [
   {
     id: 'capitulo-iv',
     indexLabel: 'Capítulo IV — Número de Peito e Cronometragem',
-    title: 'Capítulo IV — Número de Peito e Cronometragem',
+    title: 'Número de Peito e Cronometragem',
     blocks: [
       {
         kind: 'clause',
@@ -180,7 +180,7 @@ export const regulationChapters: RegulationChapter[] = [
   {
     id: 'capitulo-v',
     indexLabel: 'Capítulo V — Instruções Gerais',
-    title: 'Capítulo V — Instruções e regras gerais',
+    title: 'Instruções e regras gerais',
     blocks: [
       {
         kind: 'clause',

@@ -31,9 +31,6 @@ export function RegulationPage() {
             Voltar para o evento
           </a>
 
-          <p className="mt-12 font-mono text-xs font-bold uppercase tracking-[0.24em] text-brand">
-            Documento oficial
-          </p>
           <h1 className="mt-4 max-w-5xl font-display text-[clamp(2.8rem,10vw,7rem)] font-black uppercase leading-[0.88] tracking-tighter">
             Regulamento
           </h1>
@@ -93,11 +90,6 @@ export function RegulationPage() {
         </aside>
 
         <article aria-label="Texto do regulamento oficial" className="min-w-0 space-y-5">
-          <div className="mb-8 border-l-2 border-brand bg-brand/6 p-5 text-sm leading-relaxed text-zinc-300 sm:p-6 sm:text-base">
-            O conteúdo abaixo reproduz o documento oficial “REGULAMENTO – Funpace Run Experience 2026”.
-            Campos pendentes foram preservados conforme constam no arquivo fornecido pela organização.
-          </div>
-
           {regulationChapters.map((chapter, index) => (
             <section key={chapter.id} id={chapter.id} className="scroll-mt-24">
               <details
@@ -106,9 +98,6 @@ export function RegulationPage() {
               >
                 <summary className="flex min-h-20 cursor-pointer list-none items-center justify-between gap-4 px-5 py-5 focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-brand sm:px-7 sm:py-6 [&::-webkit-details-marker]:hidden">
                   <div className="min-w-0">
-                    <span className="font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-brand">
-                      Capítulo {String(index + 1).padStart(2, '0')}
-                    </span>
                     <h2 className="mt-2 font-display text-[clamp(1.35rem,5vw,2.25rem)] font-black uppercase leading-tight tracking-tight text-white">
                       {chapter.title}
                     </h2>
@@ -138,13 +127,6 @@ export function RegulationPage() {
         </article>
       </div>
 
-      <a
-        href="#top"
-        aria-label="Voltar ao topo da página"
-        className="fixed bottom-24 right-5 z-40 flex h-12 w-12 items-center justify-center border border-brand/50 bg-black/90 text-brand shadow-[0_0_30px_rgba(215,255,0,0.14)] backdrop-blur-sm transition-colors hover:bg-brand hover:text-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand sm:right-6"
-      >
-        <ArrowUp className="h-5 w-5" aria-hidden="true" />
-      </a>
     </main>
   );
 }
