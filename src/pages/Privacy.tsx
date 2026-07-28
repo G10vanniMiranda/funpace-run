@@ -1,4 +1,3 @@
-import { eventInfo } from '../config/event';
 import type { ReactNode } from 'react';
 
 export function PrivacyPage() {
@@ -25,28 +24,6 @@ export function PrivacyPage() {
       <p>
         Estatísticas e Marketing permanecem desativados até uma escolha expressa. A decisão fica armazenada
         neste navegador e pode ser alterada a qualquer momento em “Preferências de Privacidade”.
-      </p>
-    </LegalPage>
-  );
-}
-
-export function TermsPage() {
-  return (
-    <LegalPage title="Regulamento e responsabilidade">
-      <p>
-        A inscrição só será considerada confirmada após pagamento aprovado pelo gateway e confirmação do sistema.
-      </p>
-      <p>
-        O participante declara estar apto fisicamente para participar da prova, conhecer os riscos de uma corrida
-        de rua e seguir as orientações da organização, equipe médica e autoridades locais.
-      </p>
-      <p>
-        O regulamento final deve informar retirada de kit, idade minima, categorias, política de reembolso,
-        transferência, alteração de distância, uso de imagem, largada, premiação e motivos de cancelamento.
-      </p>
-      <p>
-        Esta página e uma base operacional. Antes da abertura oficial de vendas, o texto final deve ser validado
-        pela organização e, idealmente, por assessoria juridica.
       </p>
     </LegalPage>
   );

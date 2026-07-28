@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2" xmlns:kml="http://www.opengis.net/kml/2.2" xmlns:atom="http://www.w3.org/2005/Atom">
+<Document id="document">
+	<name>FUNPACE RUN - 5KM</name>
+	<gx:CascadingStyle kml:id="__managed_style_0CDF20F5BB40DBF82384_highlight">
+		<styleUrl>https://earth.google.com/balloon_components/base/1.1.0.0/card_template.kml#main</styleUrl>
+		<Style>
+			<IconStyle>
+				<scale>1.2</scale>
+				<Icon>
+					<href>https://earth.google.com/earth/document/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff2dc0fb</color>
+				<width>6</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>40ffffff</color>
+			</PolyStyle>
+			<BalloonStyle>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<gx:CascadingStyle kml:id="__managed_style_0CDF20F5BB40DBF82384_normal">
+		<styleUrl>https://earth.google.com/balloon_components/base/1.1.0.0/card_template.kml#main</styleUrl>
+		<Style>
+			<IconStyle>
+				<Icon>
+					<href>https://earth.google.com/earth/document/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff2dc0fb</color>
+				<width>4</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>40ffffff</color>
+			</PolyStyle>
+			<BalloonStyle>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<StyleMap id="__managed_style_0CDF20F5BB40DBF82384">
+		<Pair>
+			<key>normal</key>
+			<styleUrl>#__managed_style_0CDF20F5BB40DBF82384_normal</styleUrl>
+		</Pair>
+		<Pair>
+			<key>highlight</key>
+			<styleUrl>#__managed_style_0CDF20F5BB40DBF82384_highlight</styleUrl>
+		</Pair>
+	</StyleMap>
+	<Placemark id="0ECA381EF840DBF82373">
+		<name>Polígono sem título</name>
+		<LookAt>
+			<longitude>-63.90861350504891</longitude>
+			<latitude>-8.764985901607378</latitude>
+			<altitude>67.33856997065111</altitude>
+			<heading>0</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>284.9326820269562</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_0CDF20F5BB40DBF82384</styleUrl>
+		<Polygon>
+			<outerBoundaryIs>
+				<LinearRing>
+					<coordinates>
+						-63.90883792668819,-8.765558700687745,0 -63.90889741971297,-8.76538029883433,0 -63.90886649070637,-8.764712878228762,0 -63.90847343794084,-8.764824466477741,0 -63.90832157666485,-8.764799055279298,0 -63.91281138515401,-8.743428301753411,0 -63.91288255143201,-8.743442519241585,0 -63.90841448831551,-8.764754963323231,0 -63.90850842368963,-8.764772032180364,0 -63.9088926254021,-8.764695009696432,0 -63.90891843300252,-8.765386827039219,0 -63.90883792668819,-8.765558700687745,0 
+					</coordinates>
+				</LinearRing>
+			</outerBoundaryIs>
+		</Polygon>
+	</Placemark>
+</Document>
+</kml>
