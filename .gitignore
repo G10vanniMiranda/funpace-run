@@ -4,5 +4,40 @@ dist/
 .env.local
 data/
 backups/
-
 .vercel
+
+# Local audits, exports, and inspection artifacts
+.tmp/
+tmp/
+temp/
+.temp/
+exports/
+audit/
+audits/
+.audit/
+inspection/
+inspections/
+local-inspection/
+
+# Generated audit reports and data extracts
+*audit*.csv
+*audit*.json
+*auditoria*.csv
+*auditoria*.json
+AUDITORIA_*.csv
+AUDITORIA_*.json
+AUDITORIA_INSCRICOES_*
+*audit-data.*
+*audit-gateway.*
+
+# Database dumps and local backups
+dumps/
+*.dump
+*.pgdump
+*.backup
+*.bak
+*.sql.gz
+
+# Temporary runtime logs
+logs/
+*.log
