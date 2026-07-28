@@ -29,7 +29,7 @@ export const regulationChapters: RegulationChapter[] = [
       {
         kind: 'clause',
         number: '1.3.',
-        text: 'A largada da prova será no –COMPLEXO MADEIRA MAMORE, com concentração dos atletas às 05:30, sob qualquer condição climática.',
+        text: 'A largada da prova será no –COMPLEXO MADEIRA MAMORE, com concentração dos atletas às 05:30, sob qualquer condição climática a menos que interfira na segurança dos atletas.',
       },
       {
         kind: 'schedule',
@@ -43,7 +43,7 @@ export const regulationChapters: RegulationChapter[] = [
       },
       {
         kind: 'highlight',
-        title: 'kit do atleta: KIT O MELHOR DE TODOS OS TEMPOS!',
+        title: 'kit do atleta:',
         text: 'Não é apenas um kit. É parte de uma experiência que vai entrar para a história!',
       },
       {
