@@ -6,7 +6,7 @@ import { getWhatsAppUrl } from '../config/whatsapp';
 import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
 import { trackMetaEvent, trackMetaEventOnce } from '../lib/metaPixel';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
-import { formatCpf, formatPhone, requireRegistrationAcceptances, validateRegistration } from '../lib/validation';
+import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
 import { Reveal } from './premium';
@@ -348,24 +348,26 @@ export function RegistrationSection() {
               </Field>
             </div>
 
-            {requireRegistrationAcceptances && (
-              <div className="space-y-3 border border-black/10 bg-black/5 p-3.5 sm:p-4">
-                <Checkbox checked={formData.termsAccepted} onChange={(checked) => updateField('termsAccepted', checked)}>
-                  Li e aceito o termo de responsabilidade da prova.
-                </Checkbox>
-                {errors.termsAccepted && <p className={errorClass}>{errors.termsAccepted}</p>}
-
-                <Checkbox checked={formData.regulationAccepted} onChange={(checked) => updateField('regulationAccepted', checked)}>
-                  Li e aceito o <a href="/regulamento" className="underline">regulamento oficial</a> do FunPace Run.
-                </Checkbox>
-                {errors.regulationAccepted && <p className={errorClass}>{errors.regulationAccepted}</p>}
-
-                <Checkbox checked={formData.privacyAccepted} onChange={(checked) => updateField('privacyAccepted', checked)}>
-                  Autorizo o uso dos meus dados para processar a inscrição, conforme a <a href="/privacidade" className="underline">politica de privacidade</a>.
-                </Checkbox>
-                {errors.privacyAccepted && <p className={errorClass}>{errors.privacyAccepted}</p>}
-              </div>
-            )}
+            <div className="space-y-2 border border-black/15 bg-black/5 p-3.5 sm:p-4">
+              <Checkbox
+                checked={formData.regulationAccepted}
+                onChange={(checked) => updateField('regulationAccepted', checked)}
+                required
+                invalid={Boolean(errors.regulationAccepted)}
+              >
+                Li e aceito o{' '}
+                <a
+                  href="/regulamento"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-black underline decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+                  aria-label="Regulamento da Funpace Run Experience 2026 (abre em nova aba)"
+                >
+                  Regulamento da Funpace Run Experience 2026
+                </a>.
+              </Checkbox>
+              {errors.regulationAccepted && <p id="regulation-acceptance-error" className={errorClass} role="alert">{errors.regulationAccepted}</p>}
+            </div>
 
             <button
               type="submit"
@@ -441,14 +443,29 @@ function Field({ label, error, children }: { label: string; error?: string; chil
   );
 }
 
-function Checkbox({ checked, onChange, children }: { checked: boolean; onChange: (checked: boolean) => void; children: ReactNode }) {
+function Checkbox({
+  checked,
+  onChange,
+  children,
+  required = false,
+  invalid = false,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  children: ReactNode;
+  required?: boolean;
+  invalid?: boolean;
+}) {
   return (
     <label className="flex items-start gap-3 text-sm font-bold leading-relaxed">
       <input
         type="checkbox"
         checked={checked}
         onChange={(event) => onChange(event.target.checked)}
-        className="mt-1 h-4 w-4 shrink-0 accent-black"
+        required={required}
+        aria-invalid={invalid}
+        aria-describedby={invalid ? 'regulation-acceptance-error' : undefined}
+        className="mt-0.5 h-5 w-5 shrink-0 accent-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
       />
       <span className="min-w-0">{children}</span>
     </label>

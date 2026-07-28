@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { Marquee, Footer } from "./components/layout";
+import { useEffect, type ReactNode } from "react";
+import { Marquee, Footer, SiteHeader } from "./components/layout";
 import { Hero } from "./components/hero";
 import { RegistrationSection, SponsorSection } from "./components/forms";
 import { CourseMap, Gallery } from "./components/visuals";
@@ -9,9 +9,10 @@ import { PremiumCursor } from "./components/premium";
 import { WhatsAppSupportButton } from "./components/WhatsAppSupportButton";
 import { AdminPage } from "./pages/Admin";
 import { PaymentErrorPage } from "./pages/PaymentError";
-import { PrivacyPage, TermsPage } from "./pages/Privacy";
+import { PrivacyPage } from "./pages/Privacy";
 import { SuccessPage } from "./pages/Success";
 import { PartnerLandingPage } from "./pages/PartnerLanding";
+import { RegulationPage } from "./pages/Regulation";
 
 const showCourseMap = true;
 
@@ -20,7 +21,7 @@ export default function SiteApp() {
   const partnerPath = pathname.match(/^\/p\/([^/]+)\/?$/);
 
   if (partnerPath) {
-    return <PublicPage><PartnerLandingPage slug={decodeURIComponent(partnerPath[1])} /></PublicPage>;
+    return <PublicPage showHeader={false}><PartnerLandingPage slug={decodeURIComponent(partnerPath[1])} /></PublicPage>;
   }
 
   if (pathname === '/sucesso') {
@@ -46,7 +47,8 @@ export default function SiteApp() {
   if (pathname === '/regulamento') {
     return (
       <PublicPage>
-        <TermsPage />
+        <RegulationPage />
+        <Footer />
       </PublicPage>
     );
   }
@@ -77,11 +79,34 @@ export default function SiteApp() {
   );
 }
 
-function PublicPage({ children }: { children: ReactNode }) {
+function PublicPage({ children, showHeader = true }: { children: ReactNode; showHeader?: boolean }) {
   return (
     <>
+      {showHeader ? <SiteHeader /> : null}
       {children}
+      <HashScrollRestoration />
       <WhatsAppSupportButton />
     </>
   );
+}
+
+function HashScrollRestoration() {
+  useEffect(() => {
+    if (!window.location.hash) return;
+
+    const targetId = decodeURIComponent(window.location.hash.slice(1));
+    const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    const timeout = window.setTimeout(() => {
+      document.getElementById(targetId)?.scrollIntoView({ block: 'start' });
+      document.documentElement.style.scrollBehavior = previousScrollBehavior;
+    }, 100);
+
+    return () => {
+      window.clearTimeout(timeout);
+      document.documentElement.style.scrollBehavior = previousScrollBehavior;
+    };
+  }, []);
+
+  return null;
 }

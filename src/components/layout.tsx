@@ -1,5 +1,79 @@
-import { Instagram, PartyPopper } from 'lucide-react';
+import { lazy, Suspense, useEffect, useState } from 'react';
+import { Instagram, Menu, PartyPopper } from 'lucide-react';
 import { eventInfo } from '../config/event';
+import { NavigationLinks } from './navigation';
+
+const MobileNavigation = lazy(() => import('./MobileNavigation'));
+
+export function SiteHeader() {
+  const [isScrolled, setIsScrolled] = useState(() => window.scrollY >= 48);
+  const [currentLocation, setCurrentLocation] = useState(() => ({
+    pathname: window.location.pathname,
+    hash: window.location.hash,
+  }));
+
+  useEffect(() => {
+    const handleNavigation = () => {
+      setCurrentLocation({
+        pathname: window.location.pathname,
+        hash: window.location.hash,
+      });
+    };
+
+    window.addEventListener('hashchange', handleNavigation);
+    window.addEventListener('popstate', handleNavigation);
+    window.addEventListener('funpace:navigation', handleNavigation);
+
+    return () => {
+      window.removeEventListener('hashchange', handleNavigation);
+      window.removeEventListener('popstate', handleNavigation);
+      window.removeEventListener('funpace:navigation', handleNavigation);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleScroll = () => setIsScrolled(window.scrollY >= 48);
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  return (
+    <>
+      <header
+        className={`fixed inset-x-0 top-0 z-50 border-b px-4 text-white transition-[background-color,border-color,box-shadow,backdrop-filter] duration-[350ms] ease-out sm:px-6 ${
+          isScrolled
+            ? 'border-white/10 bg-black/70 shadow-[0_12px_40px_rgba(0,0,0,0.28)] backdrop-blur-xl supports-[backdrop-filter]:bg-black/55'
+            : 'border-transparent bg-transparent shadow-none backdrop-blur-none'
+        }`}
+      >
+        <div className="mx-auto flex min-h-16 max-w-7xl items-center justify-end sm:justify-center">
+          <nav className="hidden sm:block" aria-label="Menu principal">
+            <NavigationLinks currentLocation={currentLocation} />
+          </nav>
+
+          <Suspense fallback={<MobileNavigationFallback />}>
+            <MobileNavigation currentLocation={currentLocation} />
+          </Suspense>
+        </div>
+      </header>
+      {currentLocation.pathname === '/' ? null : <div className="h-16" aria-hidden="true" />}
+    </>
+  );
+}
+
+function MobileNavigationFallback() {
+  return (
+    <button
+      type="button"
+      disabled
+      aria-label="Carregando menu principal"
+      className="flex h-11 w-11 shrink-0 items-center justify-center border border-white/15 text-zinc-500 sm:hidden"
+    >
+      <Menu className="h-5 w-5" aria-hidden="true" />
+    </button>
+  );
+}
 
 export function Marquee() {
   return (
@@ -62,8 +136,8 @@ export function Footer() {
             &copy; {new Date().getFullYear()} Funpace. Todos os direitos reservados.
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-3 text-xs font-bold uppercase tracking-widest text-zinc-500">
-            <a href="/regulamento" className="hover:text-brand">Regulamento</a>
-            <a href="/privacidade" className="hover:text-brand">Privacidade</a>
+            <a href="/regulamento" className="transition-colors hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand">Regulamento</a>
+            <a href="/privacidade" className="transition-colors hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand">Privacidade</a>
           </div>
         </div>
       </div>

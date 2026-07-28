@@ -282,6 +282,42 @@ table tbody tr:hover {
   }
 }
 
+@keyframes mobile-nav-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes mobile-nav-overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes mobile-nav-panel-in {
+  from { transform: translate3d(100%, 0, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+
+@keyframes mobile-nav-panel-out {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(100%, 0, 0); }
+}
+
+.mobile-nav-overlay[data-state="open"] {
+  animation: mobile-nav-overlay-in 220ms ease-out;
+}
+
+.mobile-nav-overlay[data-state="closed"] {
+  animation: mobile-nav-overlay-out 160ms ease-in;
+}
+
+.mobile-nav-panel[data-state="open"] {
+  animation: mobile-nav-panel-in 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.mobile-nav-panel[data-state="closed"] {
+  animation: mobile-nav-panel-out 180ms ease-in;
+}
+
 .marquee-track {
   animation: marquee-scroll 18s linear infinite;
   will-change: transform;
