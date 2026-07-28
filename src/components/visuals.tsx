@@ -112,12 +112,6 @@ export function CourseMap() {
               </motion.div>
             </AnimatePresence>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
-              <div className="premium-card p-4">
-                <h4 className="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Postos de Hidratação</h4>
-                <p className="font-mono text-xl font-bold text-white">A cada 2,5 km</p>
-              </div>
-            </div>
           </Reveal>
 
           <Reveal className="w-full lg:w-[62%]" delay={0.08}>
