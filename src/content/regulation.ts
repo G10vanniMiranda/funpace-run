@@ -1,7 +1,7 @@
 export type RegulationBlock =
   | { kind: 'clause'; number: string; text: string }
-  | { kind: 'highlight'; title: string; text?: string }
-  | { kind: 'schedule'; title: string; location: string; items: string[] };
+  | { kind: 'highlight'; number: string; title: string; text?: string }
+  | { kind: 'schedule'; number: string; title: string; location: string; items: string[] };
 
 export type RegulationChapter = {
   id: string;
@@ -33,31 +33,34 @@ export const regulationChapters: RegulationChapter[] = [
       },
       {
         kind: 'schedule',
+        number: '1.4.',
         title: 'PROGRAMAÇÃO:',
         location: '',
         items: [
           '05h:00m - Concentração dos atletas.',
           '05h:30m - Abertura do evento.',
           '06h:00m - Largada geral 5km e 10km.',
+          '08h:00m - AFTER.',
         ],
       },
       {
         kind: 'highlight',
+        number: '1.5.',
         title: 'Premiação entre 08h e 09h',
       },
       {
         kind: 'clause',
-        number: '1.4.',
-        text: 'A corrida terá duração máxima de 2h00min;',
+        number: '1.6.',
+        text: 'A corrida terá duração máxima de 2h00min.',
       },
       {
         kind: 'clause',
-        number: '1.5.',
+        number: '1.7.',
         text: 'O horário de largada da prova poderá sofrer alterações em função do número de inscritos, mudanças no percurso ou por orientação da equipe técnica. Alterações também poderão ocorrer por motivos externos, como questões de segurança pública, regulamentações ou decretos vigentes, pandemias, epidemias, tráfego intenso, falhas de comunicação, interrupções no fornecimento de energia, entre outros fatores que possam comprometer a realização do evento.',
       },
       {
         kind: 'clause',
-        number: '1.6.',
+        number: '1.8.',
         text: 'IDADE MÍNIMA - Os(as) atletas menores de 18 anos só poderão participar da corrida com autorização por escrito com firma reconhecida do pai, da mãe ou de responsável legal. A autorização deverá estar acompanhada de cópia de um documento de identidade que será retido pela organização no momento da retirada do kit. Em cumprimento às Regras Oficiais da IAAF/CBAt, segue a idade mínima para atletas participarem de corridas de rua: 1 - Provas com percurso até 5km: 14 (catorze) anos completos até 31 de dezembro do ano da prova; 2 - Provas com percurso menor que 10km: 16 (dezesseis) anos completos até 31 de dezembro do ano da prova;',
       },
     ],
@@ -75,17 +78,17 @@ export const regulationChapters: RegulationChapter[] = [
       {
         kind: 'clause',
         number: '2.2.',
-        text: 'A distância de 5km e 10km terá premiação a todos participantes inscritos que concluírem a prova entre a 1ª e a 3ª colocação nas categorias público geral, nos gêneros masculino e feminino. Receberão além da medalha de participação, 1 (um) troféu.',
+        text: 'A distância de 5km e 10km terá premiação aos inscritos que concluírem a prova entre a 1ª e a 3ª colocação nas categorias público geral, nos gêneros masculino e feminino. Receberão além da medalha de participação, 1 (um) troféu.',
       },
       {
         kind: 'clause',
         number: '2.3.',
-        text: 'Não serão entregues medalhas e brindes pós-prova (quando houver) para as pessoas que, mesmo inscritas, não participaram da prova.',
+        text: 'Não serão entregues medalhas e brindes pós-prova para as pessoas que, mesmo inscritas, não participaram da prova.',
       },
       {
         kind: 'clause',
         number: '2.4.',
-        text: 'Para receber a medalha de participação é obrigatório que o (a) atleta esteja portando o número de peito e a etiqueta da medalha, presente no número de peito.',
+        text: 'Para receber a medalha de participação é obrigatório que o (a) atleta esteja portando o número de peito.',
       },
       {
         kind: 'clause',
@@ -154,12 +157,12 @@ export const regulationChapters: RegulationChapter[] = [
       {
         kind: 'clause',
         number: '4.3.',
-        text: 'Somente o atleta com Número de Peito tem acesso às áreas de largada, chegada, medalha e serviços de prova.',
+        text: 'Somente o atleta com número de peito tem acesso às áreas de largada, chegada, medalha e serviços de prova.',
       },
       {
         kind: 'clause',
         number: '4.4.',
-        text: 'Ao final da prova, o participante que cruzar a linha de chegada portando o número de peito e a etiqueta nele presente para recebimento da premiação, receberá 01 medalha de participação.',
+        text: 'Ao final da prova, o participante que cruzar a linha de chegada portando o número de peito, receberá 01 medalha de participação.',
       },
     ],
   },
@@ -195,27 +198,27 @@ export const regulationChapters: RegulationChapter[] = [
       },
       {
         kind: 'clause',
-        number: '5.7.',
+        number: '5.6.',
         text: 'O (a) atleta que não retirar o seu kit na data e horário estipulado pela organização não terá direito do mesmo após o evento.',
       },
       {
         kind: 'clause',
-        number: '5.8.',
+        number: '5.7.',
         text: 'O Kit somente poderá ser retirado pelo (a) atleta inscrito mediante apresentação do documento de confirmação de inscrição, o respectivo recibo de pagamento e documento oficial com foto',
       },
       {
         kind: 'clause',
-        number: '5.9.',
+        number: '5.8.',
         text: 'A retirada de kits só poderá ser efetivada por terceiros mediante a apresentação do documento com foto de identificação do inscrito que poderá ser digitalizada.',
       },
       {
         kind: 'clause',
-        number: '5.10.',
+        number: '5.9.',
         text: 'No momento da retirada do kit o responsável deverá conferir os seus dados e o número do peito.',
       },
       {
         kind: 'clause',
-        number: '5.11.',
+        number: '5.10.',
         text: 'Não serão aceitas reclamações cadastrais como também dos itens que compõe o kit, após sua retirada.',
       },
       {

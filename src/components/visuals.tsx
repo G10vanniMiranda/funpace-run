@@ -99,8 +99,8 @@ export function CourseMap() {
           </Reveal>
 
           <Reveal className="w-full lg:w-[62%]" delay={0.08}>
-            <div className="relative aspect-4/3 w-full overflow-hidden bg-transparent sm:aspect-video">
-              <AnimatePresence mode="wait">
+            <div className="route-map-panel relative aspect-4/3 w-full overflow-hidden sm:aspect-video">
+              <AnimatePresence initial={false}>
                 <RoutePath key={activeCourse.id} route={activeCourse.route} />
               </AnimatePresence>
             </div>

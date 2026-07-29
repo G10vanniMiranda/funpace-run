@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowLeft, ArrowUp, ChevronDown, Download } from 'lucide-react';
+import { ArrowLeft, ChevronDown, Download } from 'lucide-react';
 import { regulationChapters, type RegulationBlock } from '../content/regulation';
 import { usePageMetadata } from '../lib/seo';
 
@@ -11,11 +11,6 @@ export function RegulationPage() {
     description,
     canonical: canonicalUrl,
   });
-
-  const openChapter = (chapterId: string) => {
-    const chapter = document.getElementById(chapterId);
-    chapter?.querySelector('details')?.setAttribute('open', '');
-  };
 
   return (
     <main id="top" className="premium-shell min-h-screen bg-black text-white">
@@ -40,14 +35,7 @@ export function RegulationPage() {
 
           <div className="mt-9 flex flex-col gap-3 sm:flex-row sm:items-center">
             <a
-              href="#indice"
-              className="premium-button inline-flex min-h-12 items-center justify-center gap-2 bg-brand px-5 py-3 text-xs font-black uppercase tracking-widest text-black hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand sm:w-fit"
-            >
-              Explorar capítulos
-              <ArrowDown className="h-4 w-4" aria-hidden="true" />
-            </a>
-            <a
-              href="/regulamento/regulamento.docx"
+              href="/regulamento/regulamento-funpace-run-2026.docx"
               download
               className="inline-flex min-h-12 items-center justify-center gap-2 border border-white/15 px-5 py-3 text-xs font-black uppercase tracking-widest text-zinc-200 transition-colors hover:border-brand hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand sm:w-fit"
               aria-label="Baixar o regulamento oficial em formato Word"
@@ -59,36 +47,7 @@ export function RegulationPage() {
         </div>
       </section>
 
-      <div className="mx-auto grid max-w-7xl gap-10 px-4 py-12 sm:px-6 md:py-18 lg:grid-cols-[18rem_minmax(0,1fr)] lg:gap-14 lg:py-24">
-        <aside id="indice" className="scroll-mt-28 lg:sticky lg:top-24 lg:self-start" aria-labelledby="indice-title">
-          <div className="border border-white/10 bg-zinc-950/90 p-5 sm:p-6">
-            <p className="font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-brand">
-              Navegação rápida
-            </p>
-            <h2 id="indice-title" className="mt-2 font-display text-2xl font-black uppercase">
-              Índice
-            </h2>
-            <nav className="mt-5" aria-label="Índice do regulamento">
-              <ol className="space-y-1">
-                {regulationChapters.map((chapter, index) => (
-                  <li key={chapter.id}>
-                    <a
-                      href={`#${chapter.id}`}
-                      onClick={() => openChapter(chapter.id)}
-                      className="group flex min-h-11 items-start gap-3 border-l border-white/10 px-3 py-2.5 text-sm leading-snug text-zinc-400 transition-colors hover:border-brand hover:bg-white/5 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
-                    >
-                      <span className="font-mono text-[10px] font-bold text-brand" aria-hidden="true">
-                        {String(index + 1).padStart(2, '0')}
-                      </span>
-                      <span>{chapter.indexLabel}</span>
-                    </a>
-                  </li>
-                ))}
-              </ol>
-            </nav>
-          </div>
-        </aside>
-
+      <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 md:py-18 lg:py-24">
         <article aria-label="Texto do regulamento oficial" className="min-w-0 space-y-5">
           {regulationChapters.map((chapter, index) => (
             <section key={chapter.id} id={chapter.id} className="scroll-mt-24">
@@ -113,13 +72,6 @@ export function RegulationPage() {
                       <RegulationBlockContent key={`${chapter.id}-${blockIndex}`} block={block} />
                     ))}
                   </div>
-                  <a
-                    href="#indice"
-                    className="mt-8 inline-flex min-h-11 items-center gap-2 text-xs font-black uppercase tracking-widest text-zinc-500 transition-colors hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand"
-                  >
-                    Voltar ao índice
-                    <ArrowUp className="h-4 w-4" aria-hidden="true" />
-                  </a>
                 </div>
               </details>
             </section>
@@ -134,22 +86,28 @@ export function RegulationPage() {
 function RegulationBlockContent({ block }: { block: RegulationBlock }) {
   if (block.kind === 'highlight') {
     return (
-      <div className="border-l-2 border-brand bg-white/4 px-4 py-4 sm:px-5">
-        <p className="font-display text-base font-black uppercase leading-snug text-white">{block.title}</p>
-        {block.text ? <p className="mt-2 text-zinc-300">{block.text}</p> : null}
+      <div className="grid gap-2 sm:grid-cols-[3.75rem_minmax(0,1fr)] sm:gap-4">
+        <p className="font-mono text-xs font-black text-brand">{block.number}</p>
+        <div className="border-l-2 border-brand bg-white/4 px-4 py-4 sm:px-5">
+          <p className="font-display text-base font-black uppercase leading-snug text-white">{block.title}</p>
+          {block.text ? <p className="mt-2 text-zinc-300">{block.text}</p> : null}
+        </div>
       </div>
     );
   }
 
   if (block.kind === 'schedule') {
     return (
-      <section className="border border-white/10 bg-black/40 p-4 sm:p-5" aria-label="Programação da prova">
-        <h3 className="font-display text-lg font-black uppercase text-brand">{block.title}</h3>
-        <p className="mt-3 font-bold text-white">{block.location}</p>
-        <ul className="mt-4 space-y-2 font-mono text-sm text-zinc-300">
-          {block.items.map((item) => <li key={item}>{item}</li>)}
-        </ul>
-      </section>
+      <div className="grid gap-2 sm:grid-cols-[3.75rem_minmax(0,1fr)] sm:gap-4">
+        <p className="font-mono text-xs font-black text-brand">{block.number}</p>
+        <section className="border border-white/10 bg-black/40 p-4 sm:p-5" aria-label="Programação da prova">
+          <h3 className="font-display text-lg font-black uppercase text-brand">{block.title}</h3>
+          {block.location ? <p className="mt-3 font-bold text-white">{block.location}</p> : null}
+          <ul className="mt-4 space-y-2 font-mono text-sm text-zinc-300">
+            {block.items.map((item) => <li key={item}>{item}</li>)}
+          </ul>
+        </section>
+      </div>
     );
   }
 
