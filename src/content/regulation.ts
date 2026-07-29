@@ -40,13 +40,13 @@ export const regulationChapters: RegulationChapter[] = [
           '05h:00m - Concentração dos atletas.',
           '05h:30m - Abertura do evento.',
           '06h:00m - Largada geral 5km e 10km.',
-          '08h:00m - AFTER.',
+          '08h:00m - Aniversário FUNPACE (AFTER com DJ).',
         ],
       },
       {
-        kind: 'highlight',
+        kind: 'clause',
         number: '1.5.',
-        title: 'Premiação entre 08h e 09h',
+        text: 'Premiação entre 08h e 09h.',
       },
       {
         kind: 'clause',

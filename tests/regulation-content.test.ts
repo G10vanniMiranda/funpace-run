@@ -21,8 +21,9 @@ test('chapter one keeps the published schedule and award numbering', () => {
     '05h:00m - Concentração dos atletas.',
     '05h:30m - Abertura do evento.',
     '06h:00m - Largada geral 5km e 10km.',
-    '08h:00m - AFTER.',
+    '08h:00m - Aniversário FUNPACE (AFTER com DJ).',
   ]);
-  assert.equal(award.kind, 'highlight');
+  assert.equal(award.kind, 'clause');
   assert.equal(award.number, '1.5.');
+  assert.equal(award.text, 'Premiação entre 08h e 09h.');
 });
