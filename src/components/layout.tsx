@@ -41,11 +41,10 @@ export function SiteHeader() {
   return (
     <>
       <header
-        className={`fixed inset-x-0 top-0 z-50 border-b px-4 text-white transition-[background-color,border-color,box-shadow,backdrop-filter] duration-[350ms] ease-out sm:px-6 ${
-          isScrolled
-            ? 'border-white/10 bg-black/70 shadow-[0_12px_40px_rgba(0,0,0,0.28)] backdrop-blur-xl supports-[backdrop-filter]:bg-black/55'
+        className={`fixed inset-x-0 top-0 z-50 border-b px-4 text-white transition-[background-color,border-color,box-shadow,backdrop-filter] duration-350 ease-out sm:px-6 ${isScrolled
+            ? 'border-white/10 bg-black/70 shadow-[0_12px_40px_rgba(0,0,0,0.28)] backdrop-blur-xl supports-backdrop-filter:bg-black/55'
             : 'border-transparent bg-transparent shadow-none backdrop-blur-none'
-        }`}
+          }`}
       >
         <div className="mx-auto flex min-h-16 max-w-7xl items-center justify-end sm:justify-center">
           <nav className="hidden sm:block" aria-label="Menu principal">
@@ -109,7 +108,7 @@ function MarqueeGroup({ ariaHidden = false }: { ariaHidden?: boolean }) {
       <span aria-hidden="true">•</span>
       <span>Funpace Run 2026</span>
       <span aria-hidden="true">•</span>
-      <span>10K - 5K</span>
+      <span>10Km - 5Km</span>
       <span aria-hidden="true">•</span>
     </div>
   );
