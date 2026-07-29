@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useScroll, useTransform } from 'motion/react';
 import { useRef, useState } from 'react';
+import { CornerDownRight, Flag, MapPin } from 'lucide-react';
 import { RoutePath } from './percurso/RoutePath';
 import type { KmlRoute } from './percurso/routeGeometry';
 import { route10km } from './percurso/route10km';
@@ -26,9 +27,9 @@ const courses: Record<CourseId, CourseDefinition> = {
       title: '',
       steps: [
         'Saída do Complexo Madeira-Mamoré',
-        'Segue na Farquar',
-        'Chegou na Imigrantes, volta sentido Complexo',
-        'Segue na Farquar até o Complexo',
+        'Av. Farquar',
+        'Retorno na Av. Imigrantes',
+        'Av. Farquar',
         'Finaliza no Complexo',
       ],
     },
@@ -41,17 +42,17 @@ const courses: Record<CourseId, CourseDefinition> = {
       title: '',
       steps: [
         'Saída do Complexo Madeira-Mamoré',
-        'Segue na Farquar',
-        'Pra direita na Imigrantes',
-        'Pra direita na Lauro Sodré',
-        'Pra direita na Calama',
-        'Pra direita na Jamary',
-        'Pra direita na Imigrantes',
-        'Pra direita na Lauro Sodré',
-        'Pra direita na José Camacho',
-        'Pra direita na Dutra',
-        'Pra esquerda na Padre Chiquinho',
-        'Pra esquerda na Farquar',
+        'Av. Farquar',
+        'Av. Imigrantes',
+        'Av. Lauro Sodré',
+        'Av. Calama',
+        'Rua Jamary',
+        'Av. Imigrantes',
+        'Av. Lauro Sodré',
+        'Rua José Camacho',
+        'Av. Presidente Dutra',
+        'Rua Padre Chiquinho',
+        'Av.Farquar',
         'Finaliza no Complexo',
       ],
     },
@@ -112,17 +113,34 @@ export function CourseMap() {
               aria-live="polite"
             >
               {activeCourse.description ? (
-                <div className="border border-white/10 bg-black/30 p-4">
-                  <p className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-brand">
-                    {activeCourse.description.title}
-                  </p>
-                  <ul className="mt-3 space-y-1.5 text-sm leading-relaxed text-zinc-300">
-                    {activeCourse.description.steps.map((step, index) => (
-                      <li key={`${index}-${step}`} className="flex gap-2">
-                        <span className="text-brand" aria-hidden="true">•</span>
-                        <span>{step}</span>
-                      </li>
-                    ))}
+                <div className="border-l border-brand/50 bg-black/20 py-1 pl-4">
+                  {activeCourse.description.title ? (
+                    <p className="mb-4 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-brand">
+                      {activeCourse.description.title}
+                    </p>
+                  ) : null}
+                  <ul className="space-y-3">
+                    {activeCourse.description.steps.map((step, index) => {
+                      const isFirstStep = index === 0;
+                      const isLastStep = index === activeCourse.description!.steps.length - 1;
+                      const StepIcon = isFirstStep ? MapPin : isLastStep ? Flag : CornerDownRight;
+
+                      return (
+                        <li key={`${index}-${step}`} className="flex items-start gap-3">
+                          <StepIcon className="mt-0.5 h-4 w-4 shrink-0 text-brand" aria-hidden="true" />
+                          <div>
+                            {isFirstStep || isLastStep ? (
+                              <p className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-500">
+                                {isFirstStep ? 'Largada' : 'Chegada'}
+                              </p>
+                            ) : null}
+                            <p className={`${isFirstStep || isLastStep ? 'mt-0.5 font-semibold text-zinc-200' : 'text-zinc-300'} text-sm leading-relaxed`}>
+                              {step}
+                            </p>
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               ) : null}
