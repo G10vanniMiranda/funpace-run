@@ -1,6 +1,5 @@
 import { AnimatePresence, motion, useScroll, useTransform } from 'motion/react';
 import { useRef, useState } from 'react';
-import { Flag, MapPin, RotateCcw } from 'lucide-react';
 import { RoutePath } from './percurso/RoutePath';
 import type { KmlRoute } from './percurso/routeGeometry';
 import { route10km } from './percurso/route10km';
@@ -12,9 +11,10 @@ type CourseId = '5k' | '10k';
 type CourseDefinition = {
   id: CourseId;
   selectorLabel: string;
-  start: string;
-  finish: string;
-  returnPoint?: string;
+  description?: {
+    title: string;
+    steps: string[];
+  };
   route: KmlRoute;
 };
 
@@ -22,16 +22,39 @@ const courses: Record<CourseId, CourseDefinition> = {
   '5k': {
     id: '5k',
     selectorLabel: '5 KM',
-    start: 'Complexo Madeira-Mamoré',
-    finish: 'Complexo Madeira-Mamoré',
-    returnPoint: 'Avenida Imigrantes',
+    description: {
+      title: '',
+      steps: [
+        'Saída do Complexo Madeira-Mamoré',
+        'Segue na Farquar',
+        'Chegou na Imigrantes, volta sentido Complexo',
+        'Segue na Farquar até o Complexo',
+        'Finaliza no Complexo',
+      ],
+    },
     route: route5km,
   },
   '10k': {
     id: '10k',
     selectorLabel: '10 KM',
-    start: 'Complexo Madeira-Mamoré',
-    finish: 'Complexo Madeira-Mamoré',
+    description: {
+      title: '',
+      steps: [
+        'Saída do Complexo Madeira-Mamoré',
+        'Segue na Farquar',
+        'Pra direita na Imigrantes',
+        'Pra direita na Lauro Sodré',
+        'Pra direita na Calama',
+        'Pra direita na Jamary',
+        'Pra direita na Imigrantes',
+        'Pra direita na Lauro Sodré',
+        'Pra direita na José Camacho',
+        'Pra direita na Dutra',
+        'Pra esquerda na Padre Chiquinho',
+        'Pra esquerda na Farquar',
+        'Finaliza no Complexo',
+      ],
+    },
     route: route10km,
   },
 };
@@ -44,8 +67,8 @@ export function CourseMap() {
     <section id="map" className="relative scroll-mt-24 overflow-hidden border-t border-zinc-900 bg-zinc-950 px-4 py-16 sm:px-6 md:py-24 lg:py-32">
       <div className="premium-aurora opacity-30" />
       <div className="relative mx-auto max-w-7xl">
-        <div className="flex flex-col items-start gap-10 lg:flex-row lg:gap-14 xl:gap-20">
-          <Reveal className="flex w-full min-w-0 flex-col gap-6 lg:w-[38%]">
+        <div className="grid items-start gap-10 lg:grid-cols-[minmax(0,38fr)_minmax(0,62fr)] lg:gap-x-14 lg:gap-y-6 xl:gap-x-20">
+          <Reveal className="flex w-full min-w-0 flex-col gap-6 lg:col-start-1 lg:row-start-1">
             <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase leading-[0.9] tracking-tighter">
               Percurso
             </h2>
@@ -76,29 +99,37 @@ export function CourseMap() {
               })}
             </div>
 
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={activeCourse.id}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.22 }}
-                className="space-y-4"
-                aria-live="polite"
-              >
-                <div className="space-y-3 border-l border-brand/40 pl-4">
-                  <CourseLocation icon={MapPin} label="Largada" value={activeCourse.start} />
-                  {activeCourse.returnPoint && (
-                    <CourseLocation icon={RotateCcw} label="Retorno" value={activeCourse.returnPoint} />
-                  )}
-                  <CourseLocation icon={Flag} label="Chegada" value={activeCourse.finish} />
-                </div>
-              </motion.div>
-            </AnimatePresence>
-
           </Reveal>
 
-          <Reveal className="w-full lg:w-[62%]" delay={0.08}>
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeCourse.id}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.22 }}
+              className="order-3 w-full space-y-4 lg:order-0 lg:col-start-1 lg:row-start-2"
+              aria-live="polite"
+            >
+              {activeCourse.description ? (
+                <div className="border border-white/10 bg-black/30 p-4">
+                  <p className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-brand">
+                    {activeCourse.description.title}
+                  </p>
+                  <ul className="mt-3 space-y-1.5 text-sm leading-relaxed text-zinc-300">
+                    {activeCourse.description.steps.map((step, index) => (
+                      <li key={`${index}-${step}`} className="flex gap-2">
+                        <span className="text-brand" aria-hidden="true">•</span>
+                        <span>{step}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </motion.div>
+          </AnimatePresence>
+
+          <Reveal className="order-2 w-full lg:order-0 lg:col-start-2 lg:row-span-2 lg:row-start-1" delay={0.08}>
             <div className="route-map-panel relative aspect-4/3 w-full overflow-hidden sm:aspect-video">
               <AnimatePresence initial={false}>
                 <RoutePath key={activeCourse.id} route={activeCourse.route} />
@@ -108,26 +139,6 @@ export function CourseMap() {
         </div>
       </div>
     </section>
-  );
-}
-
-function CourseLocation({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: typeof MapPin;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="flex items-start gap-3">
-      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-brand" aria-hidden="true" />
-      <div>
-        <p className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">{label}</p>
-        <p className="mt-0.5 text-sm font-semibold text-zinc-200">{value}</p>
-      </div>
-    </div>
   );
 }
 
@@ -152,10 +163,7 @@ export function Gallery() {
     <section id="gallery" className="scroll-mt-24 overflow-hidden border-t border-zinc-900 bg-black py-16 md:py-24" ref={containerRef}>
       <Reveal className="mx-auto mb-10 flex max-w-7xl items-end justify-between px-4 sm:px-6 md:mb-16">
         <div>
-          <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase tracking-tighter">ENERGIA FUNPACE</h2>
-          <p className="mt-2 max-w-xl font-mono text-xs uppercase leading-relaxed tracking-widest text-zinc-500 sm:text-sm">
-            ONDE NINGUÉM SOLTA A MÃO DE NINGUÉM
-          </p>
+          <h2 className="font-display text-[clamp(2.8rem,12vw,3.75rem)] font-black uppercase tracking-tighter">LEVE, JUNTO E FUN</h2>
         </div>
       </Reveal>
 
