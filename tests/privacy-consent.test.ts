@@ -5,6 +5,11 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { PrivacyConsentManager } from '../src/components/privacy/PrivacyConsentManager';
 import {
+  clearMetaCookies,
+  getMetaCookieDomainCandidates,
+  getMetaCookiePathCandidates,
+} from '../src/lib/metaCookies';
+import {
   LEGACY_MARKETING_CONSENT_KEY,
   PRIVACY_CONSENT_STORAGE_KEY,
   PRIVACY_CONSENT_VERSION,
@@ -130,6 +135,68 @@ test('record creation always keeps necessary cookies active', () => {
   assert.equal(record.preferences.necessary, true);
 });
 
+test('revoking Marketing expires _fbp and _fbc for host, root domains and visible paths', () => {
+  const writes: string[] = [];
+  const cookieWriter = {} as { cookie: string };
+  Object.defineProperty(cookieWriter, 'cookie', {
+    configurable: true,
+    get: () => '',
+    set: (value: string) => writes.push(value),
+  });
+
+  assert.equal(clearMetaCookies({
+    cookieWriter,
+    hostname: 'checkout.funpace.club',
+    pathname: '/inscricao/confirmacao',
+  }), true);
+
+  for (const name of ['_fbp', '_fbc']) {
+    assert.ok(writes.some((value) => value.startsWith(`${name}=;`) && value.includes('Path=/;')));
+    assert.ok(writes.some((value) => value.startsWith(`${name}=;`) && value.includes('Path=/inscricao;')));
+    assert.ok(writes.some((value) => value.startsWith(`${name}=;`) && value.includes('Domain=.funpace.club')));
+  }
+  assert.ok(writes.every((value) => value.includes('Max-Age=0')));
+  assert.ok(writes.every((value) => value.includes('Expires=Thu, 01 Jan 1970 00:00:00 GMT')));
+  assert.ok(writes.every((value) => !value.startsWith('session=')));
+});
+
+test('Meta cookie cleanup avoids domain attributes on localhost and IP addresses', () => {
+  assert.deepEqual(getMetaCookieDomainCandidates('localhost'), []);
+  assert.deepEqual(getMetaCookieDomainCandidates('127.0.0.1'), []);
+  assert.deepEqual(getMetaCookiePathCandidates('/'), ['/']);
+  assert.deepEqual(getMetaCookiePathCandidates('/inscricao/confirmacao'), [
+    '/',
+    '/inscricao',
+    '/inscricao/confirmacao',
+  ]);
+});
+
+test('Meta cookie cleanup is a browser-only no-op without an explicit browser context', () => {
+  assert.equal(clearMetaCookies(), false);
+});
+
+test('revocation stops Browser tracking and a later opt-in can initialize the Pixel again', () => {
+  const pixel = readFileSync('src/lib/metaPixel.ts', 'utf8');
+  const revokeBlock = pixel.slice(
+    pixel.indexOf('if (!granted) {', pixel.indexOf('export function synchronizeMetaPixelConsent')),
+    pixel.indexOf("window.fbq?.('consent', 'grant')"),
+  );
+  const grantBlock = pixel.slice(
+    pixel.indexOf('if (!initializeMetaPixel()) return false', pixel.indexOf('export function synchronizeMetaPixelConsent')),
+  );
+
+  assert.match(revokeBlock, /window\.fbq\?\.\('consent', 'revoke'\)/);
+  assert.match(revokeBlock, /document\.getElementById\(META_PIXEL_SCRIPT_ID\)\?\.remove\(\)/);
+  assert.match(revokeBlock, /delete window\.fbq/);
+  assert.match(revokeBlock, /delete window\._fbq/);
+  assert.match(revokeBlock, /clearMetaCookies\(\)/);
+  assert.match(revokeBlock, /initializedPixelIds\.delete\(pixelId\)/);
+  assert.match(revokeBlock, /lastPagePath = ''/);
+  assert.match(grantBlock, /if \(!initializeMetaPixel\(\)\) return false/);
+  assert.match(grantBlock, /window\.fbq\?\.\('consent', 'grant'\)/);
+  assert.match(grantBlock, /trackPageView\(\)/);
+});
+
 test('Pixel, Analytics and CAPI use the centralized consent gate', () => {
   const pixel = readFileSync('src/lib/metaPixel.ts', 'utf8');
   const app = readFileSync('src/App.tsx', 'utf8');
@@ -137,6 +204,7 @@ test('Pixel, Analytics and CAPI use the centralized consent gate', () => {
   const serverFlow = readFileSync('server/meta-registration-flow.ts', 'utf8');
 
   assert.match(pixel, /isConsentCategoryAllowed\(getPrivacyConsentSnapshot\(\), 'marketing'\)/);
+  assert.match(pixel, /clearMetaCookies\(\)/);
   assert.doesNotMatch(pixel, /VITE_META_PIXEL_REQUIRE_CONSENT/);
   assert.match(app, /consent\.preferences\.statistics \? <Analytics \/> : null/);
   assert.match(serverEvents, /isMarketingConsentGranted\(metaContext\?\.marketingConsent\)/);

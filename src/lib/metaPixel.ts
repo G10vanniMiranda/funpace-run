@@ -3,6 +3,7 @@ import {
   isConsentCategoryAllowed,
   setPrivacyConsent,
 } from './privacyConsent';
+import { clearMetaCookies } from './metaCookies';
 
 export type MetaPixelEventValue = string | number | boolean | string[] | undefined;
 export type MetaPixelEventParams = Record<string, MetaPixelEventValue>;
@@ -269,6 +270,7 @@ export function synchronizeMetaPixelConsent(granted: boolean) {
     document.getElementById(META_PIXEL_SCRIPT_ID)?.remove();
     delete window.fbq;
     delete window._fbq;
+    clearMetaCookies();
     initializedPixelIds.delete(pixelId);
     lastPagePath = '';
     return true;
