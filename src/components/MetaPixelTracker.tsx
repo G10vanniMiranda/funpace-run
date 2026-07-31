@@ -1,9 +1,15 @@
 import { useEffect } from 'react';
-import { trackPageView } from '../lib/metaPixel';
+import { synchronizeMetaPixelConsent, trackPageView } from '../lib/metaPixel';
 
 const NAVIGATION_EVENT = 'funpace:navigation';
 
-export function MetaPixelTracker() {
+export function MetaPixelTracker({ marketingAllowed }: { marketingAllowed: boolean }) {
+  const trackingAllowed = marketingAllowed && !window.location.pathname.startsWith('/admin');
+
+  useEffect(() => {
+    synchronizeMetaPixelConsent(trackingAllowed);
+  }, [trackingAllowed]);
+
   useEffect(() => {
     if (window.location.pathname.startsWith('/admin')) return;
 
@@ -36,7 +42,7 @@ export function MetaPixelTracker() {
       window.removeEventListener('popstate', trackCurrentPage);
       window.removeEventListener(NAVIGATION_EVENT, trackCurrentPage);
     };
-  }, []);
+  }, [trackingAllowed]);
 
   return null;
 }

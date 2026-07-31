@@ -1,4 +1,5 @@
 import type { RegistrationFormData } from '../src/types/registration';
+import { areExternalPaymentsAllowed } from './environment.js';
 
 const linksEndpoint = 'https://api.checkout.infinitepay.io/links';
 const paymentCheckEndpoint = 'https://api.checkout.infinitepay.io/payment_check';
@@ -92,6 +93,10 @@ function toCents(value: unknown) {
 }
 
 export async function checkInfinitePayPayment(input: InfinitePayPaymentCheckInput): Promise<InfinitePayPaymentCheck> {
+  if (!areExternalPaymentsAllowed()) {
+    throw new InfinitePayError('Pagamentos externos desabilitados neste ambiente.', 503);
+  }
+
   if (!input.handle || !input.orderNsu || !input.transactionNsu || !input.slug) {
     throw new InfinitePayError('Dados insuficientes para consultar o pagamento na InfinitePay.', 400);
   }
@@ -132,6 +137,10 @@ export async function checkInfinitePayPayment(input: InfinitePayPaymentCheckInpu
 }
 
 export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput) {
+  if (!areExternalPaymentsAllowed()) {
+    throw new InfinitePayError('Pagamentos externos desabilitados neste ambiente.', 503);
+  }
+
   const body = {
     handle: input.handle,
     order_nsu: input.orderNsu,

@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { getWhatsAppUrl } from '../config/whatsapp';
+import { usePrivacyConsent } from '../hooks/usePrivacyConsent';
 import { ApiError, confirmInfinitePayReturn, getRegistrationStatus } from '../lib/api';
 import { trackMetaPurchase } from '../lib/metaPixel';
 import type { RegistrationStatus } from '../types/registration';
@@ -18,6 +19,7 @@ const failedStatuses: RegistrationStatus[] = ['payment_failed', 'cancelled', 're
 const pollingDelaysMs = [0, 1500, 3000, 5000, 8000, 12000, 16000, 20000];
 
 export function SuccessPage() {
+  const marketingAllowed = usePrivacyConsent().preferences.marketing;
   const params = new URLSearchParams(window.location.search);
   const registrationId = params.get('registrationId') || params.get('order_nsu') || '';
   const receiptUrl = params.get('receipt_url');
@@ -26,6 +28,12 @@ export function SuccessPage() {
   const slug = params.get('slug');
   const [status, setStatus] = useState<RegistrationStatus | null>(null);
   const [isPolling, setIsPolling] = useState(false);
+  const [purchaseTracking, setPurchaseTracking] = useState<{
+    registrationId: string;
+    eventId: string;
+    eventName: string;
+    amountCents: number;
+  } | null>(null);
   const [message, setMessage] = useState('Consultando status da inscrição...');
   const supportUrl = getWhatsAppUrl(
     registrationId
@@ -73,13 +81,11 @@ export function SuccessPage() {
 
           if (nextStatus === 'paid') {
             if (registration.eventId && registration.eventName) {
-              trackMetaPurchase(registration.registrationId, {
-                content_name: registration.eventName,
-                content_ids: [registration.eventId],
-                content_type: 'product',
-                currency: 'BRL',
-                value: registration.amountCents / 100,
-                num_items: 1,
+              setPurchaseTracking({
+                registrationId: registration.registrationId,
+                eventId: registration.eventId,
+                eventName: registration.eventName,
+                amountCents: registration.amountCents,
               });
             }
             setMessage('Pagamento aprovado. Sua inscrição está confirmada.');
@@ -115,6 +121,18 @@ export function SuccessPage() {
       cancelled = true;
     };
   }, [registrationId]);
+
+  useEffect(() => {
+    if (!purchaseTracking || !marketingAllowed) return;
+    trackMetaPurchase(purchaseTracking.registrationId, {
+      content_name: purchaseTracking.eventName,
+      content_ids: [purchaseTracking.eventId],
+      content_type: 'product',
+      currency: 'BRL',
+      value: purchaseTracking.amountCents / 100,
+      num_items: 1,
+    });
+  }, [marketingAllowed, purchaseTracking]);
 
   const isFailed = status ? failedStatuses.includes(status) : false;
   const StatusIcon = status === 'paid' ? CheckCircle2 : isFailed ? XCircle : isPolling ? Loader2 : AlertTriangle;
