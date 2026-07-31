@@ -1,5 +1,6 @@
 import QRCode from 'qrcode';
 import type { EventRecord, LotRecord, RegistrationRecord } from './database.js';
+import { isEmailDeliveryAllowed, isEmailRecipientAllowed } from './environment.js';
 
 export type RegistrationEmailContext = {
   registration: RegistrationRecord;
@@ -30,10 +31,11 @@ export function getEmailProvider() {
 }
 
 export function isEmailEnabled() {
-  return emailProvider === 'resend' || emailProvider === 'console';
+  return isEmailDeliveryAllowed() && (emailProvider === 'resend' || emailProvider === 'console');
 }
 
 export function isEmailConfigured() {
+  if (!isEmailDeliveryAllowed()) return false;
   if (emailProvider === 'console') return true;
   if (emailProvider === 'resend') return Boolean(resendApiKey && emailFrom);
   return false;
@@ -214,6 +216,11 @@ export async function sendRegistrationConfirmationEmail(context: RegistrationEma
   }
 
   const to = context.registration.payload.email;
+
+  if (!isEmailRecipientAllowed(to)) {
+    return { ok: false, skipped: true, provider, error: 'Recipient blocked by environment policy.' };
+  }
+
   const email = await buildRegistrationConfirmationEmail(context);
 
   if (emailProvider === 'console') {

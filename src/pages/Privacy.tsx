@@ -15,6 +15,16 @@ export function PrivacyPage() {
         O acesso administrativo deve ser restrito a pessoas autorizadas pela organização. Exportações devem ser
         usadas apenas para operação da corrida e armazenadas com cuidado.
       </p>
+      <h2 className="font-display text-xl font-black uppercase text-white">Cookies e tecnologias de rastreamento</h2>
+      <p>
+        Cookies necessários mantêm o site seguro e funcional. Cookies de estatísticas ajudam a entender o uso
+        do site. Cookies de marketing permitem Meta Pixel e Meta Conversions API, incluindo eventos de navegação,
+        inscrição, checkout e compra.
+      </p>
+      <p>
+        Estatísticas e Marketing permanecem desativados até uma escolha expressa. A decisão fica armazenada
+        neste navegador e pode ser alterada a qualquer momento em “Preferências de Privacidade”.
+      </p>
     </LegalPage>
   );
 }
