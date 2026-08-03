@@ -269,13 +269,13 @@ create index if not exists "run-partner-audit_event_created_idx" on "run-partner
 create index if not exists "run-partner-audit_correlation_idx" on "run-partner-audit-logs"((metadata->>'correlationId')) where coalesce(metadata->>'correlationId','')<>'';
 
 create or replace function prevent_partner_audit_mutation()
-returns trigger language plpgsql as $$ begin raise exception 'partner audit logs are immutable'; end; $$;
+returns trigger language plpgsql set search_path = pg_catalog, public as $$ begin raise exception 'partner audit logs are immutable'; end; $$;
 drop trigger if exists "run-partner-audit-immutable" on "run-partner-audit-logs";
 create trigger "run-partner-audit-immutable" before update or delete on "run-partner-audit-logs"
 for each row execute function prevent_partner_audit_mutation();
 
 create or replace function protect_confirmed_partner_snapshot()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = pg_catalog, public as $$
 begin
   if old.confirmed_at is not null and (
     new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name
@@ -359,8 +359,8 @@ returns table (
   continues_after_capacity boolean
 )
 language plpgsql
-security definer
-set search_path = public
+security invoker
+set search_path = pg_catalog, public
 as $$
 declare
   v_accumulated_capacity integer := 0;
@@ -399,6 +399,7 @@ begin
   end if;
 end;
 $$;
+revoke execute on function public.run_select_lot_for_registration_number(text, integer) from public, anon, authenticated;
 
 alter table "run-payments" add column if not exists expires_at text;
 alter table "run-payments" add column if not exists paid_at text;

@@ -922,7 +922,7 @@ async function ensurePostgresDatabase(client: Queryable) {
     create or replace function public.run_registration_pricing_defaults() returns trigger language plpgsql set search_path = public as $$ begin new.discount_percentage := coalesce(new.discount_percentage, 0); new.discount_amount := coalesce(new.discount_amount, 0); new.original_price := coalesce(new.original_price, new.amount_cents); new.final_price := coalesce(new.final_price, new.amount_cents); return new; end; $$;
     drop trigger if exists "run-registrations_pricing_defaults" on "run-registrations";
     create trigger "run-registrations_pricing_defaults" before insert on "run-registrations" for each row execute function public.run_registration_pricing_defaults();
-    create or replace function public.protect_confirmed_partner_snapshot() returns trigger language plpgsql set search_path = public as $$ begin if old.confirmed_at is not null and (new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name or new.partner_type is distinct from old.partner_type or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price) then raise exception 'confirmed partner snapshot is immutable'; end if; return new; end; $$;
+    create or replace function public.protect_confirmed_partner_snapshot() returns trigger language plpgsql set search_path = pg_catalog, public as $$ begin if old.confirmed_at is not null and (new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name or new.partner_type is distinct from old.partner_type or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price) then raise exception 'confirmed partner snapshot is immutable'; end if; return new; end; $$;
     drop trigger if exists "run-registrations_partner_snapshot_immutable" on "run-registrations";
     create trigger "run-registrations_partner_snapshot_immutable" before update on "run-registrations" for each row execute function public.protect_confirmed_partner_snapshot();
   `);
@@ -949,8 +949,8 @@ async function ensurePostgresDatabase(client: Queryable) {
       continues_after_capacity boolean
     )
     language plpgsql
-    security definer
-    set search_path = public
+    security invoker
+    set search_path = pg_catalog, public
     as $$
     declare
       v_accumulated_capacity integer := 0;
@@ -989,6 +989,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       end if;
     end;
     $$;
+    revoke execute on function public.run_select_lot_for_registration_number(text, integer) from public, anon, authenticated;
   `);
   await client.query(`alter table ${table.payments} add column if not exists expires_at text`);
   await client.query(`alter table ${table.payments} add column if not exists paid_at text`);

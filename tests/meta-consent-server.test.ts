@@ -46,9 +46,12 @@ test('server alone can extend the signed subject idempotently', () => {
 
 test('Purchase respects the current durable consent decision', () => {
   const paidAt = new Date().toISOString();
-  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, true), true);
-  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, false), false);
-  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, true), true);
+  const beforePayment = new Date(Date.parse(paidAt) - 1_000).toISOString();
+  const afterPayment = new Date(Date.parse(paidAt) + 1_000).toISOString();
+  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, true, beforePayment), true);
+  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, false, beforePayment), false);
+  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, true, afterPayment), false);
+  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, true, null), false);
 });
 
 test('revocation blocks unsent events and leaves sent events intact', () => {
@@ -84,13 +87,43 @@ test('worker serializes the final consent decision with the external send', () =
   assert.match(events, /withMetaConsentSendAuthorizationInPostgres\([\s\S]*\(\) => sendMetaServerEvent\(event\)/);
 });
 
-test('migration is additive, backfills the legacy snapshot and retains RLS', () => {
+test('consent migrations are additive, fail legacy registrations closed and retain RLS', () => {
   const migration = readFileSync('supabase/migrations/20260803035938_meta_consent_hardening.sql', 'utf8');
+  const failClosed = readFileSync('supabase/migrations/20260803050443_meta_legacy_consent_fail_closed.sql', 'utf8');
   assert.match(migration, /add column if not exists marketing_consent boolean not null default false/);
   assert.match(migration, /add column if not exists marketing_consent_updated_at text/);
   assert.match(migration, /payload #> '\{meta,marketingConsent\}'/);
   assert.match(migration, /enable row level security/);
   assert.doesNotMatch(migration, /drop table|drop column|delete from/i);
+  assert.match(failClosed, /set marketing_consent = false/);
+  assert.match(failClosed, /LEGACY_MARKETING_CONSENT_FAIL_CLOSED/);
+  assert.match(failClosed, /integration\.status in \('pending', 'processing', 'failed'\)/);
+  assert.doesNotMatch(failClosed, /integration\.status in \([^)]*sent/);
+  assert.doesNotMatch(failClosed, /amount|payment|paid_at|confirmed_at/i);
+});
+
+test('Purchase recovery requires consent to predate financial confirmation', () => {
+  const database = readFileSync('server/database.ts', 'utf8');
+  const start = database.indexOf('export async function listPaidRegistrationsMissingMetaPurchaseInPostgres');
+  const end = database.indexOf('export async function updateMetaMarketingConsentInPostgres', start);
+  const recovery = database.slice(start, end);
+  assert.match(recovery, /marketing_consent_updated_at::timestamptz/);
+  assert.match(recovery, /<= coalesce\(payment\.paid_at,registration\.paid_at,registration\.confirmed_at\)::timestamptz/);
+});
+
+test('privileged function migration removes public definer execution and pins search paths', () => {
+  const migration = readFileSync('supabase/migrations/20260803050456_restrict_privileged_functions.sql', 'utf8');
+  assert.match(migration, /prevent_partner_audit_mutation\(\)[\s\S]*set search_path = pg_catalog, public/);
+  assert.match(migration, /protect_confirmed_partner_snapshot\(\)[\s\S]*set search_path = pg_catalog, public/);
+  assert.match(migration, /run_select_lot_for_registration_number\(text, integer\)[\s\S]*security invoker/);
+  assert.match(migration, /revoke execute[\s\S]*from public, anon, authenticated/);
+});
+
+test('browser Purchase requires server-confirmed temporal eligibility', () => {
+  const successPage = readFileSync('src/pages/Success.tsx', 'utf8');
+  const server = readFileSync('server/index.ts', 'utf8');
+  assert.match(successPage, /registration\.metaPurchaseEligible/);
+  assert.match(server, /metaPurchaseEligible: canQueueMetaPurchase/);
 });
 
 test('browser synchronizes consent without accepting a registration id', () => {
