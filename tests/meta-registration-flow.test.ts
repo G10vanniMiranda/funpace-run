@@ -61,6 +61,15 @@ test('failed persistence does not queue Meta registration events', () => {
   assert.equal(flow.shouldQueueCompleteRegistration, false);
 });
 
+test('recovered registration does not emit CompleteRegistration retroactively', () => {
+  const flow = resolveMetaRegistrationFlow({
+    ...committedRegistration,
+    statusCode: 200,
+  });
+  assert.equal(flow.shouldQueueCompleteRegistration, false);
+  assert.equal(flow.completeRegistrationEventId, null);
+});
+
 test('gateway OK creates deterministic InitiateCheckout only after persisted valid reference', () => {
   const flow = resolveMetaCheckoutFlow({
     registrationId: committedRegistration.registrationId,
@@ -131,7 +140,8 @@ test('gateway catch path does not enqueue InitiateCheckout', () => {
 
 test('browser consumes the exact event IDs returned or confirmed by the backend', () => {
   const form = readFileSync('src/components/forms.tsx', 'utf8');
-  assert.match(form, /eventID: `complete_registration_\$\{response\.registrationId\}`/);
+  assert.match(form, /response\.completeRegistrationEventId/);
+  assert.match(form, /eventID: response\.completeRegistrationEventId/);
   assert.match(form, /eventID: response\.attemptId/);
   assert.doesNotMatch(form, /createMetaInitiateCheckoutId/);
 });

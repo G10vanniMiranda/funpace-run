@@ -271,11 +271,13 @@ test('migration enforces authoritative deduplication and concurrent claiming', (
 });
 
 test('only a financially confirmed registration is eligible for server Purchase', () => {
-  assert.equal(canQueueMetaPurchase('paid', 'paid', new Date().toISOString(), true), true);
+  const paidAt = new Date().toISOString();
+  const consentAt = new Date(Date.parse(paidAt) - 1_000).toISOString();
+  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, true, consentAt), true);
   for (const status of ['pending_payment', 'cancelled', 'expired', 'payment_failed', 'refunded']) {
-    assert.equal(canQueueMetaPurchase(status, status, null, true), false);
+    assert.equal(canQueueMetaPurchase(status, status, null, true, consentAt), false);
   }
-  assert.equal(canQueueMetaPurchase('paid', 'pending_payment', new Date().toISOString(), true), false);
-  assert.equal(canQueueMetaPurchase('paid', 'paid', null, true), false);
-  assert.equal(canQueueMetaPurchase('paid', 'paid', new Date().toISOString(), false), false);
+  assert.equal(canQueueMetaPurchase('paid', 'pending_payment', paidAt, true, consentAt), false);
+  assert.equal(canQueueMetaPurchase('paid', 'paid', null, true, consentAt), false);
+  assert.equal(canQueueMetaPurchase('paid', 'paid', paidAt, false, consentAt), false);
 });

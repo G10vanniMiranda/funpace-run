@@ -36,10 +36,15 @@ export function canQueueMetaPurchase(
   paymentStatus: string | undefined,
   paidAt: string | null,
   marketingConsent: boolean,
+  marketingConsentUpdatedAt: string | null,
 ) {
+  const paidAtMs = Date.parse(paidAt || '');
+  const consentUpdatedAtMs = Date.parse(marketingConsentUpdatedAt || '');
   return registrationStatus === 'paid'
     && paymentStatus === 'paid'
-    && Boolean(paidAt)
+    && Number.isFinite(paidAtMs)
+    && Number.isFinite(consentUpdatedAtMs)
+    && consentUpdatedAtMs <= paidAtMs
     && isMarketingConsentGranted(marketingConsent);
 }
 
@@ -157,6 +162,7 @@ export async function queueMetaPurchaseEvent(registrationId: string) {
     snapshot.paymentStatus,
     snapshot.paidAt,
     snapshot.marketingConsent,
+    snapshot.marketingConsentUpdatedAt,
   )) return false;
 
   const userData = buildMetaUserData(

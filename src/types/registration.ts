@@ -77,6 +77,7 @@ export type CreateRegistrationResponse = {
   checkoutEnabled?: boolean;
   checkoutSimulated?: false;
   paymentProviderCalled?: boolean;
+  completeRegistrationEventId?: string | null;
   attemptId?: string | null;
   message: string;
   expiresAt?: string | null;
@@ -99,6 +100,7 @@ export type RegistrationStatusResponse = {
   gatewayStatus?: string | null;
   gatewayTransactionId?: string | null;
   confirmationEmailSentAt?: string | null;
+  metaPurchaseEligible: boolean;
 };
 
 export type AvailabilityResponse = {

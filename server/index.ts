@@ -76,6 +76,7 @@ import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { readCookie, signPartnerSession, verifyPartnerSession } from './partner-session.js';
 import {
+  canQueueMetaPurchase,
   getMetaIntegrationStatus,
   processMetaIntegrationQueue,
   queueMetaCompleteRegistrationEvent,
@@ -1894,6 +1895,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     success: response.success,
     marketingConsent: metaContext?.marketingConsent,
   });
+  response.completeRegistrationEventId = metaFlow.completeRegistrationEventId;
   response.checkoutEnabled = Boolean(
     externalPaymentsAllowed
     && paymentProvider === 'infinitepay'
@@ -2496,12 +2498,14 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
   const event = database.events.find((item) => item.id === registration.eventId);
   const registrationIsClosed = ['cancelled', 'refunded'].includes(registration.status);
   const paymentProvesPaid = !registrationIsClosed && (payment?.status === 'paid' || Boolean(payment?.paidAt));
+  const effectivePaidAt = registration.paidAt || payment?.paidAt || registration.confirmedAt || null;
+  const effectiveRegistrationStatus = paymentProvesPaid ? 'paid' : registration.status;
 
   json(res, 200, {
     registrationId: registration.id,
     eventId: registration.eventId,
     eventName: event?.name || '',
-    status: paymentProvesPaid ? 'paid' : registration.status,
+    status: effectiveRegistrationStatus,
     paymentStatus: payment?.status || registration.status,
     amountCents: registration.amountCents,
     distanceId: registration.distanceId,
@@ -2509,7 +2513,7 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     createdAt: registration.createdAt,
     updatedAt: registration.updatedAt,
     expiresAt: registration.expiresAt || null,
-    paidAt: registration.paidAt || payment?.paidAt || null,
+    paidAt: effectivePaidAt,
     confirmedAt: registration.confirmedAt || (paymentProvesPaid ? payment?.paidAt || null : null),
     partner: registration.partnerId ? {
       name: registration.partnerName || '',
@@ -2522,6 +2526,13 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     gatewayStatus: payment?.gatewayStatus || null,
     gatewayTransactionId: payment?.gatewayTransactionId || payment?.providerPaymentId || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
+    metaPurchaseEligible: canQueueMetaPurchase(
+      effectiveRegistrationStatus,
+      payment?.status || registration.status,
+      effectivePaidAt,
+      registration.marketingConsent === true,
+      registration.marketingConsentUpdatedAt || null,
+    ),
   });
 }
 

@@ -3857,6 +3857,9 @@ export async function listPaidRegistrationsMissingMetaPurchaseInPostgres(limit =
      join ${table.payments} payment on payment.registration_id=registration.id
      where registration.status='paid' and payment.status='paid'
        and registration.marketing_consent=true
+       and registration.marketing_consent_updated_at is not null
+       and registration.marketing_consent_updated_at::timestamptz
+         <= coalesce(payment.paid_at,registration.paid_at,registration.confirmed_at)::timestamptz
        and coalesce(payment.paid_at,registration.paid_at,registration.confirmed_at)::timestamptz >= now() - interval '7 days'
        and not exists (
          select 1 from ${table.integrationEvents} integration

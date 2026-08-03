@@ -211,7 +211,7 @@ export function RegistrationSection() {
       setRegistrationId(response.registrationId);
       setApiMessage(response.message);
 
-      if (availability?.event.id) {
+      if (availability?.event.id && response.completeRegistrationEventId) {
         trackMetaEventOnce(
           `complete-registration:${response.registrationId}`,
           'CompleteRegistration',
@@ -224,24 +224,24 @@ export function RegistrationSection() {
             content_type: 'product',
             status: true,
           },
-          { eventID: `complete_registration_${response.registrationId}` },
+          { eventID: response.completeRegistrationEventId },
         );
+      }
 
-        if (response.attemptId) {
-          trackMetaEventOnce(
-            `initiate-checkout:${response.attemptId}`,
-            'InitiateCheckout',
-            {
-              content_name: availability.event.name,
-              content_ids: [availability.event.id],
-              content_type: 'product',
-              currency: 'BRL',
-              value: registrationPrice,
-              num_items: 1,
-            },
-            { eventID: response.attemptId },
-          );
-        }
+      if (availability?.event.id && response.attemptId) {
+        trackMetaEventOnce(
+          `initiate-checkout:${response.attemptId}`,
+          'InitiateCheckout',
+          {
+            content_name: availability.event.name,
+            content_ids: [availability.event.id],
+            content_type: 'product',
+            currency: 'BRL',
+            value: registrationPrice,
+            num_items: 1,
+          },
+          { eventID: response.attemptId },
+        );
       }
 
       if (response.checkoutUrl) {

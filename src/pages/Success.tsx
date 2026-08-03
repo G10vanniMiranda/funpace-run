@@ -80,7 +80,7 @@ export function SuccessPage() {
           setStatus(nextStatus);
 
           if (nextStatus === 'paid') {
-            if (registration.eventId && registration.eventName) {
+            if (registration.metaPurchaseEligible && registration.eventId && registration.eventName) {
               setPurchaseTracking({
                 registrationId: registration.registrationId,
                 eventId: registration.eventId,

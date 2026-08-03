@@ -20,8 +20,7 @@ export function resolveMetaRegistrationFlow(
   const registrationCommitted = Boolean(
     registrationId
     && input.success
-    && input.statusCode >= 200
-    && input.statusCode < 300,
+    && input.statusCode === 201,
   );
   const consentGranted = isMarketingConsentGranted(input.marketingConsent);
   const shouldQueueCompleteRegistration = registrationCommitted && consentGranted;
