@@ -284,6 +284,15 @@ export function createRegistration(data: RegistrationFormData) {
   });
 }
 
+export function updateMarketingConsent(marketing: boolean) {
+  return apiFetch<{ ok: true; updated: number; blockedEvents: number }>('/api/privacy/marketing-consent', {
+    method: 'PUT',
+    body: JSON.stringify({ marketing }),
+    retry: false,
+    sensitive: true,
+  });
+}
+
 export function getAvailability() {
   return apiFetch<AvailabilityResponse>('/api/availability', {
     cache: 'no-store',

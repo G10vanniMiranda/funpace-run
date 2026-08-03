@@ -3,16 +3,13 @@ import { isMarketingConsentGranted } from '../src/lib/privacyConsent.js';
 export type MetaRegistrationFlowDecision = {
   registrationId: string;
   completeRegistrationEventId: string | null;
-  initiateCheckoutEventId: string | null;
   shouldQueueCompleteRegistration: boolean;
-  shouldQueueInitiateCheckout: boolean;
 };
 
 type ResolveMetaRegistrationFlowInput = {
   registrationId: string;
   statusCode: number;
   success: boolean;
-  checkoutRequested: boolean;
   marketingConsent?: boolean;
 };
 
@@ -23,36 +20,56 @@ export function resolveMetaRegistrationFlow(
   const registrationCommitted = Boolean(
     registrationId
     && input.success
-    && input.statusCode >= 200
-    && input.statusCode < 300,
+    && input.statusCode === 201,
   );
   const consentGranted = isMarketingConsentGranted(input.marketingConsent);
   const shouldQueueCompleteRegistration = registrationCommitted && consentGranted;
-  const shouldQueueInitiateCheckout = shouldQueueCompleteRegistration && input.checkoutRequested;
 
   return {
     registrationId,
     completeRegistrationEventId: shouldQueueCompleteRegistration
       ? `complete_registration_${registrationId}`
       : null,
+    shouldQueueCompleteRegistration,
+  };
+}
+
+export type MetaCheckoutFlowDecision = {
+  registrationId: string;
+  initiateCheckoutEventId: string | null;
+  shouldQueueInitiateCheckout: boolean;
+};
+
+export function resolveMetaCheckoutFlow(input: {
+  registrationId: string;
+  checkoutPersisted: boolean;
+  checkoutReferencePresent: boolean;
+  marketingConsent?: boolean;
+}): MetaCheckoutFlowDecision {
+  const registrationId = input.registrationId.trim();
+  const shouldQueueInitiateCheckout = Boolean(
+    registrationId
+    && input.checkoutPersisted
+    && input.checkoutReferencePresent
+    && isMarketingConsentGranted(input.marketingConsent),
+  );
+  return {
+    registrationId,
     initiateCheckoutEventId: shouldQueueInitiateCheckout
       ? `initiate_checkout_${registrationId}`
       : null,
-    shouldQueueCompleteRegistration,
     shouldQueueInitiateCheckout,
   };
 }
 
 type MetaRegistrationQueueHandlers = {
   queueCompleteRegistration: (eventId: string) => Promise<boolean>;
-  queueInitiateCheckout: (eventId: string) => Promise<boolean>;
 };
 
 export type MetaRegistrationQueueResult = {
   completeRegistrationQueued: boolean;
-  initiateCheckoutQueued: boolean;
   failures: Array<{
-    eventName: 'CompleteRegistration' | 'InitiateCheckout';
+    eventName: 'CompleteRegistration';
     error: unknown;
   }>;
 };
@@ -63,7 +80,6 @@ export async function enqueueMetaRegistrationFlow(
 ): Promise<MetaRegistrationQueueResult> {
   const result: MetaRegistrationQueueResult = {
     completeRegistrationQueued: false,
-    initiateCheckoutQueued: false,
     failures: [],
   };
 
@@ -76,16 +92,5 @@ export async function enqueueMetaRegistrationFlow(
       result.failures.push({ eventName: 'CompleteRegistration', error });
     }
   }
-
-  if (decision.shouldQueueInitiateCheckout && decision.initiateCheckoutEventId) {
-    try {
-      result.initiateCheckoutQueued = await handlers.queueInitiateCheckout(
-        decision.initiateCheckoutEventId,
-      );
-    } catch (error) {
-      result.failures.push({ eventName: 'InitiateCheckout', error });
-    }
-  }
-
   return result;
 }

@@ -207,13 +207,15 @@ test('Pixel, Analytics and CAPI use the centralized consent gate', () => {
   assert.match(pixel, /clearMetaCookies\(\)/);
   assert.doesNotMatch(pixel, /VITE_META_PIXEL_REQUIRE_CONSENT/);
   assert.match(app, /consent\.preferences\.statistics \? <Analytics \/> : null/);
+  assert.match(app, /updateMarketingConsent\(consent\.preferences\.marketing\)/);
   assert.match(serverEvents, /isMarketingConsentGranted\(metaContext\?\.marketingConsent\)/);
-  assert.match(serverEvents, /isMarketingConsentGranted\(snapshot\.payload\.meta\?\.marketingConsent\)/);
-  assert.match(serverEvents, /isMarketingConsentGranted\(consentSnapshot\?\.payload\.meta\?\.marketingConsent\)/);
+  assert.match(serverEvents, /snapshot\.marketingConsent/);
+  assert.match(serverEvents, /isMarketingConsentGranted\(consentSnapshot\?\.marketingConsent\)/);
   assert.ok(
     serverEvents.indexOf('MARKETING_CONSENT_NOT_GRANTED')
-      < serverEvents.indexOf('const result = await sendMetaServerEvent(event)'),
+      < serverEvents.indexOf('const authorization = await withMetaConsentSendAuthorizationInPostgres'),
   );
+  assert.match(serverEvents, /withMetaConsentSendAuthorizationInPostgres\([\s\S]*\(\) => sendMetaServerEvent\(event\)/);
   assert.match(serverFlow, /isMarketingConsentGranted\(input\.marketingConsent\)/);
 });
 

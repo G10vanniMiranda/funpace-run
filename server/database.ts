@@ -63,6 +63,8 @@ export type RegistrationRecord = {
   payload: RegistrationFormData;
   createdAt: string;
   updatedAt: string;
+  marketingConsent?: boolean;
+  marketingConsentUpdatedAt?: string | null;
   expiresAt?: string | null;
   paidAt?: string | null;
   confirmedAt?: string | null;
@@ -592,6 +594,8 @@ async function ensurePostgresDatabase(client: Queryable) {
       payload jsonb not null,
       created_at text not null,
       updated_at text not null,
+      marketing_consent boolean not null default false,
+      marketing_consent_updated_at text,
       expires_at text,
       paid_at text,
       confirmed_at text,
@@ -918,7 +922,7 @@ async function ensurePostgresDatabase(client: Queryable) {
     create or replace function public.run_registration_pricing_defaults() returns trigger language plpgsql set search_path = public as $$ begin new.discount_percentage := coalesce(new.discount_percentage, 0); new.discount_amount := coalesce(new.discount_amount, 0); new.original_price := coalesce(new.original_price, new.amount_cents); new.final_price := coalesce(new.final_price, new.amount_cents); return new; end; $$;
     drop trigger if exists "run-registrations_pricing_defaults" on "run-registrations";
     create trigger "run-registrations_pricing_defaults" before insert on "run-registrations" for each row execute function public.run_registration_pricing_defaults();
-    create or replace function public.protect_confirmed_partner_snapshot() returns trigger language plpgsql set search_path = public as $$ begin if old.confirmed_at is not null and (new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name or new.partner_type is distinct from old.partner_type or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price) then raise exception 'confirmed partner snapshot is immutable'; end if; return new; end; $$;
+    create or replace function public.protect_confirmed_partner_snapshot() returns trigger language plpgsql set search_path = pg_catalog, public as $$ begin if old.confirmed_at is not null and (new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name or new.partner_type is distinct from old.partner_type or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price) then raise exception 'confirmed partner snapshot is immutable'; end if; return new; end; $$;
     drop trigger if exists "run-registrations_partner_snapshot_immutable" on "run-registrations";
     create trigger "run-registrations_partner_snapshot_immutable" before update on "run-registrations" for each row execute function public.protect_confirmed_partner_snapshot();
   `);
@@ -945,8 +949,8 @@ async function ensurePostgresDatabase(client: Queryable) {
       continues_after_capacity boolean
     )
     language plpgsql
-    security definer
-    set search_path = public
+    security invoker
+    set search_path = pg_catalog, public
     as $$
     declare
       v_accumulated_capacity integer := 0;
@@ -985,6 +989,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       end if;
     end;
     $$;
+    revoke execute on function public.run_select_lot_for_registration_number(text, integer) from public, anon, authenticated;
   `);
   await client.query(`alter table ${table.payments} add column if not exists expires_at text`);
   await client.query(`alter table ${table.payments} add column if not exists paid_at text`);
@@ -995,6 +1000,8 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.auditLogs} add column if not exists session_id text`);
   await client.query(`alter table ${table.auditLogs} add column if not exists ip_address text`);
   await client.query(`alter table ${table.auditLogs} add column if not exists user_agent text`);
+  await client.query(`alter table ${table.registrations} add column if not exists marketing_consent boolean not null default false`);
+  await client.query(`alter table ${table.registrations} add column if not exists marketing_consent_updated_at text`);
   await client.query(`create index if not exists "run-integration-events_retry_idx" on ${table.integrationEvents}(status, next_attempt_at)`);
   await client.query(`create index if not exists "run-integration-events_entity_idx" on ${table.integrationEvents}(entity_type, entity_id, created_at)`);
 
@@ -1157,7 +1164,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
   const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
   const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`) : emptyRows;
-  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price from ${table.registrations}`) : emptyRows;
+  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
@@ -1213,6 +1220,8 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       payload: row.payload,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      marketingConsent: row.marketing_consent === true,
+      marketingConsentUpdatedAt: row.marketing_consent_updated_at,
       expiresAt: row.expires_at,
       paidAt: row.paid_at,
       confirmedAt: row.confirmed_at,
@@ -1399,8 +1408,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -1410,6 +1419,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          amount_cents = excluded.amount_cents,
          payload = excluded.payload,
          updated_at = excluded.updated_at,
+         marketing_consent = excluded.marketing_consent,
+         marketing_consent_updated_at = excluded.marketing_consent_updated_at,
          expires_at = excluded.expires_at,
          paid_at = excluded.paid_at,
          confirmed_at = excluded.confirmed_at,
@@ -1439,6 +1450,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.payload,
         item.createdAt,
         item.updatedAt,
+        item.marketingConsent ?? item.payload.meta?.marketingConsent === true,
+        item.marketingConsentUpdatedAt || item.createdAt,
         item.expiresAt || null,
         item.paidAt || null,
         item.confirmedAt || null,
@@ -1836,6 +1849,28 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
 
     if (existing) {
       const recoveredAt = new Date().toISOString();
+      const recoveredMarketingConsent = input.payload.meta?.marketingConsent === true;
+      await client.query(
+        `update ${table.registrations}
+         set marketing_consent=$1,
+             marketing_consent_updated_at=$2,
+             payload=jsonb_set(
+               payload,
+               '{meta}',
+               coalesce(payload->'meta', '{}'::jsonb) || jsonb_build_object('marketingConsent', $1::boolean),
+               true
+             )
+         where id=$3`,
+        [recoveredMarketingConsent, recoveredAt, existing.id],
+      );
+      if (!recoveredMarketingConsent) {
+        await client.query(
+          `update ${table.integrationEvents}
+           set status='failed',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
+           where provider='meta' and entity_id=$2 and status in ('pending','failed')`,
+          [recoveredAt, existing.id],
+        );
+      }
       const requestedPartnerDiffers = Boolean(input.partnerId) && input.partnerId !== existing.partner_id;
       if (requestedPartnerDiffers) {
         await insertPartnerAudit(client, {
@@ -2014,10 +2049,12 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     }
 
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, null, null, null, null, null, null, null, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
-      [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now, input.expiresAt,
-        partnerPricing?.partnerId || null, partnerPricing?.partnerName || null, partnerType, partnerPricing ? `/p/${input.partnerSlug || ''}` : null, partnerPricing ? now : null,
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $9, $11, null, null, null, null, null, null, null, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+      [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now,
+        input.payload.meta?.marketingConsent === true, input.expiresAt,
+        partnerPricing?.partnerId || null, partnerPricing?.partnerName || null, partnerType,
+        partnerPricing ? `/p/${input.partnerSlug || ''}` : null, partnerPricing ? now : null,
         partnerPricing?.discountPercentage || 0, partnerPricing?.discountAmountCents || 0, originalPriceCents, amountCents],
     );
     await client.query(
@@ -3652,7 +3689,9 @@ export async function enqueueMetaIntegrationEventInPostgres(
   const result = await requirePool().query(
     `insert into ${table.integrationEvents}
       (id,provider,event_name,event_id,entity_type,entity_id,event_time,event_source_url,user_data,client_context,custom_data,status,attempt_count,next_attempt_at,last_attempt_at,last_error,response_code,events_received,sent_at,created_at,updated_at)
-     values ($1,'meta',$2,$3,'registration',$4,$5,$6,$7,$8,$9,'pending',0,$10,null,null,null,null,null,$10,$10)
+     select $1,'meta',$2,$3,'registration',registration.id,$5,$6,$7,$8,$9,'pending',0,$10,null,null,null,null,null,$10,$10
+     from ${table.registrations} registration
+     where registration.id=$4 and registration.marketing_consent=true
      on conflict (provider,event_name,event_id) do nothing
      returning id`,
     [
@@ -3677,17 +3716,19 @@ export async function claimMetaIntegrationEventsInPostgres(limit: number, maxAtt
   const staleBefore = new Date(Date.now() - 5 * 60_000).toISOString();
   const result = await requirePool().query(
     `with candidates as (
-       select id
-       from ${table.integrationEvents}
-       where attempt_count < $1
-         and event_time >= extract(epoch from now() - interval '7 days')::bigint
+       select integration.id
+       from ${table.integrationEvents} integration
+       join ${table.registrations} registration on registration.id=integration.entity_id
+       where integration.attempt_count < $1
+         and registration.marketing_consent=true
+         and integration.event_time >= extract(epoch from now() - interval '7 days')::bigint
          and (
-           status = 'pending'
-           or (status = 'failed' and next_attempt_at is not null and next_attempt_at::timestamptz <= $2::timestamptz)
-           or (status = 'processing' and last_attempt_at::timestamptz <= $3::timestamptz)
+           integration.status = 'pending'
+           or (integration.status = 'failed' and integration.next_attempt_at is not null and integration.next_attempt_at::timestamptz <= $2::timestamptz)
+           or (integration.status = 'processing' and integration.last_attempt_at::timestamptz <= $3::timestamptz)
          )
-       order by created_at asc
-       for update skip locked
+       order by integration.created_at asc
+       for update of integration skip locked
        limit $4
      )
      update ${table.integrationEvents} target
@@ -3731,11 +3772,46 @@ export async function failMetaIntegrationEventInPostgres(input: {
   );
 }
 
+export async function withMetaConsentSendAuthorizationInPostgres<T>(
+  registrationId: string,
+  send: () => Promise<T>,
+): Promise<{ authorized: false } | { authorized: true; result: T }> {
+  await ensurePostgresReady();
+  const client = await requirePool().connect();
+  try {
+    await client.query('begin');
+    const consent = await client.query(
+      `select marketing_consent
+       from ${table.registrations}
+       where id=$1
+       for update`,
+      [registrationId],
+    );
+    if (consent.rows[0]?.marketing_consent !== true) {
+      await client.query('rollback');
+      return { authorized: false };
+    }
+
+    // Serialize consent revocation with the actual external request. A revoke
+    // either commits first and blocks this send, or becomes effective only
+    // after the request has already finished.
+    const result = await send();
+    await client.query('commit');
+    return { authorized: true, result };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function getMetaRegistrationSnapshotInPostgres(registrationId: string) {
   await ensurePostgresReady();
   const result = await requirePool().query(
     `select registration.id,registration.status,registration.amount_cents,registration.created_at,
             registration.paid_at,registration.confirmed_at,registration.payload,
+            registration.marketing_consent,registration.marketing_consent_updated_at,
             event.id event_id,event.name event_name,
             payment.status payment_status,payment.amount_cents payment_amount_cents,payment.paid_at payment_paid_at,
             context.client_context,context.event_source_url
@@ -3765,6 +3841,8 @@ export async function getMetaRegistrationSnapshotInPostgres(registrationId: stri
       ? String(row.payment_paid_at || row.paid_at || row.confirmed_at)
       : null,
     payload: row.payload as RegistrationFormData,
+    marketingConsent: row.marketing_consent === true,
+    marketingConsentUpdatedAt: row.marketing_consent_updated_at ? String(row.marketing_consent_updated_at) : null,
     eventId: String(row.event_id),
     eventName: String(row.event_name),
     clientContext: (row.client_context || {}) as MetaUserData,
@@ -3779,6 +3857,10 @@ export async function listPaidRegistrationsMissingMetaPurchaseInPostgres(limit =
      from ${table.registrations} registration
      join ${table.payments} payment on payment.registration_id=registration.id
      where registration.status='paid' and payment.status='paid'
+       and registration.marketing_consent=true
+       and registration.marketing_consent_updated_at is not null
+       and registration.marketing_consent_updated_at::timestamptz
+         <= coalesce(payment.paid_at,registration.paid_at,registration.confirmed_at)::timestamptz
        and coalesce(payment.paid_at,registration.paid_at,registration.confirmed_at)::timestamptz >= now() - interval '7 days'
        and not exists (
          select 1 from ${table.integrationEvents} integration
@@ -3791,6 +3873,55 @@ export async function listPaidRegistrationsMissingMetaPurchaseInPostgres(limit =
     [Math.max(1, Math.min(limit, 100))],
   );
   return result.rows.map((row) => String(row.id));
+}
+
+export async function updateMetaMarketingConsentInPostgres(
+  registrationIds: string[],
+  marketingConsent: boolean,
+) {
+  await ensurePostgresReady();
+  const ids = [...new Set(registrationIds)].slice(0, 8);
+  if (ids.length === 0) return { updatedRegistrations: 0, blockedEvents: 0 };
+  const client = await requirePool().connect();
+  const now = new Date().toISOString();
+
+  try {
+    await client.query('begin');
+    const registrations = await client.query(
+      `update ${table.registrations}
+       set marketing_consent=$1,
+           marketing_consent_updated_at=$2,
+           payload=jsonb_set(
+             payload,
+             '{meta}',
+             coalesce(payload->'meta', '{}'::jsonb) || jsonb_build_object('marketingConsent', $1::boolean),
+             true
+           )
+       where id=any($3::text[])
+       returning id`,
+      [marketingConsent, now, ids],
+    );
+    let blockedEvents = 0;
+    if (!marketingConsent && registrations.rows.length > 0) {
+      const matchedIds = registrations.rows.map((row) => String(row.id));
+      const blocked = await client.query(
+        `update ${table.integrationEvents}
+         set status='failed',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
+         where provider='meta'
+           and entity_id=any($2::text[])
+           and status in ('pending','failed')`,
+        [now, matchedIds],
+      );
+      blockedEvents = blocked.rowCount || 0;
+    }
+    await client.query('commit');
+    return { updatedRegistrations: registrations.rowCount || 0, blockedEvents };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function cleanupMetaClientContextInPostgres() {
