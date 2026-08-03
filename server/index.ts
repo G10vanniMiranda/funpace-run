@@ -35,6 +35,7 @@ import {
   listOperationalAlertsInPostgres,
   synchronizeOperationalAlertsInPostgres,
   updateOperationalAlertInPostgres,
+  updateMetaMarketingConsentInPostgres,
   createCriticalOperationalAlertInPostgres,
   persistReconciliationRunInPostgres,
   pingDatabase,
@@ -84,8 +85,15 @@ import {
 } from './meta-events.js';
 import {
   enqueueMetaRegistrationFlow,
+  resolveMetaCheckoutFlow,
   resolveMetaRegistrationFlow,
 } from './meta-registration-flow.js';
+import {
+  bindMetaConsentRegistration,
+  parseMarketingConsentDecision,
+  signMetaConsentSession,
+  verifyMetaConsentSession,
+} from './meta-consent-session.js';
 import { isMarketingConsentGranted } from '../src/lib/privacyConsent.js';
 import {
   areExternalPaymentsAllowed,
@@ -126,6 +134,8 @@ const adminSessionSecretConfigured = adminSessionSecret.length >= 32 && adminSes
 const adminSessionTtlSeconds = Math.max(Number(process.env.ADMIN_SESSION_TTL_SECONDS || 28_800), 900);
 const adminCookieName = 'funpace_admin_session';
 const partnerCookieName = 'funpace_partner_session';
+const metaConsentCookieName = 'funpace_meta_consent';
+const metaConsentSessionTtlSeconds = 180 * 24 * 60 * 60;
 const partnerSessionSecret = process.env.PARTNER_SESSION_SECRET || adminSessionSecret;
 const partnerSessionTtlInput = Number(process.env.PARTNER_SESSION_TTL_SECONDS || 30 * 60);
 const partnerSessionTtlSeconds = Number.isFinite(partnerSessionTtlInput)
@@ -142,6 +152,7 @@ const rateLimit = new Map<string, { count: number; resetAt: number }>();
 const adminLoginIpRateLimit = new Map<string, { count: number; resetAt: number }>();
 const adminLoginUserRateLimit = new Map<string, { count: number; resetAt: number }>();
 const partnershipRateLimit = new Map<string, { count: number; resetAt: number }>();
+const metaConsentRateLimit = new Map<string, { count: number; resetAt: number }>();
 
 function setCors(req: IncomingMessage, res: ServerResponse) {
   const origin = req.headers.origin;
@@ -311,6 +322,39 @@ function buildAdminCookie(token: string, maxAgeSeconds: number) {
 
 function buildPartnerCookie(token: string, maxAgeSeconds: number) {
   return `${partnerCookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${isProduction ? '; Secure' : ''}`;
+}
+
+function buildMetaConsentCookie(token: string, maxAgeSeconds: number) {
+  return `${metaConsentCookieName}=${encodeURIComponent(token)}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${isProduction ? '; Secure' : ''}`;
+}
+
+function appendResponseCookie(res: ServerResponse, cookie: string) {
+  const current = res.getHeader('Set-Cookie');
+  const cookies = Array.isArray(current) ? current.map(String) : current ? [String(current)] : [];
+  res.setHeader('Set-Cookie', [...cookies, cookie]);
+}
+
+function readMetaConsentSession(req: IncomingMessage) {
+  return verifyMetaConsentSession(
+    readCookie(req.headers.cookie, metaConsentCookieName),
+    adminSessionSecret,
+  );
+}
+
+function bindRegistrationToMetaConsentSession(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+  if (!adminSessionSecretConfigured) return false;
+  const session = bindMetaConsentRegistration(
+    readMetaConsentSession(req),
+    registrationId,
+    Date.now(),
+    metaConsentSessionTtlSeconds,
+  );
+  if (!session) return false;
+  appendResponseCookie(
+    res,
+    buildMetaConsentCookie(signMetaConsentSession(session, adminSessionSecret), metaConsentSessionTtlSeconds),
+  );
+  return true;
 }
 
 function readPartnerSession(req: IncomingMessage) {
@@ -528,6 +572,18 @@ function isPartnershipRateLimited(req: IncomingMessage) {
 
   bucket.count += 1;
   return bucket.count > 5;
+}
+
+function isMetaConsentRateLimited(req: IncomingMessage) {
+  const key = getClientKey(req);
+  const now = Date.now();
+  const bucket = metaConsentRateLimit.get(key);
+  if (!bucket || bucket.resetAt < now) {
+    metaConsentRateLimit.set(key, { count: 1, resetAt: now + 60_000 });
+    return false;
+  }
+  bucket.count += 1;
+  return bucket.count > 20;
 }
 
 function hitRateLimitBucket(store: Map<string, { count: number; resetAt: number }>, key: string, limit: number, windowMs: number) {
@@ -1487,6 +1543,52 @@ function handleClearPartnerSession(res: ServerResponse) {
   json(res, 200, { partner: null });
 }
 
+async function handleMetaMarketingConsent(req: IncomingMessage, res: ServerResponse) {
+  res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+  if (!requireJson(req, res)) return;
+  if (isMetaConsentRateLimited(req)) {
+    json(res, 429, { message: 'Muitas atualizacoes de consentimento. Aguarde um minuto.' });
+    return;
+  }
+  const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+  if ((origin && !allowedOrigins.includes(origin)) || (isProduction && !origin)) {
+    json(res, 403, { message: 'Origem nao autorizada.' });
+    return;
+  }
+  if (!usesPostgresDatabase()) {
+    json(res, 503, { message: 'Persistencia de consentimento indisponivel.' });
+    return;
+  }
+  if (isProduction && !adminSessionSecretConfigured) {
+    json(res, 503, { message: 'Persistencia segura de consentimento indisponivel.' });
+    return;
+  }
+
+  const body = parseJsonBody<unknown>(await readBody(req));
+  const marketing = parseMarketingConsentDecision(body);
+  if (marketing === null) {
+    json(res, 422, { message: 'Decisao de consentimento invalida.' });
+    return;
+  }
+
+  const rawToken = readCookie(req.headers.cookie, metaConsentCookieName);
+  if (!rawToken) {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+  const session = verifyMetaConsentSession(rawToken, adminSessionSecret);
+  if (!session) {
+    appendResponseCookie(res, buildMetaConsentCookie('', 0));
+    json(res, 401, { message: 'Vinculo de consentimento invalido ou expirado.' });
+    return;
+  }
+
+  const result = await updateMetaMarketingConsentInPostgres(session.registrationIds, marketing);
+  logRequest(req, 200, marketing ? 'marketing_consent_granted' : 'marketing_consent_revoked');
+  json(res, 200, { ok: true, updated: result.updatedRegistrations, blockedEvents: result.blockedEvents });
+}
+
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
   const startedAt = Date.now();
   const requestId = Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'] || null;
@@ -1785,11 +1887,11 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     checkoutStatus: response.checkoutStatus,
   });
   const registrationWasCreated = response.statusCode === 201;
+  const registrationCommittedForConsent = Boolean(response.registrationId && response.success);
   const metaFlow = resolveMetaRegistrationFlow({
     registrationId: response.registrationId,
     statusCode: response.statusCode,
     success: response.success,
-    checkoutRequested,
     marketingConsent: metaContext?.marketingConsent,
   });
   response.checkoutEnabled = Boolean(
@@ -1799,7 +1901,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   );
   response.checkoutSimulated = false;
   response.paymentProviderCalled = false;
-  response.attemptId = metaFlow.initiateCheckoutEventId;
+  response.attemptId = null;
 
   const metaQueue = await enqueueMetaRegistrationFlow(metaFlow, {
     queueCompleteRegistration: (eventId) => queueMetaCompleteRegistrationEvent(
@@ -1808,16 +1910,8 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       eventId,
       metaContext,
     ),
-    queueInitiateCheckout: (eventId) => queueMetaInitiateCheckoutEvent(
-      req,
-      response.registrationId,
-      eventId,
-      Math.floor(startedAt / 1000),
-      metaContext,
-    ),
   });
-  const metaEventsQueued = metaQueue.completeRegistrationQueued
-    || metaQueue.initiateCheckoutQueued;
+  let metaEventsQueued = metaQueue.completeRegistrationQueued;
   for (const failure of metaQueue.failures) {
     console.error(JSON.stringify({
       at: new Date().toISOString(),
@@ -1902,6 +1996,34 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
         response.checkoutStatus = 'created';
         response.checkoutUrl = checkout.checkoutUrl;
+        const checkoutMetaFlow = resolveMetaCheckoutFlow({
+          registrationId: response.registrationId,
+          checkoutPersisted: true,
+          checkoutReferencePresent: Boolean(checkout.checkoutUrl?.trim() || checkout.providerPaymentId?.trim()),
+          marketingConsent: metaContext?.marketingConsent,
+        });
+        response.attemptId = checkoutMetaFlow.initiateCheckoutEventId;
+        if (checkoutMetaFlow.shouldQueueInitiateCheckout && checkoutMetaFlow.initiateCheckoutEventId) {
+          try {
+            const queued = await queueMetaInitiateCheckoutEvent(
+              req,
+              response.registrationId,
+              checkoutMetaFlow.initiateCheckoutEventId,
+              Math.floor(startedAt / 1000),
+              metaContext,
+            );
+            metaEventsQueued = queued || metaEventsQueued;
+          } catch (error) {
+            console.error(JSON.stringify({
+              at: new Date().toISOString(),
+              provider: 'meta',
+              eventName: 'InitiateCheckout',
+              registrationId: response.registrationId,
+              status: 'queue_failed',
+              errorCode: error instanceof Error ? error.message.slice(0, 100) : 'META_QUEUE_FAILED',
+            }));
+          }
+        }
       } catch (error) {
         logStage('checkout_create_failed', {
           registrationId: response.registrationId,
@@ -1922,7 +2044,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   }
 
   if (
-    metaFlow.shouldQueueInitiateCheckout
+    checkoutRequested
     && isHomologationEnvironment()
     && !externalPaymentsAllowed
   ) {
@@ -1947,7 +2069,10 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     checkoutStatus: response.checkoutStatus,
   });
   logRequest(req, statusCode, response.registrationId ? 'registration_processed' : 'registration_rejected');
-  if (presentedPartnerSession) res.setHeader('Set-Cookie', buildPartnerCookie('', 0));
+  if (registrationCommittedForConsent && usesPostgresDatabase()) {
+    bindRegistrationToMetaConsentSession(req, res, response.registrationId);
+  }
+  if (presentedPartnerSession) appendResponseCookie(res, buildPartnerCookie('', 0));
   json(res, statusCode, payloadResponse);
 
   // The durable outbox is created before the response. External I/O starts only
@@ -4196,6 +4321,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       const session = await readAdminSession(req);
       if (!session) { json(res, 401, { message: 'Sessao administrativa ausente ou expirada.' }); return; }
       json(res, 200, { actor: session.actor, role: session.role, expiresAt: new Date(session.expiresAt).toISOString() }); return;
+    }
+
+    if (req.method === 'PUT' && url.pathname === '/api/privacy/marketing-consent') {
+      await handleMetaMarketingConsent(req, res);
+      return;
     }
 
     if (req.method === 'POST' && url.pathname === '/api/registrations') {

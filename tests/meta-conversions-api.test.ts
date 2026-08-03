@@ -266,15 +266,16 @@ test('migration enforces authoritative deduplication and concurrent claiming', (
   assert.match(rlsMigration, /alter table public\."run-integration-events"\s+enable row level security/i);
   const store = readFileSync('server/database.ts', 'utf8');
   assert.match(store, /on conflict \(provider,event_name,event_id\) do nothing/i);
-  assert.match(store, /for update skip locked/i);
+  assert.match(store, /for update(?: of integration)? skip locked/i);
   assert.match(store, /status='sent'/i);
 });
 
 test('only a financially confirmed registration is eligible for server Purchase', () => {
-  assert.equal(canQueueMetaPurchase('paid', 'paid', new Date().toISOString()), true);
+  assert.equal(canQueueMetaPurchase('paid', 'paid', new Date().toISOString(), true), true);
   for (const status of ['pending_payment', 'cancelled', 'expired', 'payment_failed', 'refunded']) {
-    assert.equal(canQueueMetaPurchase(status, status, null), false);
+    assert.equal(canQueueMetaPurchase(status, status, null, true), false);
   }
-  assert.equal(canQueueMetaPurchase('paid', 'pending_payment', new Date().toISOString()), false);
-  assert.equal(canQueueMetaPurchase('paid', 'paid', null), false);
+  assert.equal(canQueueMetaPurchase('paid', 'pending_payment', new Date().toISOString(), true), false);
+  assert.equal(canQueueMetaPurchase('paid', 'paid', null, true), false);
+  assert.equal(canQueueMetaPurchase('paid', 'paid', new Date().toISOString(), false), false);
 });

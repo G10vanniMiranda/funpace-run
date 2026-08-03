@@ -44,6 +44,8 @@ create table if not exists "run-registrations" (
   payload jsonb not null,
   created_at text not null,
   updated_at text not null,
+  marketing_consent boolean not null default false,
+  marketing_consent_updated_at text,
   expires_at text,
   paid_at text,
   confirmed_at text,
@@ -310,6 +312,8 @@ create index if not exists "run-partners_deleted_at_idx" on "run-partners"(delet
 alter table "run-registrations" add column if not exists expires_at text;
 alter table "run-registrations" add column if not exists paid_at text;
 alter table "run-registrations" add column if not exists confirmed_at text;
+alter table "run-registrations" add column if not exists marketing_consent boolean not null default false;
+alter table "run-registrations" add column if not exists marketing_consent_updated_at text;
 alter table "run-registrations" add column if not exists confirmation_email_sent_at text;
 alter table "run-registrations" add column if not exists confirmation_email_last_attempt_at text;
 alter table "run-registrations" add column if not exists confirmation_email_provider text;

@@ -24,6 +24,7 @@ import {
   getMetaRegistrationSnapshotInPostgres,
   listPaidRegistrationsMissingMetaPurchaseInPostgres,
   usesPostgresDatabase,
+  withMetaConsentSendAuthorizationInPostgres,
 } from './database.js';
 
 const RETRY_DELAYS_SECONDS = [60, 5 * 60, 30 * 60, 2 * 60 * 60, 6 * 60 * 60];
@@ -34,8 +35,12 @@ export function canQueueMetaPurchase(
   registrationStatus: string,
   paymentStatus: string | undefined,
   paidAt: string | null,
+  marketingConsent: boolean,
 ) {
-  return registrationStatus === 'paid' && paymentStatus === 'paid' && Boolean(paidAt);
+  return registrationStatus === 'paid'
+    && paymentStatus === 'paid'
+    && Boolean(paidAt)
+    && isMarketingConsentGranted(marketingConsent);
 }
 
 function logMetaEvent(data: {
@@ -85,7 +90,7 @@ async function getMetaRegistrationEventContext(
   if (!usesPostgresDatabase() || !isMetaCapiReady()) return null;
   if (!isMarketingConsentGranted(metaContext?.marketingConsent)) return null;
   const snapshot = await getMetaRegistrationSnapshotInPostgres(registrationId);
-  if (!snapshot || snapshot.status !== 'pending_payment') return null;
+  if (!snapshot || snapshot.status !== 'pending_payment' || !snapshot.marketingConsent) return null;
 
   const clientContext = getMetaClientContext(req, metaContext);
   const userData = buildMetaUserData(getIdentity(snapshot.payload, registrationId), clientContext);
@@ -147,8 +152,12 @@ export async function queueMetaInitiateCheckoutEvent(
 export async function queueMetaPurchaseEvent(registrationId: string) {
   if (!usesPostgresDatabase() || !isMetaCapiReady()) return false;
   const snapshot = await getMetaRegistrationSnapshotInPostgres(registrationId);
-  if (!snapshot || !canQueueMetaPurchase(snapshot.status, snapshot.paymentStatus, snapshot.paidAt)) return false;
-  if (!isMarketingConsentGranted(snapshot.payload.meta?.marketingConsent)) return false;
+  if (!snapshot || !canQueueMetaPurchase(
+    snapshot.status,
+    snapshot.paymentStatus,
+    snapshot.paidAt,
+    snapshot.marketingConsent,
+  )) return false;
 
   const userData = buildMetaUserData(
     getIdentity(snapshot.payload, registrationId),
@@ -189,7 +198,7 @@ export async function processMetaIntegrationQueue(limit = 10) {
 
   for (const record of claimed) {
     const consentSnapshot = await getMetaRegistrationSnapshotInPostgres(record.entityId);
-    if (!isMarketingConsentGranted(consentSnapshot?.payload.meta?.marketingConsent)) {
+    if (!isMarketingConsentGranted(consentSnapshot?.marketingConsent)) {
       await failMetaIntegrationEventInPostgres({
         id: record.id,
         errorCode: 'MARKETING_CONSENT_NOT_GRANTED',
@@ -216,7 +225,29 @@ export async function processMetaIntegrationQueue(limit = 10) {
       user_data: { ...record.userData, ...record.clientContext },
       custom_data: record.customData,
     };
-    const result = await sendMetaServerEvent(event);
+    const authorization = await withMetaConsentSendAuthorizationInPostgres(
+      record.entityId,
+      () => sendMetaServerEvent(event),
+    );
+    if (!authorization.authorized) {
+      await failMetaIntegrationEventInPostgres({
+        id: record.id,
+        errorCode: 'MARKETING_CONSENT_NOT_GRANTED',
+        responseCode: null,
+        retryAt: null,
+      });
+      summary.failed += 1;
+      logMetaEvent({
+        eventName: record.eventName,
+        eventId: record.eventId,
+        registrationId: record.entityId,
+        status: 'blocked_by_consent',
+        errorCode: 'MARKETING_CONSENT_NOT_GRANTED',
+      });
+      continue;
+    }
+
+    const result = authorization.result;
     if (result.ok === true) {
       await completeMetaIntegrationEventInPostgres(record.id, {
         responseCode: result.httpStatus,
