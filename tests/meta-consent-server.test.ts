@@ -97,10 +97,12 @@ test('browser synchronizes consent without accepting a registration id', () => {
   const app = readFileSync('src/App.tsx', 'utf8');
   const api = readFileSync('src/lib/api.ts', 'utf8');
   const server = readFileSync('server/index.ts', 'utf8');
+  const vercelRoute = readFileSync('api/privacy/marketing-consent.ts', 'utf8');
   assert.match(app, /updateMarketingConsent\(consent\.preferences\.marketing\)/);
   assert.match(api, /JSON\.stringify\(\{ marketing \}\)/);
   assert.match(server, /HttpOnly; SameSite=Strict/);
   assert.match(server, /parseMarketingConsentDecision\(body\)/);
   assert.match(server, /isMetaConsentRateLimited\(req\)/);
   assert.match(server, /Origem nao autorizada/);
+  assert.match(vercelRoute, /handleApiRequest\(req, res\)/);
 });
