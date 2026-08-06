@@ -65,6 +65,7 @@ export type RegistrationRecord = {
   updatedAt: string;
   marketingConsent?: boolean;
   marketingConsentUpdatedAt?: string | null;
+  metaContext?: Record<string, unknown>;
   expiresAt?: string | null;
   paidAt?: string | null;
   confirmedAt?: string | null;
@@ -111,7 +112,7 @@ export type PaymentEventRecord = {
   receivedAt: string;
 };
 
-export type IntegrationEventStatus = 'pending' | 'processing' | 'sent' | 'failed';
+export type IntegrationEventStatus = 'pending' | 'processing' | 'sent' | 'failed' | 'dead';
 
 export type IntegrationEventRecord = {
   id: string;
@@ -260,6 +261,7 @@ export type Database = {
 
 export type PendingRegistrationInput = {
   payload: RegistrationFormData;
+  metaContext: Record<string, unknown>;
   cpfHash: string;
   paymentProvider: string;
   expiresAt: string;
@@ -350,7 +352,34 @@ type DatabaseReadScope =
   | 'partners';
 
 const databasePath = resolve(process.env.DATABASE_FILE || 'data/funpace-db.json');
-const databaseUrl = process.env.DATABASE_URL || '';
+const META_RECONCILIATION_CONTEXT_SQL = `
+  jsonb_typeof(registration.meta_context)='object'
+  and jsonb_typeof(registration.meta_context->'captured_at')='string'
+  and registration.meta_context->>'captured_at' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$'
+  and jsonb_typeof(registration.meta_context->'event_source_url')='string'
+  and registration.meta_context->>'event_source_url' ~ '^https?://'
+`;
+export function resolveDatabaseConnectionUrl(configuredUrl: string, serverless = Boolean(process.env.VERCEL)) {
+  if (!serverless || !configuredUrl) return configuredUrl;
+
+  try {
+    const parsed = new URL(configuredUrl);
+    const isSupabaseSharedPooler = parsed.hostname.endsWith('.pooler.supabase.com');
+    if (isSupabaseSharedPooler && parsed.port === '5432') {
+      // Supabase reserves 5432 on the shared pooler for session mode. Vercel
+      // functions need transaction mode so idle function instances do not own
+      // scarce database sessions.
+      parsed.port = '6543';
+      return parsed.toString();
+    }
+  } catch {
+    // Preserve the original value so pg returns its usual configuration error.
+  }
+
+  return configuredUrl;
+}
+
+const databaseUrl = resolveDatabaseConnectionUrl(process.env.DATABASE_URL || '');
 const databaseProvider = process.env.DATABASE_PROVIDER || (databaseUrl ? 'postgres' : 'json');
 const databaseSsl = (process.env.DATABASE_SSL || 'true') !== 'false';
 const databaseAutoMigrate = process.env.DATABASE_AUTO_MIGRATE === 'true'
@@ -477,16 +506,22 @@ const initialDatabase: Database = {
   partners: [],
 };
 
-const configuredDatabasePoolMax = Number.parseInt(process.env.DATABASE_POOL_MAX || '5', 10);
+// A Vercel instance owns its own Pool. Keeping the old default of five meant
+// that only three warm instances could exhaust Supabase's 15 session slots.
+const defaultDatabasePoolMax = process.env.VERCEL ? '1' : '5';
+const configuredDatabasePoolMax = Number.parseInt(process.env.DATABASE_POOL_MAX || defaultDatabasePoolMax, 10);
 const databasePoolMax = Number.isInteger(configuredDatabasePoolMax) && configuredDatabasePoolMax > 0
   ? configuredDatabasePoolMax
-  : 5;
+  : Number(defaultDatabasePoolMax);
 
 const pool = databaseUrl
   ? new Pool({
     connectionString: databaseUrl,
     ssl: databaseSsl ? { rejectUnauthorized: false } : false,
     max: databasePoolMax,
+    connectionTimeoutMillis: 5_000,
+    idleTimeoutMillis: process.env.VERCEL ? 5_000 : 30_000,
+    allowExitOnIdle: true,
   })
   : null;
 
@@ -596,6 +631,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       updated_at text not null,
       marketing_consent boolean not null default false,
       marketing_consent_updated_at text,
+      meta_context jsonb not null default '{}'::jsonb check (jsonb_typeof(meta_context) = 'object'),
       expires_at text,
       paid_at text,
       confirmed_at text,
@@ -673,7 +709,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       user_data jsonb not null default '{}'::jsonb,
       client_context jsonb not null default '{}'::jsonb,
       custom_data jsonb not null default '{}'::jsonb,
-      status text not null check (status in ('pending', 'processing', 'sent', 'failed')),
+      status text not null check (status in ('pending', 'processing', 'sent', 'failed', 'dead')),
       attempt_count integer not null default 0,
       next_attempt_at text,
       last_attempt_at text,
@@ -1002,6 +1038,19 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.auditLogs} add column if not exists user_agent text`);
   await client.query(`alter table ${table.registrations} add column if not exists marketing_consent boolean not null default false`);
   await client.query(`alter table ${table.registrations} add column if not exists marketing_consent_updated_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists meta_context jsonb not null default '{}'::jsonb`);
+  await client.query(`do $$
+    begin
+      if not exists (
+        select 1 from pg_constraint
+        where conname='run-integration-events_status_check'
+          and pg_get_constraintdef(oid) like '%dead%'
+      ) then
+        alter table ${table.integrationEvents} drop constraint if exists "run-integration-events_status_check";
+        alter table ${table.integrationEvents} add constraint "run-integration-events_status_check"
+          check (status in ('pending','processing','sent','failed','dead'));
+      end if;
+    end $$`);
   await client.query(`create index if not exists "run-integration-events_retry_idx" on ${table.integrationEvents}(status, next_attempt_at)`);
   await client.query(`create index if not exists "run-integration-events_entity_idx" on ${table.integrationEvents}(entity_type, entity_id, created_at)`);
 
@@ -1164,7 +1213,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
   const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
   const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`) : emptyRows;
-  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price from ${table.registrations}`) : emptyRows;
+  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
@@ -1222,6 +1271,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       updatedAt: row.updated_at,
       marketingConsent: row.marketing_consent === true,
       marketingConsentUpdatedAt: row.marketing_consent_updated_at,
+      metaContext: (row.meta_context || {}) as Record<string, unknown>,
       expiresAt: row.expires_at,
       paidAt: row.paid_at,
       confirmedAt: row.confirmed_at,
@@ -1408,8 +1458,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -1421,6 +1471,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          updated_at = excluded.updated_at,
          marketing_consent = excluded.marketing_consent,
          marketing_consent_updated_at = excluded.marketing_consent_updated_at,
+         meta_context = excluded.meta_context,
          expires_at = excluded.expires_at,
          paid_at = excluded.paid_at,
          confirmed_at = excluded.confirmed_at,
@@ -1452,6 +1503,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.updatedAt,
         item.marketingConsent ?? item.payload.meta?.marketingConsent === true,
         item.marketingConsentUpdatedAt || item.createdAt,
+        item.metaContext || {},
         item.expiresAt || null,
         item.paidAt || null,
         item.confirmedAt || null,
@@ -1854,6 +1906,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         `update ${table.registrations}
          set marketing_consent=$1,
              marketing_consent_updated_at=$2,
+             meta_context=$4,
              payload=jsonb_set(
                payload,
                '{meta}',
@@ -1861,12 +1914,12 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
                true
              )
          where id=$3`,
-        [recoveredMarketingConsent, recoveredAt, existing.id],
+        [recoveredMarketingConsent, recoveredAt, existing.id, recoveredMarketingConsent ? input.metaContext : {}],
       );
       if (!recoveredMarketingConsent) {
         await client.query(
           `update ${table.integrationEvents}
-           set status='failed',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
+           set status='dead',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
            where provider='meta' and entity_id=$2 and status in ('pending','failed')`,
           [recoveredAt, existing.id],
         );
@@ -2049,10 +2102,10 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     }
 
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $9, $11, null, null, null, null, null, null, null, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $9, $11, $12, null, null, null, null, null, null, null, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
       [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now,
-        input.payload.meta?.marketingConsent === true, input.expiresAt,
+        input.payload.meta?.marketingConsent === true, input.metaContext, input.expiresAt,
         partnerPricing?.partnerId || null, partnerPricing?.partnerName || null, partnerType,
         partnerPricing ? `/p/${input.partnerSlug || ''}` : null, partnerPricing ? now : null,
         partnerPricing?.discountPercentage || 0, partnerPricing?.discountAmountCents || 0, originalPriceCents, amountCents],
@@ -3153,11 +3206,18 @@ export async function synchronizeOperationalAlertsInPostgres(alerts: Array<{
   dedupeKey: string; severity: 'info' | 'warning' | 'critical'; alertType: string; title: string; message: string;
   entityType?: string | null; entityId?: string | null; payload?: Record<string, unknown>;
 }>) {
+  await ensurePostgresReady();
   const client = await requirePool().connect();
   const now = new Date().toISOString();
   try {
-    await ensurePostgresReady();
     await client.query('begin');
+    const synchronizationLock = await client.query(
+      "select pg_try_advisory_xact_lock(hashtext('funpace-run-operational-alert-sync')) locked",
+    );
+    if (synchronizationLock.rows[0]?.locked !== true) {
+      await client.query('rollback');
+      return false;
+    }
     for (const alert of alerts) {
       const persisted = await client.query(
         `insert into ${table.operationalAlerts}
@@ -3181,6 +3241,7 @@ export async function synchronizeOperationalAlertsInPostgres(alerts: Array<{
       }
     }
     await client.query('commit');
+    return true;
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;
@@ -3766,9 +3827,9 @@ export async function failMetaIntegrationEventInPostgres(input: {
   const errorCode = /^[A-Z0-9_-]{1,100}$/.test(input.errorCode) ? input.errorCode : 'META_UNKNOWN_ERROR';
   await requirePool().query(
     `update ${table.integrationEvents}
-     set status='failed',next_attempt_at=$1,last_error=$2,response_code=$3,events_received=null,updated_at=$4
-     where id=$5 and status='processing'`,
-    [input.retryAt, errorCode, input.responseCode, now, input.id],
+     set status=$1,next_attempt_at=$2,last_error=$3,response_code=$4,events_received=null,updated_at=$5
+     where id=$6 and status='processing'`,
+    [input.retryAt ? 'failed' : 'dead', input.retryAt, errorCode, input.responseCode, now, input.id],
   );
 }
 
@@ -3811,20 +3872,18 @@ export async function getMetaRegistrationSnapshotInPostgres(registrationId: stri
   const result = await requirePool().query(
     `select registration.id,registration.status,registration.amount_cents,registration.created_at,
             registration.paid_at,registration.confirmed_at,registration.payload,
-            registration.marketing_consent,registration.marketing_consent_updated_at,
+            registration.marketing_consent,registration.marketing_consent_updated_at,registration.meta_context,
             event.id event_id,event.name event_name,
             payment.status payment_status,payment.amount_cents payment_amount_cents,payment.paid_at payment_paid_at,
-            context.client_context,context.event_source_url
+            checkout.received_at checkout_created_at
      from ${table.registrations} registration
      join ${table.events} event on event.id=registration.event_id
      left join ${table.payments} payment on payment.registration_id=registration.id
      left join lateral (
-       select client_context,event_source_url
-       from ${table.integrationEvents}
-       where provider='meta' and entity_id=registration.id and client_context <> '{}'::jsonb
-       order by created_at asc
-       limit 1
-     ) context on true
+       select received_at from ${table.paymentEvents}
+       where payment_id=payment.id and event_type='infinitepay.checkout_created'
+       order by received_at asc limit 1
+     ) checkout on true
      where registration.id=$1
      limit 1`,
     [registrationId],
@@ -3845,8 +3904,9 @@ export async function getMetaRegistrationSnapshotInPostgres(registrationId: stri
     marketingConsentUpdatedAt: row.marketing_consent_updated_at ? String(row.marketing_consent_updated_at) : null,
     eventId: String(row.event_id),
     eventName: String(row.event_name),
-    clientContext: (row.client_context || {}) as MetaUserData,
-    eventSourceUrl: row.event_source_url ? String(row.event_source_url) : null,
+    clientContext: (row.meta_context || {}) as MetaUserData,
+    eventSourceUrl: typeof row.meta_context?.event_source_url === 'string' ? row.meta_context.event_source_url : null,
+    checkoutCreatedAt: row.checkout_created_at ? String(row.checkout_created_at) : null,
   };
 }
 
@@ -3858,6 +3918,7 @@ export async function listPaidRegistrationsMissingMetaPurchaseInPostgres(limit =
      join ${table.payments} payment on payment.registration_id=registration.id
      where registration.status='paid' and payment.status='paid'
        and registration.marketing_consent=true
+       and ${META_RECONCILIATION_CONTEXT_SQL}
        and registration.marketing_consent_updated_at is not null
        and registration.marketing_consent_updated_at::timestamptz
          <= coalesce(payment.paid_at,registration.paid_at,registration.confirmed_at)::timestamptz
@@ -3873,6 +3934,53 @@ export async function listPaidRegistrationsMissingMetaPurchaseInPostgres(limit =
     [Math.max(1, Math.min(limit, 100))],
   );
   return result.rows.map((row) => String(row.id));
+}
+
+export async function listRegistrationsMissingMetaLifecycleEventsInPostgres(limit = 20) {
+  await ensurePostgresReady();
+  const safeLimit = Math.max(1, Math.min(limit, 100));
+  const result = await requirePool().query(
+    `with missing as (
+       select registration.id registration_id,'CompleteRegistration' event_name,registration.created_at event_at
+       from ${table.registrations} registration
+       where registration.marketing_consent=true
+         and ${META_RECONCILIATION_CONTEXT_SQL}
+         and registration.marketing_consent_updated_at is not null
+         and registration.marketing_consent_updated_at::timestamptz <= registration.created_at::timestamptz
+         and registration.created_at::timestamptz >= now() - interval '7 days'
+         and not exists (
+           select 1 from ${table.integrationEvents} integration
+           where integration.provider='meta' and integration.event_name='CompleteRegistration'
+             and integration.event_id='complete_registration_' || registration.id
+         )
+       union all
+       select registration.id,'InitiateCheckout',checkout.received_at
+       from ${table.registrations} registration
+       join ${table.payments} payment on payment.registration_id=registration.id
+       join lateral (
+         select received_at from ${table.paymentEvents}
+         where payment_id=payment.id and event_type='infinitepay.checkout_created'
+         order by received_at asc limit 1
+       ) checkout on true
+       where registration.marketing_consent=true
+         and ${META_RECONCILIATION_CONTEXT_SQL}
+         and registration.marketing_consent_updated_at is not null
+         and registration.marketing_consent_updated_at::timestamptz <= checkout.received_at::timestamptz
+         and checkout.received_at::timestamptz >= now() - interval '7 days'
+         and not exists (
+           select 1 from ${table.integrationEvents} integration
+           where integration.provider='meta' and integration.event_name='InitiateCheckout'
+             and integration.event_id='initiate_checkout_' || registration.id
+         )
+     )
+     select registration_id,event_name,event_at from missing order by event_at asc limit $1`,
+    [safeLimit],
+  );
+  return result.rows.map((row) => ({
+    registrationId: String(row.registration_id),
+    eventName: row.event_name as 'CompleteRegistration' | 'InitiateCheckout',
+    eventAt: String(row.event_at),
+  }));
 }
 
 export async function updateMetaMarketingConsentInPostgres(
@@ -3891,6 +3999,7 @@ export async function updateMetaMarketingConsentInPostgres(
       `update ${table.registrations}
        set marketing_consent=$1,
            marketing_consent_updated_at=$2,
+           meta_context=case when $1 then meta_context else '{}'::jsonb end,
            payload=jsonb_set(
              payload,
              '{meta}',
@@ -3906,7 +4015,7 @@ export async function updateMetaMarketingConsentInPostgres(
       const matchedIds = registrations.rows.map((row) => String(row.id));
       const blocked = await client.query(
         `update ${table.integrationEvents}
-         set status='failed',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
+         set status='dead',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
          where provider='meta'
            and entity_id=any($2::text[])
            and status in ('pending','failed')`,
@@ -3949,7 +4058,21 @@ export async function cleanupMetaClientContextInPostgres() {
        )`,
     [now],
   );
-  return result.rowCount || 0;
+  const registrations = await requirePool().query(
+    `update ${table.registrations} registration
+     set meta_context='{}'::jsonb,updated_at=registration.updated_at
+     where meta_context <> '{}'::jsonb
+       and (
+         marketing_consent=false
+         or created_at::timestamptz < now() - interval '7 days'
+         or exists (
+           select 1 from ${table.integrationEvents} purchase
+           where purchase.entity_id=registration.id and purchase.provider='meta'
+             and purchase.event_name='Purchase' and purchase.status='sent'
+         )
+       )`,
+  );
+  return (result.rowCount || 0) + (registrations.rowCount || 0);
 }
 
 export async function getMetaIntegrationStatusInPostgres() {
@@ -3957,13 +4080,15 @@ export async function getMetaIntegrationStatusInPostgres() {
   const result = await requirePool().query(
     `select
        max(sent_at) filter (where status='sent') last_successful_event_at,
-       count(*) filter (where status='failed' and updated_at::timestamptz >= now() - interval '24 hours')::int recent_failures,
-       count(*) filter (where status='pending')::int pending_events
+       count(*) filter (where status in ('failed','dead') and updated_at::timestamptz >= now() - interval '24 hours')::int recent_failures,
+       count(*) filter (where status='pending')::int pending_events,
+       count(*) filter (where status='dead')::int dead_events
      from ${table.integrationEvents}`,
   );
   return {
     lastSuccessfulEventAt: result.rows[0]?.last_successful_event_at || null,
     recentFailures: Number(result.rows[0]?.recent_failures || 0),
     pendingEvents: Number(result.rows[0]?.pending_events || 0),
+    deadEvents: Number(result.rows[0]?.dead_events || 0),
   };
 }

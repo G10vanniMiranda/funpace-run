@@ -16,6 +16,7 @@ export type MetaBrowserContext = {
   initiatedAt: number;
   fbp?: string;
   fbc?: string;
+  fbclid?: string;
   sourceUrl: string;
   marketingConsent: boolean;
 };
@@ -69,12 +70,16 @@ function validMetaCookie(value: string | undefined, type: 'fbp' | 'fbc') {
   return pattern.test(value) ? value : undefined;
 }
 
-function getFbc() {
-  const cookie = validMetaCookie(readCookieValue('_fbc'), 'fbc');
-  if (cookie) return cookie;
-
+function getFbclid() {
   const fbclid = new URL(window.location.href).searchParams.get('fbclid')?.trim();
   if (!fbclid || fbclid.length > 180 || !/^[A-Za-z0-9._-]+$/.test(fbclid)) return undefined;
+  return fbclid;
+}
+
+function getFbc(fbclid?: string) {
+  const cookie = validMetaCookie(readCookieValue('_fbc'), 'fbc');
+  if (cookie) return cookie;
+  if (!fbclid) return undefined;
   return `fb.1.${Date.now()}.${fbclid}`;
 }
 
@@ -92,12 +97,14 @@ export function getMetaBrowserContext(): MetaBrowserContext {
   }
 
   const fbp = validMetaCookie(readCookieValue('_fbp'), 'fbp');
-  const fbc = getFbc();
+  const fbclid = getFbclid();
+  const fbc = getFbc(fbclid);
 
   return {
     initiatedAt: Math.floor(Date.now() / 1000),
     ...(fbp ? { fbp } : {}),
     ...(fbc ? { fbc } : {}),
+    ...(fbclid ? { fbclid } : {}),
     sourceUrl,
     marketingConsent: true,
   };

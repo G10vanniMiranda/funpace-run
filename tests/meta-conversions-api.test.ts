@@ -5,6 +5,7 @@ import {
   buildMetaConversionsPayload,
   buildMetaServerEvent,
   buildMetaUserData,
+  getMetaCapiConfig,
   normalizeBrazilianPhone,
   normalizeEmail,
   normalizeEventTime,
@@ -27,6 +28,7 @@ const managedEnv = [
   'META_GRAPH_API_VERSION',
   'META_TEST_EVENT_CODE',
   'META_CAPI_TIMEOUT_MS',
+  'APP_ENV',
 ];
 const originalEnv = Object.fromEntries(managedEnv.map((key) => [key, process.env[key]]));
 
@@ -170,6 +172,7 @@ test('builds a Purchase payload with seconds, BRL and deterministic event_id', (
 
 test('includes test_event_code only when configured and never includes the token', () => {
   configureMeta();
+  process.env.APP_ENV = 'homologation';
   process.env.META_TEST_EVENT_CODE = 'TEST123';
   const payload = buildMetaConversionsPayload(validEvent());
   const serialized = JSON.stringify(payload);
@@ -177,7 +180,20 @@ test('includes test_event_code only when configured and never includes the token
   assert.equal(serialized.includes('server-secret'), false);
 
   delete process.env.META_TEST_EVENT_CODE;
+  delete process.env.APP_ENV;
   assert.equal(buildMetaConversionsPayload(validEvent()).test_event_code, undefined);
+});
+
+test('ignores META_TEST_EVENT_CODE explicitly in production', () => {
+  configureMeta();
+  process.env.APP_ENV = 'production';
+  process.env.META_TEST_EVENT_CODE = 'TEST123';
+  const config = getMetaCapiConfig();
+  assert.equal(config.testEventCode, '');
+  assert.equal(config.testEventCodeBlocked, true);
+  assert.equal(buildMetaConversionsPayload(validEvent()).test_event_code, undefined);
+  delete process.env.APP_ENV;
+  delete process.env.META_TEST_EVENT_CODE;
 });
 
 test('accepts a valid Meta response', async () => {

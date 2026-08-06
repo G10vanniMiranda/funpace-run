@@ -6,6 +6,18 @@ export type Gender = 'female' | 'male';
 
 export type AdminGender = Gender | '';
 
+export type MarketingAttributionTouch = {
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  term?: string;
+  content?: string;
+  fbclid?: string;
+  referrer?: string;
+  landingPage?: string;
+  capturedAt?: string;
+};
+
 export type RegistrationFormData = {
   fullName: string;
   email: string;
@@ -29,6 +41,7 @@ export type RegistrationFormData = {
     initiatedAt?: number;
     fbp?: string;
     fbc?: string;
+    fbclid?: string;
     sourceUrl?: string;
     marketingConsent?: boolean;
   };
@@ -43,6 +56,9 @@ export type RegistrationFormData = {
     utmCampaign?: string;
     referrer?: string;
     landingPage?: string;
+    fbclid?: string;
+    firstTouch?: MarketingAttributionTouch;
+    lastTouch?: MarketingAttributionTouch;
   };
 };
 

@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 test('sends Resend requests with a stable idempotency key and timeout signal', async () => {
+  const originalEmailEnabled = process.env.EMAIL_ENABLED;
   process.env.EMAIL_PROVIDER = 'resend';
+  process.env.EMAIL_ENABLED = 'true';
   process.env.RESEND_API_KEY = 'test-key';
   process.env.EMAIL_FROM = 'FunPace <test@funpace.club>';
 
@@ -81,5 +83,7 @@ test('sends Resend requests with a stable idempotency key and timeout signal', a
     assert.doesNotMatch(body.text, /Inscrição recebida/i);
   } finally {
     globalThis.fetch = originalFetch;
+    if (originalEmailEnabled === undefined) delete process.env.EMAIL_ENABLED;
+    else process.env.EMAIL_ENABLED = originalEmailEnabled;
   }
 });

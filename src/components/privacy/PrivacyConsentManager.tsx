@@ -9,6 +9,8 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { usePrivacyConsent } from '../../hooks/usePrivacyConsent';
+import { useMarketingConsentSync } from '../../hooks/useMarketingConsentSync';
+import { retryMarketingConsentSync } from '../../lib/marketingConsentSync';
 import {
   acceptAllPrivacyConsent,
   rejectOptionalPrivacyConsent,
@@ -29,6 +31,7 @@ type PreferencesDraft = {
 
 export function PrivacyConsentManager() {
   const consent = usePrivacyConsent();
+  const consentSync = useMarketingConsentSync();
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [draft, setDraft] = useState<PreferencesDraft>(() => ({
     statistics: consent.preferences.statistics,
@@ -93,6 +96,27 @@ export function PrivacyConsentManager() {
 
   return (
     <>
+      {consent.hasDecision && consentSync.target === false && consentSync.status !== 'synced' ? (
+        <div
+          role={consentSync.status === 'error' ? 'alert' : 'status'}
+          className="fixed inset-x-3 top-3 z-[10030] mx-auto flex max-w-2xl items-center justify-between gap-4 rounded-xl border border-amber-400/40 bg-zinc-950 px-4 py-3 text-sm text-white shadow-2xl sm:top-5"
+        >
+          <span>
+            {consentSync.status === 'error'
+              ? 'O Marketing já está bloqueado neste navegador, mas a revogação ainda não foi confirmada pelo servidor.'
+              : 'Revogação de Marketing em sincronização com o servidor…'}
+          </span>
+          {consentSync.status === 'error' ? (
+            <button
+              type="button"
+              onClick={() => { void retryMarketingConsentSync(); }}
+              className="shrink-0 rounded-lg bg-brand px-3 py-2 text-xs font-black uppercase text-black"
+            >
+              Tentar novamente
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {!consent.hasDecision ? (
         <section
           aria-labelledby="privacy-consent-title"

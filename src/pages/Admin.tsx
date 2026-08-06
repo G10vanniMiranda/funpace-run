@@ -195,15 +195,17 @@ export function AdminPage() {
   const [actionLoading, setActionLoading] = useState<string>('');
   const [maintenanceDraft, setMaintenanceDraft] = useState<{ registration: AdminRegistration; action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit'; reason: string } | null>(null);
   const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
+  const adminLoadInFlight = useRef(false);
 
   const csvUrl = useMemo(() => getAdminCsvUrl(filters), [filters]);
   const dashboard = useMemo(() => getDashboardModel(summary, registrations), [summary, registrations]);
 
   const loadAdminData = async (key = adminKey) => {
-    if (!key) {
+    if (!key || adminLoadInFlight.current) {
       return;
     }
 
+    adminLoadInFlight.current = true;
     setLoading(true);
     setError('');
 
@@ -228,6 +230,7 @@ export function AdminPage() {
         : 'Não foi possível carregar o painel.';
       setError(message);
     } finally {
+      adminLoadInFlight.current = false;
       setLoading(false);
     }
   };
@@ -245,7 +248,7 @@ export function AdminPage() {
     const refresh = () => {
       if (document.visibilityState === 'visible') void loadAdminData(adminKey);
     };
-    const interval = window.setInterval(refresh, 15_000);
+    const interval = window.setInterval(refresh, 60_000);
     document.addEventListener('visibilitychange', refresh);
     return () => {
       window.clearInterval(interval);
@@ -1598,7 +1601,7 @@ function ExecutiveDashboardPanel({ adminKey }: { adminKey: string }) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const load = async () => { try { setData(await getAdminExecutiveDashboard(adminKey)); setError(''); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível carregar o dashboard executivo.'); } finally { setLoading(false); } };
-  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 30_000); return () => window.clearInterval(interval); }, [adminKey]);
+  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 60_000); return () => window.clearInterval(interval); }, [adminKey]);
   if (error) return <StatusMessage tone="error" message={error} />;
   const financial = data?.financial;
   const registrationsData = data?.registrations;

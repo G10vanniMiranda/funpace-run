@@ -5,11 +5,10 @@ import {
   buildMetaServerEvent,
   buildMetaUserData,
   getMetaCapiConfig,
-  getMetaClientContext,
   isMetaCapiReady,
   normalizeEventTime,
-  normalizeMetaSourceUrl,
   sendMetaServerEvent,
+  validateMetaReconciliationContext,
   validateMetaEventId,
   type MetaClientContext,
   type MetaServerEvent,
@@ -23,6 +22,7 @@ import {
   getMetaIntegrationStatusInPostgres,
   getMetaRegistrationSnapshotInPostgres,
   listPaidRegistrationsMissingMetaPurchaseInPostgres,
+  listRegistrationsMissingMetaLifecycleEventsInPostgres,
   usesPostgresDatabase,
   withMetaConsentSendAuthorizationInPostgres,
 } from './database.js';
@@ -30,6 +30,22 @@ import {
 const RETRY_DELAYS_SECONDS = [60, 5 * 60, 30 * 60, 2 * 60 * 60, 6 * 60 * 60];
 
 type MetaRegistrationRequestContext = NonNullable<RegistrationFormData['meta']>;
+type ReconciliableMetaEventName = 'CompleteRegistration' | 'InitiateCheckout' | 'Purchase';
+
+export function getEligibleMetaReconciliationContext(
+  marketingConsent: boolean,
+  context: unknown,
+  eventAt: number | string | Date,
+) {
+  return marketingConsent ? validateMetaReconciliationContext(context, eventAt) : null;
+}
+
+export function getMetaReconciliationEventId(eventName: ReconciliableMetaEventName, registrationId: string) {
+  const prefix = eventName === 'CompleteRegistration'
+    ? 'complete_registration'
+    : eventName === 'InitiateCheckout' ? 'initiate_checkout' : 'purchase';
+  return `${prefix}_${registrationId}`;
+}
 
 export function canQueueMetaPurchase(
   registrationStatus: string,
@@ -88,7 +104,7 @@ function storedClientContext(context: Record<string, unknown>): MetaClientContex
 }
 
 async function getMetaRegistrationEventContext(
-  req: IncomingMessage,
+  _req: IncomingMessage,
   registrationId: string,
   metaContext?: MetaRegistrationRequestContext,
 ) {
@@ -96,10 +112,16 @@ async function getMetaRegistrationEventContext(
   if (!isMarketingConsentGranted(metaContext?.marketingConsent)) return null;
   const snapshot = await getMetaRegistrationSnapshotInPostgres(registrationId);
   if (!snapshot || snapshot.status !== 'pending_payment' || !snapshot.marketingConsent) return null;
+  const durableContext = getEligibleMetaReconciliationContext(
+    snapshot.marketingConsent,
+    snapshot.clientContext,
+    snapshot.createdAt,
+  );
+  if (!durableContext) return null;
 
-  const clientContext = getMetaClientContext(req, metaContext);
+  const clientContext = storedClientContext(snapshot.clientContext as Record<string, unknown>);
   const userData = buildMetaUserData(getIdentity(snapshot.payload, registrationId), clientContext);
-  const sourceUrl = normalizeMetaSourceUrl(metaContext?.sourceUrl, '/');
+  const sourceUrl = durableContext.eventSourceUrl;
   const commonCustomData = {
     currency: 'BRL' as const,
     value: snapshot.amountCents / 100,
@@ -164,6 +186,12 @@ export async function queueMetaPurchaseEvent(registrationId: string) {
     snapshot.marketingConsent,
     snapshot.marketingConsentUpdatedAt,
   )) return false;
+  const durableContext = getEligibleMetaReconciliationContext(
+    snapshot.marketingConsent,
+    snapshot.clientContext,
+    snapshot.paidAt,
+  );
+  if (!durableContext) return false;
 
   const userData = buildMetaUserData(
     getIdentity(snapshot.payload, registrationId),
@@ -171,9 +199,9 @@ export async function queueMetaPurchaseEvent(registrationId: string) {
   );
   const event = buildMetaServerEvent({
     eventName: 'Purchase',
-    eventId: `purchase_${registrationId}`,
+    eventId: getMetaReconciliationEventId('Purchase', registrationId),
     eventTime: snapshot.paidAt,
-    eventSourceUrl: normalizeMetaSourceUrl(undefined, '/sucesso'),
+    eventSourceUrl: durableContext.eventSourceUrl,
     userData,
     customData: {
       currency: 'BRL',
@@ -297,7 +325,43 @@ export async function processMetaIntegrationQueue(limit = 10) {
 
 export async function recoverMetaIntegrationEvents() {
   if (!usesPostgresDatabase() || !isMetaCapiReady()) {
-    return { recoveredPurchases: 0, processed: 0, sent: 0, failed: 0, cleanedContexts: 0 };
+    return { recoveredCompleteRegistrations: 0, recoveredInitiateCheckouts: 0, recoveredPurchases: 0, processed: 0, sent: 0, failed: 0, cleanedContexts: 0 };
+  }
+
+  const missingLifecycle = await listRegistrationsMissingMetaLifecycleEventsInPostgres(40);
+  let recoveredCompleteRegistrations = 0;
+  let recoveredInitiateCheckouts = 0;
+  for (const missing of missingLifecycle) {
+    const snapshot = await getMetaRegistrationSnapshotInPostgres(missing.registrationId);
+    if (!snapshot?.marketingConsent) continue;
+    const durableContext = getEligibleMetaReconciliationContext(
+      snapshot.marketingConsent,
+      snapshot.clientContext,
+      missing.eventAt,
+    );
+    if (!durableContext) continue;
+    const clientContext = storedClientContext(snapshot.clientContext as Record<string, unknown>);
+    const userData = buildMetaUserData(getIdentity(snapshot.payload, missing.registrationId), clientContext);
+    const common = {
+      currency: 'BRL' as const,
+      value: snapshot.amountCents / 100,
+      content_name: snapshot.eventName,
+      content_ids: [snapshot.eventId],
+      content_type: 'product' as const,
+    };
+    const event = buildMetaServerEvent({
+      eventName: missing.eventName,
+      eventId: getMetaReconciliationEventId(missing.eventName, missing.registrationId),
+      eventTime: missing.eventAt,
+      eventSourceUrl: durableContext.eventSourceUrl,
+      userData,
+      customData: missing.eventName === 'CompleteRegistration'
+        ? { ...common, status: true }
+        : { ...common, num_items: 1 },
+    });
+    const queued = await enqueueMetaIntegrationEventInPostgres(missing.registrationId, event);
+    if (queued && missing.eventName === 'CompleteRegistration') recoveredCompleteRegistrations += 1;
+    if (queued && missing.eventName === 'InitiateCheckout') recoveredInitiateCheckouts += 1;
   }
 
   const missingPurchases = await listPaidRegistrationsMissingMetaPurchaseInPostgres(20);
@@ -307,7 +371,25 @@ export async function recoverMetaIntegrationEvents() {
   }
   const processed = await processMetaIntegrationQueue(20);
   const cleanedContexts = await cleanupMetaClientContextInPostgres();
-  return { recoveredPurchases, ...processed, cleanedContexts };
+  return { recoveredCompleteRegistrations, recoveredInitiateCheckouts, recoveredPurchases, ...processed, cleanedContexts };
+}
+
+export function canTrackMetaBrowserPurchase(
+  registrationStatus: string,
+  paymentStatus: string | undefined,
+  paidAt: string | null,
+  marketingConsent: boolean,
+  marketingConsentUpdatedAt: string | null,
+  registrationBoundToBrowser: boolean,
+  nowMs = Date.now(),
+  maxAgeMs = 24 * 60 * 60 * 1000,
+) {
+  const paidAtMs = Date.parse(paidAt || '');
+  return registrationBoundToBrowser
+    && canQueueMetaPurchase(registrationStatus, paymentStatus, paidAt, marketingConsent, marketingConsentUpdatedAt)
+    && Number.isFinite(paidAtMs)
+    && nowMs >= paidAtMs
+    && nowMs - paidAtMs <= maxAgeMs;
 }
 
 export async function getMetaIntegrationStatus() {

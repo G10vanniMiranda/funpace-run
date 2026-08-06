@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafe
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation.js';
-import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
+import type { CreateRegistrationResponse, MarketingAttributionTouch, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
 import { canUndoCheckIn, canUndoKit, getCheckInConflictMessage, getKitConflictMessage, validateBibAssignment } from './admin-guards.js';
 import {
   attachCheckoutToPaymentInPostgres,
@@ -76,7 +76,7 @@ import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { readCookie, signPartnerSession, verifyPartnerSession } from './partner-session.js';
 import {
-  canQueueMetaPurchase,
+  canTrackMetaBrowserPurchase,
   getMetaIntegrationStatus,
   processMetaIntegrationQueue,
   queueMetaCompleteRegistrationEvent,
@@ -96,6 +96,8 @@ import {
   verifyMetaConsentSession,
 } from './meta-consent-session.js';
 import { isMarketingConsentGranted } from '../src/lib/privacyConsent.js';
+import { getMetaClientContext, normalizeMetaSourceUrl } from './meta-conversions-api.js';
+import { isCronAuthorizationValid } from './cron-auth.js';
 import {
   areExternalPaymentsAllowed,
   areOutboundWebhooksAllowed,
@@ -137,6 +139,11 @@ const adminCookieName = 'funpace_admin_session';
 const partnerCookieName = 'funpace_partner_session';
 const metaConsentCookieName = 'funpace_meta_consent';
 const metaConsentSessionTtlSeconds = 180 * 24 * 60 * 60;
+const metaBrowserPurchaseMaxAgeMinutesInput = Number(process.env.META_BROWSER_PURCHASE_MAX_AGE_MINUTES || 1_440);
+const metaBrowserPurchaseMaxAgeMs = Math.min(Math.max(
+  Number.isFinite(metaBrowserPurchaseMaxAgeMinutesInput) ? metaBrowserPurchaseMaxAgeMinutesInput : 1_440,
+  5,
+), 1_440) * 60 * 1000;
 const partnerSessionSecret = process.env.PARTNER_SESSION_SECRET || adminSessionSecret;
 const partnerSessionTtlInput = Number(process.env.PARTNER_SESSION_TTL_SECONDS || 30 * 60);
 const partnerSessionTtlSeconds = Number.isFinite(partnerSessionTtlInput)
@@ -304,7 +311,7 @@ async function ensureAdminBootstrap() {
         disabledAt: null,
       });
     }, { scope: 'admin-auth' })).then(() => {
-      console.log(`Admin bootstrap ensured for ${adminBootstrapEmail}`);
+      console.log(JSON.stringify({ at: new Date().toISOString(), message: 'admin_bootstrap_ensured' }));
     });
   }
 
@@ -745,21 +752,46 @@ function sanitizeRegistration(input: RegistrationFormData): RegistrationFormData
       utmCampaign: compactText(input.attribution.utmCampaign, 120),
       referrer: compactText(input.attribution.referrer, 300),
       landingPage: compactText(input.attribution.landingPage, 300),
+      fbclid: /^[A-Za-z0-9._-]+$/.test(compactText(input.attribution.fbclid, 180))
+        ? compactText(input.attribution.fbclid, 180)
+        : undefined,
+      firstTouch: sanitizeAttributionTouch(input.attribution.firstTouch),
+      lastTouch: sanitizeAttributionTouch(input.attribution.lastTouch),
     } : undefined,
   };
 }
 
+function sanitizeAttributionTouch(input: MarketingAttributionTouch | undefined) {
+  if (!input || typeof input !== 'object') return undefined;
+  const capturedAt = compactText(input.capturedAt, 40);
+  const fbclid = compactText(input.fbclid, 180);
+  return {
+    utmSource: compactText(input.utmSource, 80),
+    utmMedium: compactText(input.utmMedium, 80),
+    utmCampaign: compactText(input.utmCampaign, 120),
+    term: compactText(input.term, 120),
+    content: compactText(input.content, 120),
+    fbclid: /^[A-Za-z0-9._-]+$/.test(fbclid) ? fbclid : undefined,
+    referrer: compactText(input.referrer, 300),
+    landingPage: compactText(input.landingPage, 300),
+    capturedAt: Number.isNaN(Date.parse(capturedAt)) ? undefined : capturedAt,
+  };
+}
+
 function sanitizeMetaRegistrationContext(input: RegistrationFormData['meta']) {
-  const marketingConsent = isMarketingConsentGranted(input?.marketingConsent);
+  const marketingConsent = adminSessionSecretConfigured && isMarketingConsentGranted(input?.marketingConsent);
   if (!marketingConsent) return { marketingConsent: false };
   const initiatedAt = Number(input.initiatedAt);
   const fbp = compactText(input.fbp, 255);
   const fbc = compactText(input.fbc, 255);
+  const fbclidCandidate = compactText(input.fbclid, 180);
+  const fbclid = /^[A-Za-z0-9._-]+$/.test(fbclidCandidate) ? fbclidCandidate : '';
   const sourceUrl = compactText(input.sourceUrl, 500);
   return {
     ...(Number.isInteger(initiatedAt) ? { initiatedAt } : {}),
     ...(fbp ? { fbp } : {}),
     ...(fbc ? { fbc } : {}),
+    ...(fbclid ? { fbclid } : {}),
     ...(sourceUrl ? { sourceUrl } : {}),
     marketingConsent: true,
   };
@@ -1590,6 +1622,20 @@ async function handleMetaMarketingConsent(req: IncomingMessage, res: ServerRespo
   json(res, 200, { ok: true, updated: result.updatedRegistrations, blockedEvents: result.blockedEvents });
 }
 
+function buildDurableMetaContext(req: IncomingMessage, meta: ReturnType<typeof sanitizeMetaRegistrationContext>) {
+  if (!isMarketingConsentGranted(meta.marketingConsent)) return {};
+  const client = getMetaClientContext(req, meta);
+  return {
+    ...(client.clientIpAddress ? { client_ip_address: client.clientIpAddress } : {}),
+    ...(client.clientUserAgent ? { client_user_agent: client.clientUserAgent } : {}),
+    ...(client.fbp ? { fbp: client.fbp } : {}),
+    ...(client.fbc ? { fbc: client.fbc } : {}),
+    ...('fbclid' in meta && meta.fbclid ? { fbclid: meta.fbclid } : {}),
+    event_source_url: normalizeMetaSourceUrl('sourceUrl' in meta ? meta.sourceUrl : undefined, '/'),
+    captured_at: new Date().toISOString(),
+  };
+}
+
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
   const startedAt = Date.now();
   const requestId = Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'] || null;
@@ -1634,8 +1680,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     return;
   }
 
-  const payload = sanitizeRegistration(parsedBody);
   const metaContext = sanitizeMetaRegistrationContext(parsedBody.meta);
+  const payload = sanitizeRegistration({ ...parsedBody, meta: metaContext });
+  const durableMetaContext = buildDurableMetaContext(req, metaContext);
   const checkoutRequested = parsedBody.checkoutRequested === true;
   const errors = validateRegistration(payload);
   logStage('payload_validated', { valid: Object.keys(errors).length === 0 });
@@ -1655,6 +1702,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     response = usesPostgresDatabase()
     ? await createPendingRegistrationInPostgres({
       payload,
+      metaContext: durableMetaContext,
       cpfHash: hash,
       paymentProvider: paymentProvider || 'not_configured',
       expiresAt: getPendingPaymentExpiresAt(new Date().toISOString()),
@@ -1804,6 +1852,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       status: 'pending_payment',
       amountCents: partnerPricing?.finalPriceCents ?? activeLot.priceCents,
       payload,
+      metaContext: durableMetaContext,
       createdAt: now,
       updatedAt: now,
       expiresAt,
@@ -2500,7 +2549,10 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
   const paymentProvesPaid = !registrationIsClosed && (payment?.status === 'paid' || Boolean(payment?.paidAt));
   const effectivePaidAt = registration.paidAt || payment?.paidAt || registration.confirmedAt || null;
   const effectiveRegistrationStatus = paymentProvesPaid ? 'paid' : registration.status;
+  const consentSession = adminSessionSecretConfigured ? readMetaConsentSession(req) : null;
+  const registrationBoundToBrowser = consentSession?.registrationIds.includes(registration.id) === true;
 
+  res.setHeader('Cache-Control', 'private, no-store');
   json(res, 200, {
     registrationId: registration.id,
     eventId: registration.eventId,
@@ -2526,12 +2578,15 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
     gatewayStatus: payment?.gatewayStatus || null,
     gatewayTransactionId: payment?.gatewayTransactionId || payment?.providerPaymentId || null,
     confirmationEmailSentAt: registration.confirmationEmailSentAt || null,
-    metaPurchaseEligible: canQueueMetaPurchase(
+    metaPurchaseEligible: canTrackMetaBrowserPurchase(
       effectiveRegistrationStatus,
       payment?.status || registration.status,
       effectivePaidAt,
       registration.marketingConsent === true,
       registration.marketingConsentUpdatedAt || null,
+      registrationBoundToBrowser,
+      Date.now(),
+      metaBrowserPurchaseMaxAgeMs,
     ),
   });
 }
@@ -2996,7 +3051,17 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
 
 function isAuthorizedCron(req: IncomingMessage) {
   const authorization = Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : req.headers.authorization;
-  return Boolean(cronSecret && authorization && safeSecretEqual(authorization, `Bearer ${cronSecret}`));
+  return isCronAuthorizationValid(cronSecret, authorization);
+}
+
+async function handleMetaRecovery(req: IncomingMessage, res: ServerResponse) {
+  if (!isAuthorizedCron(req)) {
+    json(res, cronSecret ? 401 : 503, { message: cronSecret ? 'Nao autorizado.' : 'CRON_SECRET nao configurado.' });
+    return;
+  }
+  const startedAt = Date.now();
+  const result = await recoverMetaIntegrationEvents();
+  json(res, 200, { success: true, ...result, elapsedMs: Date.now() - startedAt });
 }
 
 async function persistCurrentReconciliation(triggerSource: string, mode: 'dry_run' | 'apply', createdBy: string) {
@@ -3229,7 +3294,11 @@ async function refreshOperationalAlerts(database: Database) {
 async function handleAdminExecutiveDashboard(req: IncomingMessage, res: ServerResponse) {
   if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
   const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
-  const alerts = await refreshOperationalAlerts(database);
+  // Dashboard GETs are polled. Persisting the same alerts on every poll made
+  // concurrent requests contend on identical rows and hold DB connections
+  // until the statement timeout. Alert detection/persistence stays in the
+  // dedicated alerts endpoint and operational flows.
+  const alerts = await listOperationalAlertsInPostgres();
   const reconciliation = await getReconciliationDashboardInPostgres();
   json(res, 200, {
     ...buildExecutiveDashboard(database),
@@ -3288,7 +3357,9 @@ async function handleAdminMonitoring(req: IncomingMessage, res: ServerResponse) 
   const emailFailures = database.registrations.filter((registration) => Boolean(registration.confirmationEmailError)).length;
   const memory = process.memoryUsage();
   const cpu = process.cpuUsage();
-  const alerts = await refreshOperationalAlerts(database);
+  // Monitoring is polled together with the dashboard. It must remain read-only;
+  // alert synchronization has its own endpoint and a non-blocking DB lock.
+  const alerts = await listOperationalAlertsInPostgres();
   json(res, 200, {
     generatedAt: new Date().toISOString(),
     services: [
@@ -4499,6 +4570,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     if (req.method === 'GET' && url.pathname === '/api/cron/payments') {
       await handlePaymentRecovery(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/cron/meta') {
+      await handleMetaRecovery(req, res);
       return;
     }
 

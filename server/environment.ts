@@ -38,20 +38,19 @@ export function databaseUrlMatchesProjectRef(databaseUrl: string, projectRef: st
 }
 
 export function assertDatabaseEnvironmentIsolation(environment: NodeJS.ProcessEnv = process.env) {
-  if (!isHomologationEnvironment(environment)) {
-    return;
-  }
+  const appEnvironment = getAppEnvironment(environment);
+  if (appEnvironment === 'development') return;
 
   const databaseUrl = String(environment.DATABASE_URL || '').trim();
   const expectedProjectRef = String(environment.EXPECTED_DATABASE_PROJECT_REF || '').trim();
 
   if (!databaseUrl || !expectedProjectRef || !databaseUrlMatchesProjectRef(databaseUrl, expectedProjectRef)) {
-    throw new Error('Homologation database isolation check failed.');
+    throw new Error(`${appEnvironment} database isolation check failed.`);
   }
 }
 
 export function areExternalPaymentsAllowed(environment: NodeJS.ProcessEnv = process.env) {
-  if (environment.PAYMENTS_ENABLED === 'false') {
+  if (environment.PAYMENTS_ENABLED !== 'true') {
     return false;
   }
 
@@ -60,7 +59,7 @@ export function areExternalPaymentsAllowed(environment: NodeJS.ProcessEnv = proc
 }
 
 export function isEmailDeliveryAllowed(environment: NodeJS.ProcessEnv = process.env) {
-  if (environment.EMAIL_ENABLED === 'false') {
+  if (environment.EMAIL_ENABLED !== 'true') {
     return false;
   }
 
@@ -100,7 +99,7 @@ export function isGoogleSheetsAllowed(environment: NodeJS.ProcessEnv = process.e
 }
 
 export function isCronExecutionAllowed(environment: NodeJS.ProcessEnv = process.env) {
-  if (environment.CRON_ENABLED === 'false') {
+  if (environment.CRON_ENABLED !== 'true') {
     return false;
   }
 
@@ -109,7 +108,7 @@ export function isCronExecutionAllowed(environment: NodeJS.ProcessEnv = process.
 }
 
 export function areOutboundWebhooksAllowed(environment: NodeJS.ProcessEnv = process.env) {
-  if (environment.OUTBOUND_WEBHOOKS_ENABLED === 'false') {
+  if (environment.OUTBOUND_WEBHOOKS_ENABLED !== 'true') {
     return false;
   }
 

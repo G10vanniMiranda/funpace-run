@@ -149,7 +149,6 @@ export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput)
     metadata: {
       registrationId: input.orderNsu,
       orderId: input.orderNsu,
-      athleteEmail: input.customer.email,
       eventId: 'funpace-run-2026',
     },
     items: [

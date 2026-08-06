@@ -3,8 +3,10 @@ import type { PartnerType } from '../types/partner';
 export const partnerActivationQueryParam = 'partner';
 export const partnerActivationQueryValue = 'active';
 
-export function buildPartnerRegistrationUrl() {
-  return `/?${partnerActivationQueryParam}=${partnerActivationQueryValue}#register`;
+export function buildPartnerRegistrationUrl(search = '') {
+  const params = new URLSearchParams(search);
+  params.set(partnerActivationQueryParam, partnerActivationQueryValue);
+  return `/?${params.toString()}#register`;
 }
 
 export function hasPartnerActivationMarker(search: string) {

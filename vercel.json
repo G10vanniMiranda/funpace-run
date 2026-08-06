@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/payments",
       "schedule": "17 7 * * *"
+    },
+    {
+      "path": "/api/cron/meta",
+      "schedule": "*/5 * * * *"
     }
   ],
   "rewrites": [

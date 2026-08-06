@@ -46,6 +46,7 @@ create table if not exists "run-registrations" (
   updated_at text not null,
   marketing_consent boolean not null default false,
   marketing_consent_updated_at text,
+  meta_context jsonb not null default '{}'::jsonb check (jsonb_typeof(meta_context) = 'object'),
   expires_at text,
   paid_at text,
   confirmed_at text,
@@ -314,6 +315,7 @@ alter table "run-registrations" add column if not exists paid_at text;
 alter table "run-registrations" add column if not exists confirmed_at text;
 alter table "run-registrations" add column if not exists marketing_consent boolean not null default false;
 alter table "run-registrations" add column if not exists marketing_consent_updated_at text;
+alter table "run-registrations" add column if not exists meta_context jsonb not null default '{}'::jsonb;
 alter table "run-registrations" add column if not exists confirmation_email_sent_at text;
 alter table "run-registrations" add column if not exists confirmation_email_last_attempt_at text;
 alter table "run-registrations" add column if not exists confirmation_email_provider text;

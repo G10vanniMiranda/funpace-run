@@ -97,18 +97,22 @@ function clampInteger(value: string | undefined, fallback: number, min: number, 
 }
 
 export function getMetaCapiConfig() {
+  const appEnvironment = (process.env.APP_ENV || '').trim().toLowerCase();
   const enabled = (process.env.META_CAPI_ENABLED || '').trim().toLowerCase();
   const pixelId = (process.env.META_PIXEL_ID || '').trim();
   const accessToken = (process.env.META_CONVERSIONS_API_TOKEN || '').trim();
   const graphApiVersion = (process.env.META_GRAPH_API_VERSION || '').trim();
   const testEventCode = (process.env.META_TEST_EVENT_CODE || '').trim();
+  const validTestEventCode = /^[A-Za-z0-9_-]{1,100}$/.test(testEventCode) ? testEventCode : '';
+  const testEventCodeBlocked = appEnvironment === 'production' && Boolean(validTestEventCode);
 
   return {
     enabled: enabled === 'true',
     pixelId: /^\d+$/.test(pixelId) ? pixelId : '',
     accessToken,
     graphApiVersion: /^v\d+\.\d+$/.test(graphApiVersion) ? graphApiVersion : '',
-    testEventCode: /^[A-Za-z0-9_-]{1,100}$/.test(testEventCode) ? testEventCode : '',
+    testEventCode: testEventCodeBlocked ? '' : validTestEventCode,
+    testEventCodeBlocked,
     timeoutMs: clampInteger(process.env.META_CAPI_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, 1000, 10_000),
     maxAttempts: clampInteger(process.env.META_CAPI_MAX_ATTEMPTS, 5, 1, 10),
   };
@@ -231,22 +235,49 @@ export function normalizeEventTime(value: number | string | Date) {
     : undefined;
 }
 
-export function normalizeMetaSourceUrl(rawUrl: string | undefined, fallbackPath: string) {
+function getAllowedMetaOrigins() {
   const appUrl = new URL(process.env.APP_URL || 'http://localhost:3000');
-  const allowedOrigins = new Set(
-    (process.env.ALLOWED_ORIGINS || `${appUrl.origin},https://funpace.club,https://www.funpace.club`)
-      .split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  );
+  return {
+    appUrl,
+    allowedOrigins: new Set(
+      (process.env.ALLOWED_ORIGINS || `${appUrl.origin},https://funpace.club,https://www.funpace.club`)
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    ),
+  };
+}
 
+export function validateMetaSourceUrl(rawUrl: unknown) {
+  const { allowedOrigins } = getAllowedMetaOrigins();
   try {
-    const candidate = new URL(String(rawUrl || ''), appUrl);
-    if (!allowedOrigins.has(candidate.origin)) throw new Error('origin_not_allowed');
+    // Reconciliation must never turn a missing or relative URL into invented context.
+    const candidate = new URL(typeof rawUrl === 'string' ? rawUrl : '');
+    if (!['http:', 'https:'].includes(candidate.protocol) || !allowedOrigins.has(candidate.origin)) return undefined;
     return `${candidate.origin}${candidate.pathname}`;
   } catch {
-    return new URL(fallbackPath, appUrl).toString();
+    return undefined;
   }
+}
+
+export function validateMetaReconciliationContext(context: unknown, eventAt?: number | string | Date) {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return null;
+  const stored = context as Record<string, unknown>;
+  const capturedAt = typeof stored.captured_at === 'string' ? stored.captured_at : '';
+  const capturedAtMs = Date.parse(capturedAt);
+  const eventAtMs = eventAt === undefined ? null : new Date(eventAt).getTime();
+  const eventSourceUrl = validateMetaSourceUrl(stored.event_source_url);
+  const canonicalTimestamp = Number.isFinite(capturedAtMs) && new Date(capturedAtMs).toISOString() === capturedAt;
+
+  if (!canonicalTimestamp || !eventSourceUrl) return null;
+  if (eventAtMs !== null && (!Number.isFinite(eventAtMs) || capturedAtMs > eventAtMs + 5 * 60_000)) return null;
+
+  return { capturedAt, eventSourceUrl };
+}
+
+export function normalizeMetaSourceUrl(rawUrl: string | undefined, fallbackPath: string) {
+  const { appUrl } = getAllowedMetaOrigins();
+  return validateMetaSourceUrl(rawUrl) || new URL(fallbackPath, appUrl).toString();
 }
 
 export function buildMetaServerEvent(input: {

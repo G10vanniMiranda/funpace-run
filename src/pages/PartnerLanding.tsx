@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ArrowRight, Loader2, ShieldCheck, Users } from 'lucide-react';
 import { activatePartnerLink, ApiError } from '../lib/api';
 import { buildPartnerRegistrationUrl } from '../lib/partners';
+import { captureCurrentMarketingAttribution, permittedMarketingQuery } from '../lib/marketingAttribution';
 
 function getPartnerLinkErrorMessage(error: unknown) {
   if (!(error instanceof ApiError)) {
@@ -20,8 +21,10 @@ export function PartnerLandingPage({ slug }: { slug: string }) {
 
   useEffect(() => {
     let active = true;
+    captureCurrentMarketingAttribution();
+    const permittedQuery = permittedMarketingQuery(window.location.search);
     void activatePartnerLink(slug)
-      .then(() => { if (active) window.location.replace(buildPartnerRegistrationUrl()); })
+      .then(() => { if (active) window.location.replace(buildPartnerRegistrationUrl(permittedQuery.toString())); })
       .catch((requestError) => {
         if (active) setError(getPartnerLinkErrorMessage(requestError));
       });

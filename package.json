@@ -7,6 +7,10 @@
     "node": "22.x"
   },
   "scripts": {
+    "check:node": "node scripts/check-node-version.mjs",
+    "pretest": "npm run check:node",
+    "prebuild": "npm run check:node",
+    "prelint": "npm run check:node",
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite --port=3000 --host=0.0.0.0",
     "api": "tsx server/index.ts",
