@@ -58,6 +58,7 @@ import { getPartnerAuditEventTitle } from './partner-audit-labels.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, type RegistrationEmailContext } from './email.js';
 import {
   processGoogleSheetSync,
+  processGoogleSheetSyncBacklog,
   processQueuedGoogleSheetSyncs,
   getGoogleSheetsConfig,
   createGoogleSheetsClient,
@@ -3186,6 +3187,27 @@ async function handlePaymentRecovery(req: IncomingMessage, res: ServerResponse) 
   json(res, 200, { success: true, ...summary, reconciliation, partnerConsistency, meta: metaRecovery, elapsedMs: Date.now() - startedAt });
 }
 
+async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerResponse) {
+  if (!isAuthorizedCron(req)) {
+    json(res, cronSecret ? 401 : 503, { message: cronSecret ? 'Nao autorizado.' : 'CRON_SECRET nao configurado.' });
+    return;
+  }
+
+  const startedAt = Date.now();
+  const result = await processGoogleSheetSyncBacklog(10);
+  console.log(JSON.stringify({
+    at: new Date().toISOString(),
+    message: 'google_sheets_backlog_processed',
+    ...result,
+    elapsedMs: Date.now() - startedAt,
+  }));
+  json(res, result.configurationIssue ? 503 : 200, {
+    success: !result.configurationIssue,
+    ...result,
+    elapsedMs: Date.now() - startedAt,
+  });
+}
+
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   if (!await requireAdmin(req, res)) {
     return;
@@ -3850,7 +3872,24 @@ async function handleAdminGoogleSheetsStatus(req: IncomingMessage, res: ServerRe
   const counts = { pending: 0, processing: 0, synchronized: 0, failed: 0 };
   for (const item of database.googleSheetSyncs) counts[item.status] += 1;
   const last = database.googleSheetSyncs.filter((item) => item.synchronizedAt).sort((a, b) => (b.synchronizedAt || '').localeCompare(a.synchronizedAt || ''))[0];
-  json(res, 200, { enabled: config.enabled, configured: config.enabled && !config.configurationIssue, configurationIssue: config.configurationIssue, counts, lastSynchronizedAt: last?.synchronizedAt || null });
+  const oldest = (status: 'pending' | 'processing') => database.googleSheetSyncs
+    .filter((item) => item.status === status)
+    .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))[0]?.updatedAt || null;
+  const staleBefore = Date.now() - 5 * 60_000;
+  json(res, 200, {
+    enabled: config.enabled,
+    configured: config.enabled && !config.configurationIssue,
+    configurationIssue: config.configurationIssue,
+    counts,
+    lastSynchronizedAt: last?.synchronizedAt || null,
+    backlog: {
+      oldestPendingAt: oldest('pending'),
+      oldestProcessingAt: oldest('processing'),
+      staleProcessing: database.googleSheetSyncs.filter((item) => item.status === 'processing' && item.lastAttemptAt && new Date(item.lastAttemptAt).getTime() <= staleBefore).length,
+      permanentFailures: database.googleSheetSyncs.filter((item) => item.status === 'failed' && item.lastError?.startsWith('PERMANENT:')).length,
+      retryableFailures: database.googleSheetSyncs.filter((item) => item.status === 'failed' && !item.lastError?.startsWith('PERMANENT:')).length,
+    },
+  });
 }
 
 async function handleAdminGoogleSheetsCheck(req: IncomingMessage, res: ServerResponse) {
@@ -4570,6 +4609,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     if (req.method === 'GET' && url.pathname === '/api/cron/payments') {
       await handlePaymentRecovery(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/cron/google-sheets') {
+      await handleGoogleSheetsRecovery(req, res);
       return;
     }
 

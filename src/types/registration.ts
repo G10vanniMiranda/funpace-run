@@ -253,7 +253,20 @@ export type AdminRegistrationsResponse = {
   registrations: AdminRegistration[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
-export type AdminGoogleSheetsStatus = { enabled: boolean; configured: boolean; configurationIssue: string | null; counts: { pending: number; processing: number; synchronized: number; failed: number }; lastSynchronizedAt: string | null };
+export type AdminGoogleSheetsStatus = {
+  enabled: boolean;
+  configured: boolean;
+  configurationIssue: string | null;
+  counts: { pending: number; processing: number; synchronized: number; failed: number };
+  lastSynchronizedAt: string | null;
+  backlog?: {
+    oldestPendingAt: string | null;
+    oldestProcessingAt: string | null;
+    staleProcessing: number;
+    permanentFailures: number;
+    retryableFailures: number;
+  };
+};
 export type AdminReconciliationDashboard = {
   runs: Array<{
     id: string; triggerSource: string; mode: 'dry_run' | 'apply'; status: string;

@@ -5,6 +5,7 @@ import type { Database, GoogleSheetSyncRecord, PaymentRecord, RegistrationRecord
 import {
   buildPaymentSheetRow,
   buildRegistrationSheetRow,
+  classifyGoogleSheetSyncFailure,
   createGoogleSheetsClient,
   executeGoogleSheetSyncTask,
   createServiceAccountAssertion,
@@ -17,6 +18,7 @@ import {
   queueRegistrationGoogleSheetSync,
   sanitizeSheetText,
   type GoogleSheetsClient,
+  GoogleSheetsApiError,
 } from '../server/google-sheets.js';
 
 const configuredEnvironment = {
@@ -371,6 +373,38 @@ test('records failure without throwing into the main flow', async () => {
 
   assert.equal(result.status, 'failed');
   assert.equal(failed, true);
+});
+
+test('classifies permanent, timeout, rate-limit and unavailable failures', () => {
+  assert.equal(classifyGoogleSheetSyncFailure(new Error('Cabeçalho inesperado na aba')).retryable, false);
+  assert.equal(classifyGoogleSheetSyncFailure(new DOMException('timed out', 'TimeoutError')).retryable, true);
+  assert.equal(classifyGoogleSheetSyncFailure(new GoogleSheetsApiError('rate limited', 429, 'read')).retryable, true);
+  assert.equal(classifyGoogleSheetSyncFailure(new GoogleSheetsApiError('temporarily unavailable', 503, 'read')).retryable, true);
+  assert.equal(classifyGoogleSheetSyncFailure(new GoogleSheetsApiError('forbidden', 403, 'read')).retryable, false);
+});
+
+test('handles a successful Google response with an empty body', async () => {
+  const client = createGoogleSheetsClient({
+    config: getGoogleSheetsConfig(configuredEnvironment),
+    fetchImplementation: (async () => new Response(null, { status: 200 })) as typeof fetch,
+    accessTokenProvider: async () => 'test-token',
+  });
+  assert.deepEqual(await client.getValues("'Inscrições'!M2:M2"), {});
+});
+
+test('surfaces Google rate limit and temporary outage as typed API errors', async () => {
+  for (const status of [429, 503]) {
+    const client = createGoogleSheetsClient({
+      config: getGoogleSheetsConfig(configuredEnvironment),
+      fetchImplementation: (async () => jsonResponse({ error: { message: 'temporary' } }, status)) as typeof fetch,
+      accessTokenProvider: async () => 'test-token',
+    });
+    await assert.rejects(() => client.getValues("'Inscrições'!M2:M2"), (error: unknown) => {
+      assert.ok(error instanceof GoogleSheetsApiError);
+      assert.equal(classifyGoogleSheetSyncFailure(error).retryable, true);
+      return true;
+    });
+  }
 });
 
 test('does not enqueue registration sync while integration is disabled', async () => {

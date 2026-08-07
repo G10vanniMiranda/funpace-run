@@ -156,6 +156,10 @@ export type GoogleSheetSyncRecord = {
 
 export type GoogleSheetSyncInput = Pick<GoogleSheetSyncRecord, 'entityType' | 'entityId' | 'sheetName' | 'operation'>;
 
+export const GOOGLE_SHEET_SYNC_LEASE_MS = 5 * 60_000;
+export const GOOGLE_SHEET_SYNC_MAX_ATTEMPTS = 8;
+export const GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE = 'TRANSIENT: requeued while a previous attempt was processing';
+
 export type CheckInRecord = {
   id: string;
   registrationId: string;
@@ -526,6 +530,7 @@ const pool = databaseUrl
   : null;
 
 let postgresReady: Promise<void> | null = null;
+let googleSheetJsonClaimQueue: Promise<void> = Promise.resolve();
 
 function ensureJsonDatabase() {
   if (existsSync(databasePath)) {
@@ -3475,10 +3480,13 @@ export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promi
       ));
 
       if (existing) {
+        const wasProcessing = existing.status === 'processing';
         existing.operation = input.operation;
         existing.status = 'pending';
         existing.synchronizedAt = null;
-        existing.lastError = null;
+        existing.lastError = wasProcessing
+          ? GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE
+          : null;
         existing.updatedAt = now;
         return existing;
       }
@@ -3508,36 +3516,62 @@ export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promi
        operation = excluded.operation,
        status = 'pending',
        synchronized_at = null,
-       last_error = null,
+       last_error = case
+         when ${table.googleSheetSyncs}.status = 'processing' then $7
+         else null
+       end,
        updated_at = excluded.updated_at
      returning id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at`,
-    [randomUUID(), input.entityType, input.entityId, input.sheetName, input.operation, now],
+    [randomUUID(), input.entityType, input.entityId, input.sheetName, input.operation, now, GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE],
   );
   return mapGoogleSheetSyncRow(result.rows[0]);
 }
 
 export async function claimGoogleSheetSync(syncId: string): Promise<GoogleSheetSyncRecord | null> {
   const now = new Date().toISOString();
+  const leaseExpiredAt = new Date(Date.now() - GOOGLE_SHEET_SYNC_LEASE_MS).toISOString();
 
   if (!shouldUsePostgres()) {
-    return transaction((database) => {
-      const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
-      if (!item || !['pending', 'failed'].includes(item.status)) return null;
-      item.status = 'processing';
-      item.attempts += 1;
-      item.lastAttemptAt = now;
-      item.updatedAt = now;
-      return item;
-    });
+    const previousClaim = googleSheetJsonClaimQueue;
+    let releaseClaim!: () => void;
+    googleSheetJsonClaimQueue = new Promise<void>((resolve) => { releaseClaim = resolve; });
+    await previousClaim;
+    try {
+      return await transaction((database) => {
+        const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
+        const staleProcessing = item?.status === 'processing'
+          && Boolean(item.lastAttemptAt)
+          && new Date(item.lastAttemptAt!).getTime() <= new Date(leaseExpiredAt).getTime();
+        const deferredPending = item?.status === 'pending'
+          && item.lastError === GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE
+          && Boolean(item.lastAttemptAt)
+          && new Date(item.lastAttemptAt!).getTime() > new Date(leaseExpiredAt).getTime();
+        if (!item || deferredPending || (!['pending', 'failed'].includes(item.status) && !staleProcessing)) return null;
+        item.status = 'processing';
+        item.attempts += 1;
+        item.lastAttemptAt = now;
+        item.updatedAt = now;
+        return item;
+      });
+    } finally {
+      releaseClaim();
+    }
   }
 
   await ensurePostgresReady();
   const result = await requirePool().query(
     `update ${table.googleSheetSyncs}
      set status = 'processing', attempts = attempts + 1, last_attempt_at = $1, updated_at = $1
-     where id = $2 and status in ('pending', 'failed')
+     where id = $2
+       and (
+         status = 'failed'
+         or (status = 'pending' and not (
+           coalesce(last_error, '') = $4 and last_attempt_at::timestamptz > $3::timestamptz
+         ))
+         or (status = 'processing' and last_attempt_at::timestamptz <= $3::timestamptz)
+       )
      returning id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at`,
-    [now, syncId],
+    [now, syncId, leaseExpiredAt, GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE],
   );
   return result.rows[0] ? mapGoogleSheetSyncRow(result.rows[0]) : null;
 }
@@ -3548,7 +3582,7 @@ export async function completeGoogleSheetSync(syncId: string, rowNumber: number 
   if (!shouldUsePostgres()) {
     await transaction((database) => {
       const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
-      if (!item) return;
+      if (!item || item.status !== 'processing') return;
       item.status = 'synchronized';
       item.rowNumber = rowNumber ?? item.rowNumber;
       item.synchronizedAt = now;
@@ -3562,19 +3596,23 @@ export async function completeGoogleSheetSync(syncId: string, rowNumber: number 
   await requirePool().query(
     `update ${table.googleSheetSyncs}
      set status = 'synchronized', row_number = coalesce($1, row_number), synchronized_at = $2, last_error = null, updated_at = $2
-     where id = $3`,
+     where id = $3 and status = 'processing'`,
     [rowNumber, now, syncId],
   );
 }
 
 export async function failGoogleSheetSync(syncId: string, error: unknown): Promise<void> {
   const now = new Date().toISOString();
-  const safeError = (error instanceof Error ? error.message : String(error || 'Unknown error')).slice(0, 500);
+  const retryable = !(error && typeof error === 'object' && 'retryable' in error)
+    || (error as { retryable?: unknown }).retryable !== false;
+  const prefix = retryable ? 'TRANSIENT: ' : 'PERMANENT: ';
+  const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+  const safeError = `${prefix}${message}`.slice(0, 500);
 
   if (!shouldUsePostgres()) {
     await transaction((database) => {
       const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
-      if (!item) return;
+      if (!item || item.status !== 'processing') return;
       item.status = 'failed';
       item.lastError = safeError;
       item.updatedAt = now;
@@ -3584,9 +3622,66 @@ export async function failGoogleSheetSync(syncId: string, error: unknown): Promi
 
   await ensurePostgresReady();
   await requirePool().query(
-    `update ${table.googleSheetSyncs} set status = 'failed', last_error = $1, updated_at = $2 where id = $3`,
+    `update ${table.googleSheetSyncs} set status = 'failed', last_error = $1, updated_at = $2 where id = $3 and status = 'processing'`,
     [safeError, now, syncId],
   );
+}
+
+function googleSheetRetryDelayMs(attempts: number) {
+  return Math.min(30 * 60_000, 30_000 * (2 ** Math.max(attempts - 1, 0)));
+}
+
+export async function listClaimableGoogleSheetSyncs(limit = 10): Promise<GoogleSheetSyncRecord[]> {
+  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 50);
+  const now = Date.now();
+  const leaseExpiredAt = new Date(now - GOOGLE_SHEET_SYNC_LEASE_MS).toISOString();
+
+  if (!shouldUsePostgres()) {
+    return (await snapshot()).googleSheetSyncs
+      .filter((item) => {
+        const lastAttempt = item.lastAttemptAt ? new Date(item.lastAttemptAt).getTime() : 0;
+        if (item.status === 'processing') return lastAttempt > 0 && lastAttempt <= now - GOOGLE_SHEET_SYNC_LEASE_MS;
+        if (item.status === 'pending') {
+          return item.lastError !== GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE
+            || lastAttempt <= now - GOOGLE_SHEET_SYNC_LEASE_MS;
+        }
+        if (item.status !== 'failed' || item.lastError?.startsWith('PERMANENT:')) return false;
+        return item.attempts < GOOGLE_SHEET_SYNC_MAX_ATTEMPTS
+          && lastAttempt <= now - googleSheetRetryDelayMs(item.attempts);
+      })
+      .sort((a, b) => {
+        const priority = (item: GoogleSheetSyncRecord) => item.status === 'processing' ? 0 : item.status === 'pending' ? 1 : 2;
+        return priority(a) - priority(b) || a.updatedAt.localeCompare(b.updatedAt);
+      })
+      .slice(0, boundedLimit);
+  }
+
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts,
+            last_attempt_at, synchronized_at, last_error, created_at, updated_at
+     from ${table.googleSheetSyncs}
+     where
+       (status = 'processing' and last_attempt_at::timestamptz <= $1::timestamptz)
+       or (status = 'pending' and not (
+         coalesce(last_error, '') = $2 and last_attempt_at::timestamptz > $1::timestamptz
+       ))
+       or (status = 'failed'
+         and attempts < $3
+         and coalesce(last_error, '') not like 'PERMANENT:%'
+         and (
+           last_attempt_at is null
+           or last_attempt_at::timestamptz <= now() - make_interval(
+             secs => least(1800, (30 * power(2, greatest(attempts - 1, 0)))::int)
+           )
+         )
+       )
+     order by case status when 'processing' then 0 when 'pending' then 1 else 2 end,
+              updated_at asc
+     limit $4`,
+    [leaseExpiredAt, GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE, GOOGLE_SHEET_SYNC_MAX_ATTEMPTS, boundedLimit],
+  );
+  return result.rows.map(mapGoogleSheetSyncRow);
 }
 
 export function getDatabaseConfigurationIssue() {

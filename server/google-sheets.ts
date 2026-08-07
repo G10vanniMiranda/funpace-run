@@ -5,6 +5,7 @@ import {
   completeGoogleSheetSync,
   enqueueGoogleSheetSync,
   failGoogleSheetSync,
+  listClaimableGoogleSheetSyncs,
   snapshot,
   synchronizeOperationalAlertsInPostgres,
   listOperationalAlertsInPostgres,
@@ -19,6 +20,7 @@ import {
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+export const GOOGLE_SHEETS_REQUEST_TIMEOUT_MS = 20_000;
 
 export const GOOGLE_SHEET_TABS = {
   registrations: 'Inscrições',
@@ -231,9 +233,9 @@ export async function getGoogleSheetsAccessToken(
       grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
       assertion: createServiceAccountAssertion(config),
     }),
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(GOOGLE_SHEETS_REQUEST_TIMEOUT_MS),
   });
-  const payload = await response.json() as { access_token?: string; expires_in?: number; error?: string };
+  const payload = (await response.json().catch(() => null) || {}) as { access_token?: string; expires_in?: number; error?: string };
 
   if (!response.ok || !payload.access_token) {
     throw new Error(`Falha ao autenticar no Google Sheets (${response.status}${payload.error ? `: ${payload.error}` : ''}).`);
@@ -274,6 +276,27 @@ export class GoogleSheetsApiError extends Error {
   }
 }
 
+export class GoogleSheetSyncFailure extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+    this.name = 'GoogleSheetSyncFailure';
+  }
+}
+
+export function classifyGoogleSheetSyncFailure(error: unknown) {
+  if (error instanceof GoogleSheetSyncFailure) return error;
+  if (error instanceof GoogleSheetsApiError) {
+    const retryable = error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+    return new GoogleSheetSyncFailure(error.message, retryable);
+  }
+  const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+  const normalizedMessage = message.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+  const transient = error instanceof DOMException && error.name === 'TimeoutError'
+    || /timeout|timed out|aborted|econn|eai_again|enotfound|socket|network|temporar/i.test(normalizedMessage);
+  const permanent = /cabecalho inesperado|nao encontrad[oa]|linha invalida|chave de sincronizacao invalida|nao suportado|faltam variaveis|nao esta habilitado/i.test(normalizedMessage);
+  return new GoogleSheetSyncFailure(message, transient || !permanent);
+}
+
 function quoteSheetTitle(title: string) {
   return `'${title.replace(/'/g, "''")}'`;
 }
@@ -312,6 +335,7 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
   const accessTokenProvider = options.accessTokenProvider
     || (() => getGoogleSheetsAccessToken(config, fetchImplementation));
   const baseUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}`;
+  const keyIndexCache = new Map<string, Map<string, number>>();
 
   async function request<ResponsePayload>(
     operation: string,
@@ -330,7 +354,7 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
         ...(init.body ? { 'Content-Type': 'application/json' } : {}),
         ...init.headers,
       },
-      signal: init.signal || AbortSignal.timeout(10_000),
+      signal: init.signal || AbortSignal.timeout(GOOGLE_SHEETS_REQUEST_TIMEOUT_MS),
     });
     const payload = response.status === 204
       ? null
@@ -345,7 +369,7 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
       );
     }
 
-    return payload as ResponsePayload;
+    return (payload ?? {}) as ResponsePayload;
   }
 
   async function getValues(range: string) {
@@ -426,6 +450,7 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
 
     const title = GOOGLE_SHEET_TABS[sheetKey];
     const keyColumn = columnName(keyColumnIndex);
+    const keyIndexCacheKey = `${sheetKey}:${keyColumnIndex}`;
     let rowNumber = preferredRowNumber && preferredRowNumber >= 2 ? preferredRowNumber : null;
 
     if (rowNumber) {
@@ -435,22 +460,33 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
     }
 
     if (!rowNumber) {
-      const keysRange = `${quoteSheetTitle(title)}!${keyColumn}2:${keyColumn}`;
-      const keys = (await getValues(keysRange)).values || [];
-      const foundIndex = keys.findIndex((item) => normalizeComparableCell(item[0]) === keyValue.trim());
-      if (foundIndex >= 0) rowNumber = foundIndex + 2;
+      let keyIndex = keyIndexCache.get(keyIndexCacheKey);
+      if (!keyIndex) {
+        const keysRange = `${quoteSheetTitle(title)}!${keyColumn}2:${keyColumn}`;
+        const keys = (await getValues(keysRange)).values || [];
+        keyIndex = new Map<string, number>();
+        keys.forEach((item, index) => {
+          const key = normalizeComparableCell(item[0]);
+          if (key && !keyIndex!.has(key)) keyIndex!.set(key, index + 2);
+        });
+        keyIndexCache.set(keyIndexCacheKey, keyIndex);
+      }
+      rowNumber = keyIndex.get(keyValue.trim()) || null;
     }
 
     if (rowNumber) {
       const rowRange = `${quoteSheetTitle(title)}!A${rowNumber}:${columnName(headers.length - 1)}${rowNumber}`;
       await updateValues(rowRange, [row]);
+      keyIndexCache.get(keyIndexCacheKey)?.set(keyValue.trim(), rowNumber);
       return { action: 'updated' as const, rowNumber };
     }
 
     const appended = await appendValues(`${quoteSheetTitle(title)}!A:${columnName(headers.length - 1)}`, [row]);
     const updatedRange = appended.updates?.updatedRange || appended.updatedRange;
     const match = updatedRange?.match(/![A-Z]+(\d+)(?::|$)/);
-    return { action: 'created' as const, rowNumber: match ? Number(match[1]) : null };
+    const appendedRowNumber = match ? Number(match[1]) : null;
+    if (appendedRowNumber) keyIndexCache.get(keyIndexCacheKey)?.set(keyValue.trim(), appendedRowNumber);
+    return { action: 'created' as const, rowNumber: appendedRowNumber };
   }
 
   async function replaceRows(sheetKey: GoogleSheetKey, rows: SheetCell[][]) {
@@ -808,8 +844,9 @@ export async function processGoogleSheetSync(
     }));
     return { status: 'synchronized' as const, ...result };
   } catch (error) {
+    const failure = classifyGoogleSheetSyncFailure(error);
     try {
-      await fail(task.id, error);
+      await fail(task.id, failure);
     } catch (persistenceError) {
       console.error(JSON.stringify({
         at: new Date().toISOString(),
@@ -825,9 +862,56 @@ export async function processGoogleSheetSync(
       entityType: task.entityType,
       entityId: task.entityId,
       sheetName: task.sheetName,
-      error: error instanceof Error ? error.message.slice(0, 500) : 'Unknown error',
+      error: failure.message.slice(0, 500),
+      retryable: failure.retryable,
       elapsedMs: Date.now() - startedAt,
     }));
-    return { status: 'failed' as const };
+    return { status: 'failed' as const, retryable: failure.retryable };
   }
+}
+
+type ProcessGoogleSheetSyncBacklogDependencies = ProcessGoogleSheetSyncDependencies & {
+  list?: typeof listClaimableGoogleSheetSyncs;
+};
+
+export async function processGoogleSheetSyncBacklog(
+  limit = 10,
+  dependencies: ProcessGoogleSheetSyncBacklogDependencies = {},
+) {
+  const config = dependencies.config || getGoogleSheetsConfig();
+  if (!config.enabled || config.configurationIssue) {
+    return {
+      selected: 0, synchronized: 0, failed: 0, skipped: 0, recoveredStale: 0,
+      configurationIssue: config.configurationIssue || (config.enabled ? null : 'disabled'),
+    };
+  }
+
+  const candidates = await (dependencies.list || listClaimableGoogleSheetSyncs)(limit);
+  if (candidates.length === 0) {
+    return { selected: 0, synchronized: 0, failed: 0, skipped: 0, recoveredStale: 0, configurationIssue: null };
+  }
+
+  const database = await (dependencies.loadDatabase || snapshot)();
+  const client = dependencies.client || createGoogleSheetsClient({ config });
+  const counts = {
+    selected: candidates.length,
+    synchronized: 0,
+    failed: 0,
+    skipped: 0,
+    recoveredStale: candidates.filter((item) => item.status === 'processing').length,
+    configurationIssue: null as string | null,
+  };
+
+  for (const candidate of candidates) {
+    const result = await processGoogleSheetSync(candidate.id, {
+      ...dependencies,
+      config,
+      client,
+      loadDatabase: async () => database,
+    });
+    if (result.status === 'synchronized') counts.synchronized += 1;
+    else if (result.status === 'failed') counts.failed += 1;
+    else counts.skipped += 1;
+  }
+  return counts;
 }
