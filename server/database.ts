@@ -140,9 +140,9 @@ export type IntegrationEventRecord = {
 
 export type GoogleSheetSyncRecord = {
   id: string;
-  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary' | 'lot_summary' | 'alert' | 'partnership' | 'email';
+  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary' | 'lot_summary' | 'alert' | 'partnership' | 'email' | 'remarketing';
   entityId: string;
-  sheetName: 'registrations' | 'payments' | 'shirts' | 'check_in' | 'lots' | 'alerts' | 'partnerships' | 'emails';
+  sheetName: 'registrations' | 'payments' | 'shirts' | 'check_in' | 'lots' | 'alerts' | 'partnerships' | 'emails' | 'remarketing';
   operation: 'upsert' | 'replace';
   status: 'pending' | 'processing' | 'synchronized' | 'failed';
   rowNumber: number | null;
@@ -530,7 +530,19 @@ const pool = databaseUrl
   : null;
 
 let postgresReady: Promise<void> | null = null;
-let googleSheetJsonClaimQueue: Promise<void> = Promise.resolve();
+let googleSheetJsonMutationQueue: Promise<void> = Promise.resolve();
+
+async function serializeGoogleSheetJsonMutation<Result>(operation: () => Promise<Result>): Promise<Result> {
+  const previous = googleSheetJsonMutationQueue;
+  let release!: () => void;
+  googleSheetJsonMutationQueue = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
 
 function ensureJsonDatabase() {
   if (existsSync(databasePath)) {
@@ -687,9 +699,9 @@ async function ensurePostgresDatabase(client: Queryable) {
 
     create table if not exists ${table.googleSheetSyncs} (
       id text primary key,
-      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email')),
+      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'remarketing')),
       entity_id text not null,
-      sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in', 'lots', 'alerts', 'partnerships', 'emails')),
+      sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in', 'lots', 'alerts', 'partnerships', 'emails', 'remarketing')),
       operation text not null check (operation in ('upsert', 'replace')),
       status text not null check (status in ('pending', 'processing', 'synchronized', 'failed')),
       row_number integer,
@@ -3472,7 +3484,7 @@ export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promi
   const now = new Date().toISOString();
 
   if (!shouldUsePostgres()) {
-    return transaction((database) => {
+    return serializeGoogleSheetJsonMutation(() => transaction((database) => {
       const existing = database.googleSheetSyncs.find((item) => (
         item.entityType === input.entityType
         && item.entityId === input.entityId
@@ -3505,7 +3517,7 @@ export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promi
       };
       database.googleSheetSyncs.push(created);
       return created;
-    });
+    }));
   }
 
   await ensurePostgresReady();
@@ -3532,12 +3544,7 @@ export async function claimGoogleSheetSync(syncId: string): Promise<GoogleSheetS
   const leaseExpiredAt = new Date(Date.now() - GOOGLE_SHEET_SYNC_LEASE_MS).toISOString();
 
   if (!shouldUsePostgres()) {
-    const previousClaim = googleSheetJsonClaimQueue;
-    let releaseClaim!: () => void;
-    googleSheetJsonClaimQueue = new Promise<void>((resolve) => { releaseClaim = resolve; });
-    await previousClaim;
-    try {
-      return await transaction((database) => {
+    return serializeGoogleSheetJsonMutation(() => transaction((database) => {
         const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
         const staleProcessing = item?.status === 'processing'
           && Boolean(item.lastAttemptAt)
@@ -3552,10 +3559,7 @@ export async function claimGoogleSheetSync(syncId: string): Promise<GoogleSheetS
         item.lastAttemptAt = now;
         item.updatedAt = now;
         return item;
-      });
-    } finally {
-      releaseClaim();
-    }
+    }));
   }
 
   await ensurePostgresReady();

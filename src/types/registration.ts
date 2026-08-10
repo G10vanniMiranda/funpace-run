@@ -266,6 +266,16 @@ export type AdminGoogleSheetsStatus = {
     permanentFailures: number;
     retryableFailures: number;
   };
+  remarketing?: {
+    totalLeads: number;
+    eligible: number;
+    suppressedPaid: number;
+    suppressedTest: number;
+    suppressedAdminCancelled: number;
+    failedSyncs: number;
+    backlog: number;
+    oldestEventAt: string | null;
+  };
 };
 export type AdminReconciliationDashboard = {
   runs: Array<{

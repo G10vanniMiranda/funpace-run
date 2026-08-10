@@ -1,5 +1,6 @@
 import { createSign } from 'node:crypto';
 import { isGoogleSheetsAllowed } from './environment.js';
+import { buildRemarketingProjections, type RemarketingProjection } from './remarketing.js';
 import {
   claimGoogleSheetSync,
   completeGoogleSheetSync,
@@ -31,6 +32,7 @@ export const GOOGLE_SHEET_TABS = {
   alerts: 'Alertas',
   partnerships: 'Patrocínio',
   emails: 'Emails enviados',
+  remarketing: 'Remarketing',
 } as const;
 
 export const GOOGLE_SHEET_HEADERS = {
@@ -43,10 +45,12 @@ export const GOOGLE_SHEET_HEADERS = {
   alerts: ['Gravidade', 'Tipo', 'Título', 'Status', 'Origem', 'Responsável', 'Horário', 'ID'],
   partnerships: ['Empresa', 'Contato', 'Cargo', 'E-mail', 'Status', 'Origem', 'Criado em', 'ID'],
   emails: ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro'],
+  remarketing: ['person_key', 'registration_id_reference', 'full_name', 'whatsapp', 'email', 'cpf_masked', 'first_registration_at', 'last_registration_at', 'last_payment_attempt_at', 'amount', 'lot', 'distance', 'registration_status', 'payment_status', 'attempt_count', 'checkout_count', 'partner_or_origin', 'remarketing_status', 'eligible', 'suppression_reason', 'last_payment_check_at', 'updated_at'],
 } as const;
 
 export type GoogleSheetsConfig = {
   enabled: boolean;
+  remarketingEnabled: boolean;
   spreadsheetId: string;
   serviceAccountEmail: string;
   privateKey: string;
@@ -91,6 +95,7 @@ export function normalizeGooglePrivateKey(value: string | undefined) {
 
 export function getGoogleSheetsConfig(environment: NodeJS.ProcessEnv = process.env): GoogleSheetsConfig {
   const enabled = isGoogleSheetsAllowed(environment);
+  const remarketingEnabled = enabled && environment.GOOGLE_SHEETS_REMARKETING_ENABLED === 'true';
   const spreadsheetId = (environment.GOOGLE_SHEETS_SPREADSHEET_ID || '').trim();
   const serviceAccountEmail = (environment.GOOGLE_SERVICE_ACCOUNT_EMAIL || '').trim();
   const privateKey = normalizeGooglePrivateKey(environment.GOOGLE_PRIVATE_KEY);
@@ -102,6 +107,7 @@ export function getGoogleSheetsConfig(environment: NodeJS.ProcessEnv = process.e
 
   return {
     enabled,
+    remarketingEnabled,
     spreadsheetId,
     serviceAccountEmail,
     privateKey,
@@ -188,6 +194,33 @@ export function buildCheckInSheetRow(context: CheckInSheetContext): SheetCell[] 
     checkIn?.checkedInAt || '',
     sanitizeSheetText(checkIn?.checkedInBy || kitDelivery?.deliveredBy),
     registration.id,
+  ];
+}
+
+export function buildRemarketingSheetRow(projection: RemarketingProjection): SheetCell[] {
+  return [
+    projection.personKey,
+    projection.registrationIdReference,
+    sanitizeSheetText(projection.fullName),
+    sanitizeSheetText(projection.whatsapp),
+    sanitizeSheetText(projection.email),
+    projection.cpfMasked,
+    projection.firstRegistrationAt,
+    projection.lastRegistrationAt,
+    projection.lastPaymentAttemptAt,
+    projection.amountCents / 100,
+    sanitizeSheetText(projection.lot),
+    sanitizeSheetText(projection.distance),
+    projection.registrationStatus,
+    projection.paymentStatus,
+    projection.attemptCount,
+    projection.checkoutCount,
+    sanitizeSheetText(projection.partnerOrOrigin),
+    projection.remarketingStatus,
+    projection.eligible,
+    projection.suppressionReason,
+    projection.lastPaymentCheckAt,
+    projection.updatedAt,
   ];
 }
 
@@ -627,6 +660,12 @@ export async function executeGoogleSheetSyncTask(
     return client.upsertRow('alerts', row, 7, alert.id, task.rowNumber);
   }
 
+  if (task.entityType === 'remarketing') {
+    const projection = buildRemarketingProjections(database).find((item) => item.personKey === task.entityId);
+    if (!projection) throw new Error(`Pessoa técnica ${task.entityId} não encontrada para Remarketing.`);
+    return client.upsertRow('remarketing', buildRemarketingSheetRow(projection), 0, projection.personKey, task.rowNumber);
+  }
+
   throw new Error(`Tipo de sincronização não suportado: ${task.entityType}.`);
 }
 
@@ -637,6 +676,7 @@ type ProcessGoogleSheetSyncDependencies = {
   claim?: typeof claimGoogleSheetSync;
   complete?: typeof completeGoogleSheetSync;
   fail?: typeof failGoogleSheetSync;
+  synchronizeAlerts?: typeof synchronizeOperationalAlertsInPostgres;
 };
 
 export async function queueRegistrationGoogleSheetSync(
@@ -683,6 +723,7 @@ export async function queueConfirmedPaymentGoogleSheetSync(
   dependencies: {
     config?: GoogleSheetsConfig;
     enqueue?: typeof enqueueGoogleSheetSync;
+    loadDatabase?: () => Promise<Database>;
   } = {},
 ) {
   const config = dependencies.config || getGoogleSheetsConfig();
@@ -720,6 +761,13 @@ export async function queueConfirmedPaymentGoogleSheetSync(
       }));
     }
   }
+
+  const remarketingTask = await queueRemarketingGoogleSheetSyncForRegistration(registrationId, {
+    config,
+    enqueue,
+    loadDatabase: dependencies.loadDatabase,
+  });
+  if (remarketingTask) queued.push(remarketingTask);
 
   return queued;
 }
@@ -773,6 +821,59 @@ export function queueLotSummaryGoogleSheetSync(dependencies: { config?: GoogleSh
 export function queuePartnershipGoogleSheetSync(partnershipId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'partnership', entityId: partnershipId, sheetName: 'partnerships', operation: 'upsert' }, dependencies); }
 export function queueEmailGoogleSheetSync(registrationId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'email', entityId: registrationId, sheetName: 'emails', operation: 'upsert' }, dependencies); }
 
+export async function queueRemarketingGoogleSheetSyncForRegistration(
+  registrationId: string,
+  dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync; loadDatabase?: () => Promise<Database> } = {},
+) {
+  const config = dependencies.config || getGoogleSheetsConfig();
+  if (!config.remarketingEnabled || config.configurationIssue) return null;
+  try {
+    const database = await (dependencies.loadDatabase || snapshot)();
+    const projection = buildRemarketingProjections(database).find((item) => item.registrationIds.includes(registrationId));
+    if (!projection) return null;
+    return await (dependencies.enqueue || enqueueGoogleSheetSync)({
+      entityType: 'remarketing', entityId: projection.personKey, sheetName: 'remarketing', operation: 'upsert',
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      at: new Date().toISOString(), message: 'remarketing_sync_queue_failed', registrationId,
+      error: error instanceof Error ? error.message.slice(0, 300) : 'Unknown error',
+    }));
+    return null;
+  }
+}
+
+export async function reconcileRemarketingGoogleSheetSyncs(
+  limit = 25,
+  dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync; loadDatabase?: () => Promise<Database> } = {},
+) {
+  const config = dependencies.config || getGoogleSheetsConfig();
+  if (!config.remarketingEnabled || config.configurationIssue) {
+    return { candidates: 0, pendingReconciliation: 0, queued: 0, unchanged: 0, rolloutEnabled: false };
+  }
+  const database = await (dependencies.loadDatabase || snapshot)();
+  const projections = buildRemarketingProjections(database);
+  const existingByPerson = new Map(database.googleSheetSyncs
+    .filter((task) => task.entityType === 'remarketing')
+    .map((task) => [task.entityId, task]));
+  const stale = projections.filter((projection) => {
+    const task = existingByPerson.get(projection.personKey);
+    if (!task) return true;
+    if (task.status !== 'synchronized') return false;
+    return Boolean(task.synchronizedAt && task.synchronizedAt < projection.updatedAt);
+  }).sort((left, right) => {
+    const paidPriority = Number(right.suppressionReason === 'PAID') - Number(left.suppressionReason === 'PAID');
+    return paidPriority || right.updatedAt.localeCompare(left.updatedAt) || left.personKey.localeCompare(right.personKey);
+  });
+  const selected = stale.slice(0, Math.min(Math.max(Math.trunc(limit), 1), 50));
+  for (const projection of selected) {
+    await (dependencies.enqueue || enqueueGoogleSheetSync)({
+      entityType: 'remarketing', entityId: projection.personKey, sheetName: 'remarketing', operation: 'upsert',
+    });
+  }
+  return { candidates: projections.length, pendingReconciliation: stale.length, queued: selected.length, unchanged: projections.length - stale.length, rolloutEnabled: true };
+}
+
 export async function processQueuedGoogleSheetSyncs(tasks: ReadonlyArray<Pick<GoogleSheetSyncRecord, 'id'>>) {
   const results = [];
   for (const task of tasks) {
@@ -804,7 +905,7 @@ export async function processGoogleSheetSync(
       syncId,
       error: error instanceof Error ? error.message.slice(0, 500) : 'Unknown error',
     }));
-    await synchronizeOperationalAlertsInPostgres([{
+    await (dependencies.synchronizeAlerts || synchronizeOperationalAlertsInPostgres)([{
       dedupeKey: `google-sheets:claim:${syncId}`, severity: 'warning', alertType: 'google_sheets_error',
       title: 'Erro no Google Sheets', message: error instanceof Error ? error.message.slice(0, 500) : 'Falha na sincronização.',
       entityType: 'google_sheet_sync', entityId: syncId, payload: { stage: 'claim' },

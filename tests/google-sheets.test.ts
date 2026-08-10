@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import test from 'node:test';
 import type { Database, GoogleSheetSyncRecord, PaymentRecord, RegistrationRecord } from '../server/database.js';
+import { buildRemarketingProjections } from '../server/remarketing.js';
 import {
   buildPaymentSheetRow,
   buildRegistrationSheetRow,
@@ -19,10 +20,12 @@ import {
   sanitizeSheetText,
   type GoogleSheetsClient,
   GoogleSheetsApiError,
+  GOOGLE_SHEET_TABS,
 } from '../server/google-sheets.js';
 
 const configuredEnvironment = {
   GOOGLE_SHEETS_ENABLED: 'true',
+  GOOGLE_SHEETS_REMARKETING_ENABLED: 'true',
   GOOGLE_SHEETS_SPREADSHEET_ID: 'spreadsheet-1',
   GOOGLE_SERVICE_ACCOUNT_EMAIL: 'service@example.iam.gserviceaccount.com',
   GOOGLE_PRIVATE_KEY: 'not-used-by-mocked-token-provider',
@@ -121,6 +124,13 @@ test('keeps integration disabled without requiring credentials', () => {
   assert.equal(config.configurationIssue, null);
 });
 
+test('remarketing reconciliation is fail-closed until its rollout gate is enabled', () => {
+  const disabled = getGoogleSheetsConfig({ ...configuredEnvironment, GOOGLE_SHEETS_REMARKETING_ENABLED: 'false' });
+  const enabled = getGoogleSheetsConfig(configuredEnvironment);
+  assert.equal(disabled.remarketingEnabled, false);
+  assert.equal(enabled.remarketingEnabled, true);
+});
+
 test('reports every missing variable when integration is enabled', () => {
   const config = getGoogleSheetsConfig({ GOOGLE_SHEETS_ENABLED: 'true' });
   assert.match(config.configurationIssue || '', /GOOGLE_SHEETS_SPREADSHEET_ID/);
@@ -208,11 +218,12 @@ test('creates missing tabs and initializes their headers', async () => {
 
   const result = await client.ensureSpreadsheetStructure();
 
-  assert.equal(result.createdSheets.length, 8);
+  const expectedSheetCount = Object.keys(GOOGLE_SHEET_TABS).length;
+  assert.equal(result.createdSheets.length, expectedSheetCount);
   const batchCall = calls.find((call) => call.url.endsWith(':batchUpdate'));
   assert.ok(batchCall);
-  assert.equal(JSON.parse(String(batchCall.init?.body)).requests.length, 8);
-  assert.equal(calls.filter((call) => call.init?.method === 'PUT').length, 8);
+  assert.equal(JSON.parse(String(batchCall.init?.body)).requests.length, expectedSheetCount);
+  assert.equal(calls.filter((call) => call.init?.method === 'PUT').length, expectedSheetCount);
 });
 
 test('refuses to overwrite an unexpected header', async () => {
@@ -453,6 +464,7 @@ test('absorbs claim failure during best-effort processing', async () => {
   const result = await processGoogleSheetSync('sync-claim-error', {
     config: getGoogleSheetsConfig(configuredEnvironment),
     claim: async () => { throw new Error('claim failed'); },
+    synchronizeAlerts: async () => true,
   });
 
   assert.equal(result.status, 'failed');
@@ -462,6 +474,7 @@ test('queues registration, payment and shirt summary after confirmation', async 
   const received: Array<Record<string, string>> = [];
   const tasks = await queueConfirmedPaymentGoogleSheetSync(registration.id, payment.id, {
     config: getGoogleSheetsConfig(configuredEnvironment),
+    loadDatabase: async () => database,
     enqueue: async (input) => {
       received.push(input);
       return syncTask({
@@ -475,12 +488,13 @@ test('queues registration, payment and shirt summary after confirmation', async 
     },
   });
 
-  assert.equal(tasks.length, 4);
+  assert.equal(tasks.length, 5);
   assert.deepEqual(received, [
     { entityType: 'registration', entityId: registration.id, sheetName: 'registrations', operation: 'upsert' },
     { entityType: 'payment', entityId: payment.id, sheetName: 'payments', operation: 'upsert' },
     { entityType: 'shirt_summary', entityId: 'paid-registrations', sheetName: 'shirts', operation: 'replace' },
     { entityType: 'lot_summary', entityId: 'all-lots', sheetName: 'lots', operation: 'replace' },
+    { entityType: 'remarketing', entityId: buildRemarketingProjections(database)[0].personKey, sheetName: 'remarketing', operation: 'upsert' },
   ]);
 });
 
@@ -488,6 +502,7 @@ test('continues queuing remaining payment projections after one outbox failure',
   let attempt = 0;
   const tasks = await queueConfirmedPaymentGoogleSheetSync(registration.id, payment.id, {
     config: getGoogleSheetsConfig(configuredEnvironment),
+    loadDatabase: async () => database,
     enqueue: async (input) => {
       attempt += 1;
       if (attempt === 2) throw new Error('simulated payment queue failure');
@@ -502,8 +517,8 @@ test('continues queuing remaining payment projections after one outbox failure',
     },
   });
 
-  assert.equal(attempt, 4);
-  assert.deepEqual(tasks.map((task) => task.entityType), ['registration', 'shirt_summary', 'lot_summary']);
+  assert.equal(attempt, 5);
+  assert.deepEqual(tasks.map((task) => task.entityType), ['registration', 'shirt_summary', 'lot_summary', 'remarketing']);
 });
 
 test('queues check-in projection with registration as idempotency key', async () => {

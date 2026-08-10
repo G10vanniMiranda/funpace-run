@@ -68,10 +68,13 @@ import {
   queueLotSummaryGoogleSheetSync,
   queuePartnershipGoogleSheetSync,
   queueEmailGoogleSheetSync,
+  queueRemarketingGoogleSheetSyncForRegistration,
+  reconcileRemarketingGoogleSheetSyncs,
 } from './google-sheets.js';
 import { checkInfinitePayPayment, createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 import { calculateLotCapacity, selectLotWithAvailability, synchronizeLotProjections } from './lot-capacity.js';
 import { detectLocalReconciliationIssues, generateReconciliationReport } from './payment-reconciliation.js';
+import { buildRemarketingProjections, summarizeRemarketingProjections } from './remarketing.js';
 import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAlerts } from './operational-intelligence.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
@@ -2108,6 +2111,9 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   const googleSheetSync = registrationWasCreated && response.registrationId
     ? await queueRegistrationGoogleSheetSync(response.registrationId)
     : null;
+  const remarketingSheetSync = registrationWasCreated && response.registrationId
+    ? await queueRemarketingGoogleSheetSyncForRegistration(response.registrationId)
+    : null;
   const lotSheetSync = registrationWasCreated ? await queueLotSummaryGoogleSheetSync() : null;
 
   // Vercel may suspend a serverless invocation as soon as the response finishes.
@@ -2132,6 +2138,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   if (googleSheetSync) {
     await processGoogleSheetSync(googleSheetSync.id);
   }
+  if (remarketingSheetSync) await processGoogleSheetSync(remarketingSheetSync.id);
   if (lotSheetSync) await processGoogleSheetSync(lotSheetSync.id);
 }
 
@@ -3194,16 +3201,19 @@ async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerRespo
   }
 
   const startedAt = Date.now();
+  const remarketing = await reconcileRemarketingGoogleSheetSyncs(25);
   const result = await processGoogleSheetSyncBacklog(10);
   console.log(JSON.stringify({
     at: new Date().toISOString(),
     message: 'google_sheets_backlog_processed',
     ...result,
+    remarketing,
     elapsedMs: Date.now() - startedAt,
   }));
   json(res, result.configurationIssue ? 503 : 200, {
     success: !result.configurationIssue,
     ...result,
+    remarketing,
     elapsedMs: Date.now() - startedAt,
   });
 }
@@ -3872,6 +3882,10 @@ async function handleAdminGoogleSheetsStatus(req: IncomingMessage, res: ServerRe
   const counts = { pending: 0, processing: 0, synchronized: 0, failed: 0 };
   for (const item of database.googleSheetSyncs) counts[item.status] += 1;
   const last = database.googleSheetSyncs.filter((item) => item.synchronizedAt).sort((a, b) => (b.synchronizedAt || '').localeCompare(a.synchronizedAt || ''))[0];
+  const remarketingProjections = buildRemarketingProjections(database);
+  const remarketingSummary = summarizeRemarketingProjections(remarketingProjections);
+  const remarketingTasks = database.googleSheetSyncs.filter((item) => item.entityType === 'remarketing');
+  const remarketingBacklog = remarketingTasks.filter((item) => ['pending', 'processing', 'failed'].includes(item.status));
   const oldest = (status: 'pending' | 'processing') => database.googleSheetSyncs
     .filter((item) => item.status === status)
     .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))[0]?.updatedAt || null;
@@ -3888,6 +3902,16 @@ async function handleAdminGoogleSheetsStatus(req: IncomingMessage, res: ServerRe
       staleProcessing: database.googleSheetSyncs.filter((item) => item.status === 'processing' && item.lastAttemptAt && new Date(item.lastAttemptAt).getTime() <= staleBefore).length,
       permanentFailures: database.googleSheetSyncs.filter((item) => item.status === 'failed' && item.lastError?.startsWith('PERMANENT:')).length,
       retryableFailures: database.googleSheetSyncs.filter((item) => item.status === 'failed' && !item.lastError?.startsWith('PERMANENT:')).length,
+    },
+    remarketing: {
+      totalLeads: remarketingSummary.candidates,
+      eligible: remarketingSummary.eligible,
+      suppressedPaid: remarketingSummary.suppressions.PAID,
+      suppressedTest: remarketingSummary.suppressions.TEST,
+      suppressedAdminCancelled: remarketingSummary.suppressions.ADMIN_CANCELLED,
+      failedSyncs: remarketingTasks.filter((item) => item.status === 'failed').length,
+      backlog: remarketingBacklog.length,
+      oldestEventAt: remarketingBacklog.sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.createdAt || null,
     },
   });
 }
