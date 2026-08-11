@@ -49,13 +49,36 @@ export function assertDatabaseEnvironmentIsolation(environment: NodeJS.ProcessEn
   }
 }
 
-export function areExternalPaymentsAllowed(environment: NodeJS.ProcessEnv = process.env) {
-  if (environment.PAYMENTS_ENABLED !== 'true') {
-    return false;
-  }
+function resolvePaymentFlag(
+  environment: NodeJS.ProcessEnv,
+  dedicatedName: string,
+  legacyName: string,
+) {
+  const dedicatedValue = environment[dedicatedName];
+  return (dedicatedValue === undefined ? environment[legacyName] : dedicatedValue) === 'true';
+}
 
-  return !isHomologationEnvironment(environment)
-    || environment.HOMOLOGATION_PAYMENTS_ENABLED === 'true';
+function isHomologationPaymentCapabilityAllowed(
+  environment: NodeJS.ProcessEnv,
+  dedicatedName: string,
+) {
+  if (!isHomologationEnvironment(environment)) return true;
+  return resolvePaymentFlag(environment, dedicatedName, 'HOMOLOGATION_PAYMENTS_ENABLED');
+}
+
+export function arePaymentCreationsAllowed(environment: NodeJS.ProcessEnv = process.env) {
+  return resolvePaymentFlag(environment, 'PAYMENT_CREATION_ENABLED', 'PAYMENTS_ENABLED')
+    && isHomologationPaymentCapabilityAllowed(environment, 'HOMOLOGATION_PAYMENT_CREATION_ENABLED');
+}
+
+export function arePaymentConfirmationsAllowed(environment: NodeJS.ProcessEnv = process.env) {
+  return resolvePaymentFlag(environment, 'PAYMENT_CONFIRMATION_ENABLED', 'PAYMENTS_ENABLED')
+    && isHomologationPaymentCapabilityAllowed(environment, 'HOMOLOGATION_PAYMENT_CONFIRMATION_ENABLED');
+}
+
+// Backwards-compatible alias for callers that still mean "create a new charge".
+export function areExternalPaymentsAllowed(environment: NodeJS.ProcessEnv = process.env) {
+  return arePaymentCreationsAllowed(environment);
 }
 
 export function isEmailDeliveryAllowed(environment: NodeJS.ProcessEnv = process.env) {
@@ -117,10 +140,14 @@ export function areOutboundWebhooksAllowed(environment: NodeJS.ProcessEnv = proc
 }
 
 export function getEnvironmentSafeguards(environment: NodeJS.ProcessEnv = process.env) {
+  const paymentCreationAllowed = arePaymentCreationsAllowed(environment);
+  const paymentConfirmationAllowed = arePaymentConfirmationsAllowed(environment);
   return {
     appEnvironment: getAppEnvironment(environment),
     databaseProjectRefConfigured: Boolean(environment.EXPECTED_DATABASE_PROJECT_REF?.trim()),
-    externalPaymentsAllowed: areExternalPaymentsAllowed(environment),
+    externalPaymentsAllowed: paymentCreationAllowed,
+    paymentCreationAllowed,
+    paymentConfirmationAllowed,
     emailDeliveryAllowed: isEmailDeliveryAllowed(environment),
     googleSheetsAllowed: isGoogleSheetsAllowed(environment),
     cronExecutionAllowed: isCronExecutionAllowed(environment),

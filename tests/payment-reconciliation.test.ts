@@ -27,3 +27,20 @@ test('transaction evidence nested in immutable gateway payload avoids a false ma
   } as Database;
   assert.equal(detectLocalReconciliationIssues(database).length, 0);
 });
+
+test('reconciliation treats the legitimate discounted total as the expected amount', () => {
+  const discountedRegistration = {
+    ...registration,
+    amountCents: 8_991,
+    originalPriceCents: 9_990,
+    discountAmountCents: 999,
+    finalPriceCents: 8_991,
+    couponCode: 'VOLTA10',
+  } as RegistrationRecord;
+  assert.equal(comparePaymentStatus(discountedRegistration, { ...payment, amountCents: 8_991 }, {
+    paid: true, amountCents: 8_991, paidAmountCents: 8_991, raw: {},
+  }), 'consistent');
+  assert.equal(comparePaymentStatus(discountedRegistration, { ...payment, amountCents: 8_991 }, {
+    paid: true, amountCents: 9_990, paidAmountCents: 9_990, raw: {},
+  }), 'amount_mismatch');
+});

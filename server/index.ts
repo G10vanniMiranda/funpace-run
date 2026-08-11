@@ -74,10 +74,22 @@ import {
 import { checkInfinitePayPayment, createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 import { calculateLotCapacity, selectLotWithAvailability, synchronizeLotProjections } from './lot-capacity.js';
 import { detectLocalReconciliationIssues, generateReconciliationReport } from './payment-reconciliation.js';
+import { isPaymentWebhookTokenValid } from './payment-webhook-auth.js';
 import { buildRemarketingProjections, summarizeRemarketingProjections } from './remarketing.js';
+import {
+  buildCouponCampaignAuditPayload,
+  isVolta10RemarketingAttribution,
+  REMARKETING_CAMPAIGN_EVENTS,
+  selectCampaignProjections,
+  summarizeVolta10RemarketingCampaign,
+  VOLTA10_REMARKETING_CAMPAIGN,
+  VOLTA10_REMARKETING_SOURCE,
+  type RemarketingCampaignManualEvent,
+} from './remarketing-campaign.js';
 import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAlerts } from './operational-intelligence.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
+import { calculateCouponPricing, normalizeCouponCode } from './coupons.js';
 import { readCookie, signPartnerSession, verifyPartnerSession } from './partner-session.js';
 import {
   canTrackMetaBrowserPurchase,
@@ -103,7 +115,8 @@ import { isMarketingConsentGranted } from '../src/lib/privacyConsent.js';
 import { getMetaClientContext, normalizeMetaSourceUrl } from './meta-conversions-api.js';
 import { isCronAuthorizationValid } from './cron-auth.js';
 import {
-  areExternalPaymentsAllowed,
+  arePaymentConfirmationsAllowed,
+  arePaymentCreationsAllowed,
   areOutboundWebhooksAllowed,
   getEnvironmentSafeguards,
   isHomologationEnvironment,
@@ -125,12 +138,14 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || defaultAllowedOrigins.joi
   .filter(Boolean);
 const appUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
 const apiPublicUrl = (process.env.API_PUBLIC_URL || appUrl).replace(/\/$/, '');
-const externalPaymentsAllowed = areExternalPaymentsAllowed();
-const paymentProvider = externalPaymentsAllowed ? process.env.PAYMENT_PROVIDER || '' : '';
-const infinitePayHandle = externalPaymentsAllowed
+const paymentCreationAllowed = arePaymentCreationsAllowed();
+const paymentConfirmationAllowed = arePaymentConfirmationsAllowed();
+const paymentRuntimeAllowed = paymentCreationAllowed || paymentConfirmationAllowed;
+const paymentProvider = paymentRuntimeAllowed ? process.env.PAYMENT_PROVIDER || '' : '';
+const infinitePayHandle = paymentRuntimeAllowed
   ? process.env.INFINITEPAY_HANDLE || process.env.INFINITIPAY_HANDLE || ''
   : '';
-const webhookSecret = externalPaymentsAllowed ? process.env.PAYMENT_WEBHOOK_SECRET || '' : '';
+const webhookSecret = paymentConfirmationAllowed ? process.env.PAYMENT_WEBHOOK_SECRET || '' : '';
 const cronSecret = isCronExecutionAllowed() ? process.env.CRON_SECRET || '' : '';
 const partnershipWebhookUrl = areOutboundWebhooksAllowed() ? process.env.PARTNERSHIP_WEBHOOK_URL || '' : '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
@@ -925,13 +940,6 @@ function verifyWebhookSignature(rawBody: string, signature: string | undefined) 
   return expectedBuffer.length === signatureBuffer.length && timingSafeEqual(expectedBuffer, signatureBuffer);
 }
 
-function safeSecretEqual(received: string, expected: string) {
-  if (!received || !expected) return false;
-  const receivedBuffer = Buffer.from(received);
-  const expectedBuffer = Buffer.from(expected);
-  return receivedBuffer.length === expectedBuffer.length && timingSafeEqual(receivedBuffer, expectedBuffer);
-}
-
 function getWebhookUrl() {
   const url = new URL('/api/webhooks/payment', apiPublicUrl);
 
@@ -993,6 +1001,7 @@ function expirePendingPayments(database: Database, now = new Date()) {
       registration.expiresAt = null;
       registration.paidAt ||= payment?.paidAt || now.toISOString();
       registration.confirmedAt ||= registration.paidAt;
+      if (registration.couponCode) registration.couponUsedAt ||= registration.paidAt;
       ensureRegistrationBibNumber(database, registration);
       registration.updatedAt = now.toISOString();
       if (payment) {
@@ -1640,6 +1649,60 @@ function buildDurableMetaContext(req: IncomingMessage, meta: ReturnType<typeof s
   };
 }
 
+async function handleValidateCoupon(req: IncomingMessage, res: ServerResponse) {
+  res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+  if (!requireJson(req, res)) return;
+  if (isRateLimited(req)) {
+    json(res, 429, { message: 'Muitas tentativas. Aguarde um minuto e tente novamente.' });
+    return;
+  }
+  const body = parseJsonBody<{ code?: unknown; partnerBenefitRequested?: boolean }>(await readBody(req));
+  const code = normalizeCouponCode(body?.code);
+  if (!code) {
+    json(res, 422, { message: 'Informe um cupom.' });
+    return;
+  }
+  if (body?.partnerBenefitRequested === true && readPartnerSession(req)) {
+    json(res, 409, { message: 'O cupom não pode ser combinado com outro desconto.' });
+    return;
+  }
+
+  const database = await transaction((current) => current, { persist: false, scope: 'availability' });
+  const event = database.events.find((item) => item.slug === 'funpace-run-2026' && item.status === 'published');
+  const lot = event ? selectLotWithAvailability(database.lots, database.registrations, event.id) : null;
+  const pricing = lot ? calculateCouponPricing(lot.priceCents, code) : null;
+  if (!pricing) {
+    json(res, 422, { message: 'Cupom inválido.' });
+    return;
+  }
+  json(res, 200, pricing);
+}
+
+async function recordRemarketingCheckoutReturn(
+  req: IncomingMessage,
+  registrationId: string,
+  attribution: RegistrationFormData['attribution'],
+) {
+  if (!registrationId || !isVolta10RemarketingAttribution(attribution)) return;
+  await transaction((database) => {
+    const alreadyRecorded = database.auditLogs.some((log) => log.action === 'remarketing.checkout_returned'
+      && log.entityId === registrationId
+      && (log.payload as Record<string, unknown> | null)?.campaign === VOLTA10_REMARKETING_CAMPAIGN);
+    if (alreadyRecorded) return;
+    const projection = buildRemarketingProjections(database).find((item) => item.registrationIds.includes(registrationId));
+    database.auditLogs.push(createAuditLog(req, null, {
+      action: 'remarketing.checkout_returned',
+      entityType: 'registration',
+      entityId: registrationId,
+      payload: {
+        campaign: VOLTA10_REMARKETING_CAMPAIGN,
+        source: VOLTA10_REMARKETING_SOURCE,
+        personKey: projection?.personKey || null,
+      },
+    }));
+  }, { scope: 'checkout' });
+}
+
 async function handleCreateRegistration(req: IncomingMessage, res: ServerResponse) {
   const startedAt = Date.now();
   const requestId = Array.isArray(req.headers['x-request-id']) ? req.headers['x-request-id'][0] : req.headers['x-request-id'] || null;
@@ -1699,6 +1762,15 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   const hash = cpfHash(payload.cpf);
   const presentedPartnerSession = readPartnerSession(req);
   const partnerSession = parsedBody.partnerBenefitRequested === true ? presentedPartnerSession : null;
+  const requestedCouponCode = normalizeCouponCode(parsedBody.couponCode);
+  if (parsedBody.couponCode && !calculateCouponPricing(100, requestedCouponCode)) {
+    json(res, 422, { message: 'Cupom inválido.' });
+    return;
+  }
+  if (requestedCouponCode && partnerSession) {
+    json(res, 409, { message: 'O cupom não pode ser combinado com outro desconto.' });
+    return;
+  }
 
   logStage('registration_persist_started', { databaseProvider: usesPostgresDatabase() ? 'postgres' : 'json' });
   let response: PendingCheckout;
@@ -1718,6 +1790,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       ipAddress: getClientIp(req),
       userAgent: getUserAgent(req),
       accessAuditId: partnerSession?.accessAuditId || null,
+      couponCode: requestedCouponCode || null,
     })
     : await transaction<PendingCheckout>((database) => {
     expirePendingPayments(database);
@@ -1771,6 +1844,44 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       const payment = database.payments.find((item) => item.registrationId === activeExisting.id);
       const existingDistance = database.distances.find((item) => item.id === activeExisting.distanceId);
       const existingLot = database.lots.find((item) => item.id === activeExisting.lotId);
+      const requestedCouponDiffers = activeExisting.status === 'pending_payment'
+        && (activeExisting.couponCode || '') !== requestedCouponCode;
+      if (requestedCouponDiffers) {
+        if (activeExisting.partnerId && requestedCouponCode) {
+          return {
+            statusCode: 409, success: false, registrationId: activeExisting.id, paymentId: payment?.id || null,
+            registrationStatus: activeExisting.status, checkoutStatus: payment?.checkoutUrl ? 'created' : 'not_configured',
+            checkoutUrl: payment?.checkoutUrl || null,
+            message: 'O cupom não pode ser combinado com outro desconto.',
+          };
+        }
+        const repricedCoupon = calculateCouponPricing(existingLot?.priceCents || activeExisting.originalPriceCents || activeExisting.amountCents, requestedCouponCode);
+        const repricedAmountCents = repricedCoupon?.finalPriceCents ?? existingLot?.priceCents ?? activeExisting.originalPriceCents ?? activeExisting.amountCents;
+        const repricedAt = new Date().toISOString();
+        database.auditLogs.push(createAuditLog(req, null, {
+          action: repricedCoupon ? 'coupon.applied' : 'coupon.removed', entityType: 'registration', entityId: activeExisting.id,
+          payload: { previousCouponCode: activeExisting.couponCode || null, previousAmountCents: activeExisting.amountCents, ...(repricedCoupon || { finalPriceCents: repricedAmountCents }), ...(repricedCoupon ? buildCouponCampaignAuditPayload(repricedCoupon.code) : {}) },
+          createdAt: repricedAt,
+        }));
+        activeExisting.amountCents = repricedAmountCents;
+        activeExisting.discountPercentage = repricedCoupon?.discountPercentage || 0;
+        activeExisting.discountAmountCents = repricedCoupon?.discountAmountCents || 0;
+        activeExisting.originalPriceCents = repricedCoupon?.originalPriceCents ?? repricedAmountCents;
+        activeExisting.finalPriceCents = repricedAmountCents;
+        activeExisting.couponCode = repricedCoupon?.code || null;
+        activeExisting.couponAppliedAt = repricedCoupon ? repricedAt : null;
+        activeExisting.couponUsedAt = null;
+        activeExisting.updatedAt = repricedAt;
+        if (payment) {
+          payment.amountCents = repricedAmountCents;
+          payment.providerPaymentId = null;
+          payment.checkoutUrl = null;
+          payment.gatewayStatus = null;
+          payment.gatewayTransactionId = null;
+          payment.gatewayPayload = null;
+          payment.updatedAt = repricedAt;
+        }
+      }
       const shouldCreateCheckout = activeExisting.status === 'pending_payment' && !payment?.checkoutUrl;
       const response: CreateRegistrationResponse = {
         success: activeExisting.status !== 'paid',
@@ -1792,6 +1903,15 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
           discountAmountCents: activeExisting.discountAmountCents || 0,
           originalPriceCents: activeExisting.originalPriceCents ?? activeExisting.amountCents,
           finalPriceCents: activeExisting.finalPriceCents ?? activeExisting.amountCents,
+        } : null,
+        coupon: activeExisting.couponCode ? {
+          code: activeExisting.couponCode,
+          discountPercentage: activeExisting.discountPercentage || 0,
+          discountAmountCents: activeExisting.discountAmountCents || 0,
+          originalPriceCents: activeExisting.originalPriceCents ?? activeExisting.amountCents,
+          finalPriceCents: activeExisting.finalPriceCents ?? activeExisting.amountCents,
+          appliedAt: activeExisting.couponAppliedAt || null,
+          usedAt: activeExisting.couponUsedAt || null,
         } : null,
       };
 
@@ -1847,6 +1967,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         && (!partnerSession.partnerType || item.partnerType === partnerSession.partnerType))
       : null;
     const partnerPricing = calculatePartnerPricing(activeLot.priceCents, partner);
+    const couponPricing = partnerPricing ? null : calculateCouponPricing(activeLot.priceCents, requestedCouponCode);
     const registration: RegistrationRecord = {
       id: randomUUID(),
       eventId: event.id,
@@ -1854,7 +1975,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       lotId: activeLot.id,
       cpfHash: hash,
       status: 'pending_payment',
-      amountCents: partnerPricing?.finalPriceCents ?? activeLot.priceCents,
+      amountCents: couponPricing?.finalPriceCents ?? partnerPricing?.finalPriceCents ?? activeLot.priceCents,
       payload,
       metaContext: durableMetaContext,
       createdAt: now,
@@ -1872,10 +1993,13 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       partnerType: partnerPricing ? partner?.partnerType || 'sports_advisory' : null,
       partnerLink: partnerPricing ? `/p/${partnerSession?.slug || ''}` : null,
       partnerIdentifiedAt: partnerPricing ? now : null,
-      discountPercentage: partnerPricing?.discountPercentage || 0,
-      discountAmountCents: partnerPricing?.discountAmountCents || 0,
+      discountPercentage: couponPricing?.discountPercentage || partnerPricing?.discountPercentage || 0,
+      discountAmountCents: couponPricing?.discountAmountCents || partnerPricing?.discountAmountCents || 0,
       originalPriceCents: activeLot.priceCents,
-      finalPriceCents: partnerPricing?.finalPriceCents ?? activeLot.priceCents,
+      finalPriceCents: couponPricing?.finalPriceCents ?? partnerPricing?.finalPriceCents ?? activeLot.priceCents,
+      couponCode: couponPricing?.code || null,
+      couponAppliedAt: couponPricing ? now : null,
+      couponUsedAt: null,
     };
     const payment: PaymentRecord = {
       id: randomUUID(),
@@ -1901,6 +2025,12 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
       action: 'lot.reservation.created', entityType: 'registration', entityId: registration.id,
       payload: { lotId: activeLot.id, lotName: activeLot.name, expiresAt }, createdAt: now,
     }));
+    if (couponPricing) {
+      database.auditLogs.push(createAuditLog(req, null, {
+        action: 'coupon.applied', entityType: 'registration', entityId: registration.id,
+        payload: { ...couponPricing, ...buildCouponCampaignAuditPayload(couponPricing.code) }, createdAt: now,
+      }));
+    }
 
     return {
       statusCode: 201,
@@ -1925,6 +2055,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
         originalPriceCents: partnerPricing.originalPriceCents,
         finalPriceCents: partnerPricing.finalPriceCents,
       } : null,
+      coupon: couponPricing ? { ...couponPricing, appliedAt: now, usedAt: null } : null,
     };
   }, { scope: 'checkout' });
   } catch (error) {
@@ -1948,9 +2079,19 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
     success: response.success,
     marketingConsent: metaContext?.marketingConsent,
   });
+  if (response.registrationId && response.success) {
+    await recordRemarketingCheckoutReturn(req, response.registrationId, payload.attribution).catch((error) => {
+      console.error(JSON.stringify({
+        at: new Date().toISOString(),
+        message: 'remarketing_checkout_return_audit_failed',
+        registrationId: response.registrationId,
+        error: error instanceof Error ? error.message.slice(0, 300) : 'Unknown error',
+      }));
+    });
+  }
   response.completeRegistrationEventId = metaFlow.completeRegistrationEventId;
   response.checkoutEnabled = Boolean(
-    externalPaymentsAllowed
+    paymentCreationAllowed
     && paymentProvider === 'infinitepay'
     && infinitePayHandle,
   );
@@ -1982,6 +2123,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
 
   if (
     response.shouldCreateCheckout
+    && paymentCreationAllowed
     && paymentProvider === 'infinitepay'
     && response.amountCents
     && response.description
@@ -2101,7 +2243,7 @@ async function handleCreateRegistration(req: IncomingMessage, res: ServerRespons
   if (
     checkoutRequested
     && isHomologationEnvironment()
-    && !externalPaymentsAllowed
+    && !paymentCreationAllowed
   ) {
     response.message = 'Pagamento externo desabilitado em homologacao.';
   }
@@ -2218,8 +2360,8 @@ async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse
 
 async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
   const processingStartedAt = Date.now();
-  if (!externalPaymentsAllowed) {
-    json(res, 503, { success: false, message: 'Pagamentos externos desabilitados neste ambiente.' });
+  if (!paymentConfirmationAllowed) {
+    json(res, 503, { success: false, message: 'Confirmacoes de pagamento desabilitadas neste ambiente.' });
     return;
   }
 
@@ -2241,7 +2383,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  if (!safeSecretEqual(receivedToken, webhookSecret)) {
+  if (!isPaymentWebhookTokenValid(receivedToken, webhookSecret)) {
     await recordOperationalAlert({ dedupeKey: `webhook:unauthorized:${new Date().toISOString().slice(0, 13)}`, severity: 'warning', alertType: 'webhook_failure', title: 'Webhook não autorizado', message: 'Tentativa recebida com token inválido.', entityType: 'system', entityId: 'webhook' });
     json(res, 401, { message: 'Webhook nao autorizado.' });
     return;
@@ -2463,6 +2605,7 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
       registration.expiresAt = null;
       registration.paidAt = registration.paidAt || now;
       registration.confirmedAt = registration.confirmedAt || now;
+      if (registration.couponCode) registration.couponUsedAt ||= now;
       ensureRegistrationBibNumber(database, registration);
 
     }
@@ -2582,6 +2725,15 @@ async function handleGetRegistration(req: IncomingMessage, res: ServerResponse) 
       discountAmountCents: registration.discountAmountCents || 0,
       originalPriceCents: registration.originalPriceCents ?? registration.amountCents,
       finalPriceCents: registration.finalPriceCents ?? registration.amountCents,
+    } : null,
+    coupon: registration.couponCode ? {
+      code: registration.couponCode,
+      discountPercentage: registration.discountPercentage || 0,
+      discountAmountCents: registration.discountAmountCents || 0,
+      originalPriceCents: registration.originalPriceCents ?? registration.amountCents,
+      finalPriceCents: registration.finalPriceCents ?? registration.amountCents,
+      appliedAt: registration.couponAppliedAt || null,
+      usedAt: registration.couponUsedAt || null,
     } : null,
     gatewayStatus: payment?.gatewayStatus || null,
     gatewayTransactionId: payment?.gatewayTransactionId || payment?.providerPaymentId || null,
@@ -2821,6 +2973,9 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
     discountAmountCents: registration.discountAmountCents || 0,
     originalPriceCents: registration.originalPriceCents ?? registration.amountCents,
     finalPriceCents: registration.finalPriceCents ?? registration.amountCents,
+    couponCode: registration.couponCode || null,
+    couponAppliedAt: registration.couponAppliedAt || null,
+    couponUsedAt: registration.couponUsedAt || null,
     createdAt: registration.createdAt,
     updatedAt: registration.updatedAt,
     expiresAt: registration.expiresAt || null,
@@ -2887,8 +3042,8 @@ async function handleAdminPayments(req: IncomingMessage, res: ServerResponse, ur
 async function handleAdminPaymentsCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
   const { rows } = await getAdminPaymentRows(url);
-  const headers = ['inscricao', 'atleta', 'email', 'status_sistema', 'status_gateway', 'metodo', 'transacao', 'valor', 'pago_em', 'email_confirmacao', 'divergente'];
-  const lines = rows.map((row) => [row.id, row.fullName, row.email, row.status, row.gatewayStatus, row.paymentMethod, row.gatewayTransactionId || row.providerPaymentId, (row.amountCents / 100).toFixed(2), row.paidAt, row.confirmationEmailSentAt, row.hasPaymentDivergence ? 'sim' : 'nao'].map(escapeCsv).join(','));
+  const headers = ['inscricao', 'atleta', 'email', 'status_sistema', 'status_gateway', 'metodo', 'transacao', 'cupom', 'valor_original', 'percentual_desconto', 'valor_desconto', 'valor_final', 'cupom_aplicado_em', 'cupom_utilizado_em', 'pago_em', 'email_confirmacao', 'divergente'];
+  const lines = rows.map((row) => [row.id, row.fullName, row.email, row.status, row.gatewayStatus, row.paymentMethod, row.gatewayTransactionId || row.providerPaymentId, row.couponCode, ((row.originalPriceCents ?? row.amountCents) / 100).toFixed(2), row.discountPercentage || 0, ((row.discountAmountCents || 0) / 100).toFixed(2), (row.amountCents / 100).toFixed(2), row.couponAppliedAt, row.couponUsedAt, row.paidAt, row.confirmationEmailSentAt, row.hasPaymentDivergence ? 'sim' : 'nao'].map(escapeCsv).join(','));
   csv(res, 'funpace-run-pagamentos.csv', [headers.join(','), ...lines].join('\n'));
 }
 
@@ -2984,8 +3139,8 @@ async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResp
 }
 
 async function handlePaymentConfirmation(req: IncomingMessage, res: ServerResponse) {
-  if (!externalPaymentsAllowed) {
-    json(res, 503, { message: 'Pagamentos externos desabilitados neste ambiente.' });
+  if (!paymentConfirmationAllowed) {
+    json(res, 503, { message: 'Confirmacoes de pagamento desabilitadas neste ambiente.' });
     return;
   }
 
@@ -3038,7 +3193,7 @@ async function handlePaymentConfirmation(req: IncomingMessage, res: ServerRespon
     if (check.amountCents !== null && check.amountCents !== registration.amountCents) return { statusCode: 409, payload: { message: 'Valor do pagamento divergente.' } };
     const now = new Date().toISOString();
     const previousStatus = registration.status;
-    registration.status = 'paid'; registration.paidAt ||= now; registration.confirmedAt ||= now; registration.expiresAt = null; ensureRegistrationBibNumber(database, registration); registration.updatedAt = now;
+    registration.status = 'paid'; registration.paidAt ||= now; registration.confirmedAt ||= now; if (registration.couponCode) registration.couponUsedAt ||= now; registration.expiresAt = null; ensureRegistrationBibNumber(database, registration); registration.updatedAt = now;
     payment.status = 'paid'; payment.provider = 'infinitepay'; payment.providerPaymentId = slug; payment.gatewayTransactionId = transactionNsu; payment.gatewayStatus = 'verified_paid'; payment.gatewayPayload = check.raw; payment.paidAt ||= now; payment.expiresAt = null; payment.updatedAt = now;
     claimRegistrationCapacity(database, registration);
     database.auditLogs.push({ id: randomUUID(), actor: 'system', action: 'payment.redirect_reconciled', entityType: 'registration', entityId: orderNsu, payload: { previousStatus, transactionNsu, invoiceSlug: slug }, createdAt: now });
@@ -3886,6 +4041,7 @@ async function handleAdminGoogleSheetsStatus(req: IncomingMessage, res: ServerRe
   const remarketingSummary = summarizeRemarketingProjections(remarketingProjections);
   const remarketingTasks = database.googleSheetSyncs.filter((item) => item.entityType === 'remarketing');
   const remarketingBacklog = remarketingTasks.filter((item) => ['pending', 'processing', 'failed'].includes(item.status));
+  const volta10Campaign = summarizeVolta10RemarketingCampaign(database);
   const oldest = (status: 'pending' | 'processing') => database.googleSheetSyncs
     .filter((item) => item.status === status)
     .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))[0]?.updatedAt || null;
@@ -3912,8 +4068,68 @@ async function handleAdminGoogleSheetsStatus(req: IncomingMessage, res: ServerRe
       failedSyncs: remarketingTasks.filter((item) => item.status === 'failed').length,
       backlog: remarketingBacklog.length,
       oldestEventAt: remarketingBacklog.sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.createdAt || null,
+      volta10Campaign,
     },
   });
+}
+
+async function handleAdminRemarketingCampaignMetrics(req: IncomingMessage, res: ServerResponse) {
+  if (!await requireAdmin(req, res, ['administrator', 'operation']) || !requireAdminDatabase(res)) return;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  json(res, 200, summarizeVolta10RemarketingCampaign(database));
+}
+
+async function handleAdminRemarketingCampaignEvent(req: IncomingMessage, res: ServerResponse) {
+  const session = await requireAdmin(req, res, ['administrator', 'operation']);
+  if (!session || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  const body = parseJsonBody<{ event?: unknown; registrationIds?: unknown }>(await readBody(req));
+  const event = typeof body?.event === 'string' ? body.event.trim().toLowerCase() as RemarketingCampaignManualEvent : '';
+  if (!REMARKETING_CAMPAIGN_EVENTS.includes(event as RemarketingCampaignManualEvent)) {
+    json(res, 422, { message: 'Evento de campanha invÃ¡lido.' }); return;
+  }
+  const registrationIds = Array.isArray(body?.registrationIds)
+    ? [...new Set(body.registrationIds.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter(Boolean))]
+    : [];
+  if (registrationIds.length > 500 || (event === 'message_sent' && registrationIds.length === 0)) {
+    json(res, 422, { message: event === 'message_sent' ? 'Informe de 1 a 500 inscriÃ§Ãµes com envio confirmado.' : 'O limite Ã© de 500 inscriÃ§Ãµes por chamada.' }); return;
+  }
+
+  const result = await transaction((database) => {
+    const projections = selectCampaignProjections(database, registrationIds.length ? registrationIds : undefined);
+    const now = new Date().toISOString();
+    let recorded = 0;
+    for (const projection of projections) {
+      const stages: RemarketingCampaignManualEvent[] = event === 'message_sent' ? ['eligible', 'message_sent'] : ['eligible'];
+      for (const stage of stages) {
+        const action = `remarketing.${stage}`;
+        const duplicate = database.auditLogs.some((log) => log.action === action
+          && (log.payload as Record<string, unknown> | null)?.campaign === VOLTA10_REMARKETING_CAMPAIGN
+          && (log.payload as Record<string, unknown> | null)?.personKey === projection.personKey);
+        if (duplicate) continue;
+        database.auditLogs.push(createAuditLog(req, session, {
+          action,
+          entityType: 'registration',
+          entityId: projection.registrationIdReference,
+          payload: {
+            campaign: VOLTA10_REMARKETING_CAMPAIGN,
+            source: VOLTA10_REMARKETING_SOURCE,
+            personKey: projection.personKey,
+            registrationIdReference: projection.registrationIdReference,
+          },
+          createdAt: now,
+        }));
+        if (stage === event) recorded += 1;
+      }
+    }
+    return {
+      requested: registrationIds.length || projections.length,
+      accepted: projections.length,
+      rejected: Math.max((registrationIds.length || projections.length) - projections.length, 0),
+      recorded,
+      metrics: summarizeVolta10RemarketingCampaign(database),
+    };
+  }, { scope: 'admin-registrations' });
+  json(res, 200, result);
 }
 
 async function handleAdminGoogleSheetsCheck(req: IncomingMessage, res: ServerResponse) {
@@ -4478,6 +4694,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/coupons/validate') {
+      await handleValidateCoupon(req, res);
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/partner-session') { await handlePartnerSession(req, res); return; }
     if (req.method === 'DELETE' && url.pathname === '/api/partner-session') { handleClearPartnerSession(res); return; }
     const partnerLinkActivation = url.pathname.match(/^\/api\/partners\/resolve\/([^/]+)$/);
@@ -4516,6 +4737,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     if (req.method === 'GET' && url.pathname === '/api/admin/reconciliation') { await handleAdminReconciliation(req, res, false); return; }
     if (req.method === 'POST' && url.pathname === '/api/admin/reconciliation/run') { await handleAdminReconciliation(req, res, true); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/google-sheets/status') { await handleAdminGoogleSheetsStatus(req, res); return; }
+    if (req.method === 'GET' && url.pathname === `/api/admin/remarketing/campaigns/${VOLTA10_REMARKETING_CAMPAIGN}`) { await handleAdminRemarketingCampaignMetrics(req, res); return; }
+    if (req.method === 'POST' && url.pathname === `/api/admin/remarketing/campaigns/${VOLTA10_REMARKETING_CAMPAIGN}/events`) { await handleAdminRemarketingCampaignEvent(req, res); return; }
     if (req.method === 'POST' && url.pathname === '/api/admin/google-sheets/check') { await handleAdminGoogleSheetsCheck(req, res); return; }
     if (req.method === 'POST' && url.pathname === '/api/admin/google-sheets/retry') { await handleAdminGoogleSheetsRetry(req, res); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/event-config') { await handleAdminEventConfig(req, res); return; }

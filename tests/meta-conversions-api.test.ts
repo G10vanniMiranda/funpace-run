@@ -184,6 +184,18 @@ test('includes test_event_code only when configured and never includes the token
   assert.equal(buildMetaConversionsPayload(validEvent()).test_event_code, undefined);
 });
 
+test('uses the effectively paid discounted amount in Purchase custom data', () => {
+  const event = buildMetaServerEvent({
+    eventName: 'Purchase', eventId: 'purchase_discounted-registration', eventTime: Math.floor(Date.now() / 1000),
+    eventSourceUrl: 'https://funpace.club/sucesso', userData: {},
+    customData: {
+      currency: 'BRL', value: 8_991 / 100, order_id: 'discounted-registration',
+      content_name: 'FunPace Run 2026', content_ids: ['funpace-run-2026'], content_type: 'product',
+    },
+  });
+  assert.equal(event.custom_data.value, 89.91);
+});
+
 test('ignores META_TEST_EVENT_CODE explicitly in production', () => {
   configureMeta();
   process.env.APP_ENV = 'production';

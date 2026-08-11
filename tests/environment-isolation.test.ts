@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   areOutboundWebhooksAllowed,
   areExternalPaymentsAllowed,
+  arePaymentConfirmationsAllowed,
+  arePaymentCreationsAllowed,
   assertDatabaseEnvironmentIsolation,
   databaseUrlMatchesProjectRef,
   isCronExecutionAllowed,
@@ -54,6 +56,8 @@ test('production also fails closed when the expected Supabase project is absent 
 test('homologation integrations are deny-by-default', () => {
   const environment = { APP_ENV: 'homologation' };
   assert.equal(areExternalPaymentsAllowed(environment), false);
+  assert.equal(arePaymentCreationsAllowed(environment), false);
+  assert.equal(arePaymentConfirmationsAllowed(environment), false);
   assert.equal(isCronExecutionAllowed(environment), false);
   assert.equal(isGoogleSheetsAllowed({ ...environment, GOOGLE_SHEETS_ENABLED: 'true' }), false);
   assert.equal(isEmailRecipientAllowed('tester@example.com', { ...environment, EMAIL_ENABLED: 'true' }), false);
@@ -62,6 +66,8 @@ test('homologation integrations are deny-by-default', () => {
 test('production integrations are explicit and deny-by-default', () => {
   const environment = { APP_ENV: 'production' };
   assert.equal(areExternalPaymentsAllowed(environment), false);
+  assert.equal(arePaymentCreationsAllowed(environment), false);
+  assert.equal(arePaymentConfirmationsAllowed(environment), false);
   assert.equal(isEmailDeliveryAllowed(environment), false);
   assert.equal(isCronExecutionAllowed(environment), false);
   assert.equal(areOutboundWebhooksAllowed(environment), false);
@@ -74,6 +80,8 @@ test('production integrations are explicit and deny-by-default', () => {
     OUTBOUND_WEBHOOKS_ENABLED: 'true',
   };
   assert.equal(areExternalPaymentsAllowed(enabled), true);
+  assert.equal(arePaymentCreationsAllowed(enabled), true);
+  assert.equal(arePaymentConfirmationsAllowed(enabled), true);
   assert.equal(isEmailDeliveryAllowed(enabled), true);
   assert.equal(isCronExecutionAllowed(enabled), true);
   assert.equal(areOutboundWebhooksAllowed(enabled), true);
@@ -93,8 +101,50 @@ test('homologation requires explicit secondary opt-ins for external integrations
   };
 
   assert.equal(areExternalPaymentsAllowed(environment), true);
+  assert.equal(arePaymentCreationsAllowed(environment), true);
+  assert.equal(arePaymentConfirmationsAllowed(environment), true);
   assert.equal(isCronExecutionAllowed(environment), true);
   assert.equal(isGoogleSheetsAllowed(environment), true);
   assert.equal(isEmailRecipientAllowed('tester@example.com', environment), true);
   assert.equal(isEmailRecipientAllowed('customer@example.com', environment), false);
+});
+
+test('dedicated payment flags block new charges while allowing confirmations in homologation', () => {
+  const environment = {
+    APP_ENV: 'homologation',
+    PAYMENTS_ENABLED: 'true',
+    HOMOLOGATION_PAYMENTS_ENABLED: 'true',
+    PAYMENT_CREATION_ENABLED: 'false',
+    HOMOLOGATION_PAYMENT_CREATION_ENABLED: 'false',
+    PAYMENT_CONFIRMATION_ENABLED: 'true',
+    HOMOLOGATION_PAYMENT_CONFIRMATION_ENABLED: 'true',
+  };
+
+  assert.equal(areExternalPaymentsAllowed(environment), false);
+  assert.equal(arePaymentCreationsAllowed(environment), false);
+  assert.equal(arePaymentConfirmationsAllowed(environment), true);
+});
+
+test('homologation confirmation remains fail-closed without its dedicated secondary opt-in', () => {
+  const environment = {
+    APP_ENV: 'homologation',
+    PAYMENT_CREATION_ENABLED: 'false',
+    HOMOLOGATION_PAYMENT_CREATION_ENABLED: 'false',
+    PAYMENT_CONFIRMATION_ENABLED: 'true',
+  };
+
+  assert.equal(arePaymentCreationsAllowed(environment), false);
+  assert.equal(arePaymentConfirmationsAllowed(environment), false);
+});
+
+test('dedicated production flags override the legacy payment switch without environment fallback', () => {
+  const environment = {
+    APP_ENV: 'production',
+    PAYMENTS_ENABLED: 'true',
+    PAYMENT_CREATION_ENABLED: 'false',
+    PAYMENT_CONFIRMATION_ENABLED: 'true',
+  };
+
+  assert.equal(arePaymentCreationsAllowed(environment), false);
+  assert.equal(arePaymentConfirmationsAllowed(environment), true);
 });

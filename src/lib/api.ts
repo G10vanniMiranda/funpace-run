@@ -17,6 +17,7 @@ import type {
   AdminAlertsResponse,
   AdminMonitoringResponse,
   AvailabilityResponse,
+  CouponValidationResponse,
   CreateRegistrationResponse,
   PartnershipLeadRequest,
   PartnershipLeadResponse,
@@ -282,6 +283,14 @@ export function createRegistration(data: RegistrationFormData) {
     timeoutMs: REGISTRATION_REQUEST_TIMEOUT_MS,
     retry: false,
     sensitive: true,
+  });
+}
+
+export function validateCoupon(code: string, partnerBenefitRequested = false) {
+  return apiFetch<CouponValidationResponse>('/api/coupons/validate', {
+    method: 'POST',
+    body: JSON.stringify({ code, partnerBenefitRequested }),
+    retry: false,
   });
 }
 

@@ -67,14 +67,18 @@ create table if not exists "run-registrations" (
   discount_amount integer not null default 0,
   original_price integer not null,
   final_price integer not null,
+  coupon_code text,
+  coupon_applied_at text,
+  coupon_used_at text,
   constraint "run-registrations_partner_pricing_check" check (
     original_price > 0 and final_price > 0 and discount_amount >= 0
     and discount_percentage >= 0 and discount_percentage < 100
     and original_price - discount_amount = final_price and amount_cents = final_price
   ),
   constraint "run-registrations_partner_metadata_check" check (
-    (partner_id is null and partner_name is null and partner_type is null and discount_percentage = 0 and discount_amount = 0)
-    or (partner_id is not null and partner_name is not null and partner_type is not null and discount_percentage > 0 and discount_amount > 0)
+    (partner_id is null and partner_name is null and partner_type is null and coupon_code is null and discount_percentage = 0 and discount_amount = 0)
+    or (partner_id is not null and partner_name is not null and partner_type is not null and coupon_code is null and discount_percentage > 0 and discount_amount > 0)
+    or (partner_id is null and partner_name is null and partner_type is null and coupon_code is not null and discount_percentage > 0 and discount_amount > 0)
   )
 );
 
@@ -220,14 +224,18 @@ alter table "run-partners" drop constraint if exists "run-partners_athlete_limit
 alter table "run-partners" add constraint "run-partners_athlete_limit_check" check (athlete_limit is null or athlete_limit > 0);
 
 alter table "run-registrations" add column if not exists partner_type text;
+alter table "run-registrations" add column if not exists coupon_code text;
+alter table "run-registrations" add column if not exists coupon_applied_at text;
+alter table "run-registrations" add column if not exists coupon_used_at text;
 update "run-registrations" registration set partner_type = partner.partner_type
 from "run-partners" partner where registration.partner_id = partner.id and registration.partner_type is null;
 alter table "run-registrations" drop constraint if exists "run-registrations_partner_type_check";
 alter table "run-registrations" add constraint "run-registrations_partner_type_check" check (partner_type is null or partner_type in ('sports_advisory', 'influencer'));
 alter table "run-registrations" drop constraint if exists "run-registrations_partner_metadata_check";
 alter table "run-registrations" add constraint "run-registrations_partner_metadata_check" check (
-  (partner_id is null and partner_name is null and partner_type is null and discount_percentage = 0 and discount_amount = 0)
-  or (partner_id is not null and partner_name is not null and partner_type is not null and discount_percentage > 0 and discount_amount > 0)
+  (partner_id is null and partner_name is null and partner_type is null and coupon_code is null and discount_percentage = 0 and discount_amount = 0)
+  or (partner_id is not null and partner_name is not null and partner_type is not null and coupon_code is null and discount_percentage > 0 and discount_amount > 0)
+  or (partner_id is null and partner_name is null and partner_type is null and coupon_code is not null and discount_percentage > 0 and discount_amount > 0)
 );
 
 create table if not exists "run-partner-audit-logs" (
@@ -284,7 +292,9 @@ begin
     or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at
     or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount
     or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price
-  ) then raise exception 'confirmed partner snapshot is immutable'; end if;
+    or new.coupon_code is distinct from old.coupon_code or new.coupon_applied_at is distinct from old.coupon_applied_at
+    or new.coupon_used_at is distinct from old.coupon_used_at
+  ) then raise exception 'confirmed pricing snapshot is immutable'; end if;
   return new;
 end; $$;
 drop trigger if exists "run-registrations_partner_snapshot_immutable" on "run-registrations";
@@ -331,6 +341,14 @@ alter table "run-registrations" add column if not exists discount_percentage num
 alter table "run-registrations" add column if not exists discount_amount integer default 0;
 alter table "run-registrations" add column if not exists original_price integer;
 alter table "run-registrations" add column if not exists final_price integer;
+alter table "run-registrations" add column if not exists coupon_code text;
+alter table "run-registrations" add column if not exists coupon_applied_at text;
+alter table "run-registrations" add column if not exists coupon_used_at text;
+alter table "run-registrations" drop constraint if exists "run-registrations_coupon_snapshot_check";
+alter table "run-registrations" add constraint "run-registrations_coupon_snapshot_check" check (
+  (coupon_code is null and coupon_applied_at is null and coupon_used_at is null)
+  or (coupon_code = upper(btrim(coupon_code)) and coupon_code <> '' and coupon_applied_at is not null)
+);
 update "run-registrations" set discount_percentage = coalesce(discount_percentage, 0), discount_amount = coalesce(discount_amount, 0), original_price = coalesce(original_price, amount_cents), final_price = coalesce(final_price, amount_cents);
 alter table "run-registrations" alter column discount_percentage set not null;
 alter table "run-registrations" alter column discount_amount set not null;
@@ -340,6 +358,7 @@ create or replace function public.run_registration_pricing_defaults() returns tr
 drop trigger if exists "run-registrations_pricing_defaults" on "run-registrations";
 create trigger "run-registrations_pricing_defaults" before insert on "run-registrations" for each row execute function public.run_registration_pricing_defaults();
 create unique index if not exists "run-registrations_event_bib_idx" on "run-registrations"(event_id, bib_number) where bib_number is not null;
+create index if not exists "run-registrations_coupon_code_created_idx" on "run-registrations"(coupon_code, created_at desc) where coupon_code is not null;
 alter table "run-lots" add column if not exists order_index integer not null default 0;
 alter table "run-lots" add column if not exists continues_after_capacity boolean not null default false;
 create index if not exists "run-lots_event_order_idx" on "run-lots"(event_id, order_index, starts_at);

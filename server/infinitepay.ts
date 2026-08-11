@@ -1,5 +1,5 @@
 import type { RegistrationFormData } from '../src/types/registration';
-import { areExternalPaymentsAllowed } from './environment.js';
+import { arePaymentConfirmationsAllowed, arePaymentCreationsAllowed } from './environment.js';
 
 const linksEndpoint = 'https://api.checkout.infinitepay.io/links';
 const paymentCheckEndpoint = 'https://api.checkout.infinitepay.io/payment_check';
@@ -93,8 +93,8 @@ function toCents(value: unknown) {
 }
 
 export async function checkInfinitePayPayment(input: InfinitePayPaymentCheckInput): Promise<InfinitePayPaymentCheck> {
-  if (!areExternalPaymentsAllowed()) {
-    throw new InfinitePayError('Pagamentos externos desabilitados neste ambiente.', 503);
+  if (!arePaymentConfirmationsAllowed()) {
+    throw new InfinitePayError('Confirmacoes de pagamento desabilitadas neste ambiente.', 503);
   }
 
   if (!input.handle || !input.orderNsu || !input.transactionNsu || !input.slug) {
@@ -137,8 +137,8 @@ export async function checkInfinitePayPayment(input: InfinitePayPaymentCheckInpu
 }
 
 export async function createInfinitePayCheckout(input: InfinitePayCheckoutInput) {
-  if (!areExternalPaymentsAllowed()) {
-    throw new InfinitePayError('Pagamentos externos desabilitados neste ambiente.', 503);
+  if (!arePaymentCreationsAllowed()) {
+    throw new InfinitePayError('Criacao de pagamentos desabilitada neste ambiente.', 503);
   }
 
   const body = {

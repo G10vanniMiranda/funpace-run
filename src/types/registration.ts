@@ -37,6 +37,7 @@ export type RegistrationFormData = {
   privacyAccepted: boolean;
   partnerBenefitRequested?: boolean;
   checkoutRequested?: boolean;
+  couponCode?: string;
   meta?: {
     initiatedAt?: number;
     fbp?: string;
@@ -83,6 +84,18 @@ export type RegistrationPartnerPricing = {
   finalPriceCents: number;
 };
 
+export type RegistrationCouponPricing = {
+  code: string;
+  discountPercentage: number;
+  discountAmountCents: number;
+  originalPriceCents: number;
+  finalPriceCents: number;
+  appliedAt?: string | null;
+  usedAt?: string | null;
+};
+
+export type CouponValidationResponse = RegistrationCouponPricing;
+
 export type CreateRegistrationResponse = {
   success: boolean;
   registrationId: string;
@@ -98,6 +111,7 @@ export type CreateRegistrationResponse = {
   message: string;
   expiresAt?: string | null;
   partner?: RegistrationPartnerPricing | null;
+  coupon?: RegistrationCouponPricing | null;
 };
 
 export type RegistrationStatusResponse = {
@@ -113,6 +127,7 @@ export type RegistrationStatusResponse = {
   paidAt?: string | null;
   confirmedAt?: string | null;
   partner?: RegistrationPartnerPricing | null;
+  coupon?: RegistrationCouponPricing | null;
   gatewayStatus?: string | null;
   gatewayTransactionId?: string | null;
   confirmationEmailSentAt?: string | null;
@@ -232,6 +247,9 @@ export type AdminRegistration = {
   discountAmountCents?: number;
   originalPriceCents?: number;
   finalPriceCents?: number;
+  couponCode?: string | null;
+  couponAppliedAt?: string | null;
+  couponUsedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   expiresAt: string | null;
@@ -252,6 +270,19 @@ export type AdminRegistration = {
 export type AdminRegistrationsResponse = {
   registrations: AdminRegistration[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
+};
+export type RemarketingCampaignMetrics = {
+  campaign: 'whatsapp_remarketing_volta10';
+  source: 'whatsapp';
+  eligible: number;
+  currentlyEligible: number;
+  messagesSent: number;
+  checkoutReturns: number;
+  couponApplied: number;
+  paymentsConfirmed: number;
+  recoveredRevenueCents: number;
+  totalDiscountCents: number;
+  conversionRate: number;
 };
 export type AdminGoogleSheetsStatus = {
   enabled: boolean;
@@ -275,6 +306,7 @@ export type AdminGoogleSheetsStatus = {
     failedSyncs: number;
     backlog: number;
     oldestEventAt: string | null;
+    volta10Campaign?: RemarketingCampaignMetrics;
   };
 };
 export type AdminReconciliationDashboard = {

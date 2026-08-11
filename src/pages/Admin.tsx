@@ -451,7 +451,14 @@ export function AdminPage() {
             {actionMessage && <StatusMessage tone="success" message={actionMessage} />}
             {activeNav === 'registrations' && googleSheetsStatus && (
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border border-white/10 bg-zinc-950 p-4 text-xs">
-                <span>Google Sheets: {googleSheetsStatus.configured ? 'configurado' : googleSheetsStatus.enabled ? 'configuração incompleta' : 'desativado'} · {googleSheetsStatus.counts.failed} falha(s) · {googleSheetsStatus.counts.pending} pendente(s)</span>
+                <div>
+                  <span>Google Sheets: {googleSheetsStatus.configured ? 'configurado' : googleSheetsStatus.enabled ? 'configuração incompleta' : 'desativado'} · {googleSheetsStatus.counts.failed} falha(s) · {googleSheetsStatus.counts.pending} pendente(s)</span>
+                  {googleSheetsStatus.remarketing?.volta10Campaign && (
+                    <p className="mt-2 text-zinc-400">
+                      Campanha WhatsApp: {googleSheetsStatus.remarketing.volta10Campaign.eligible} elegíveis · {googleSheetsStatus.remarketing.volta10Campaign.messagesSent} enviados · {googleSheetsStatus.remarketing.volta10Campaign.checkoutReturns} retornos · {googleSheetsStatus.remarketing.volta10Campaign.couponApplied} cupons · {googleSheetsStatus.remarketing.volta10Campaign.paymentsConfirmed} pagamentos · {currencyFormatter.format(googleSheetsStatus.remarketing.volta10Campaign.recoveredRevenueCents / 100)} recuperados
+                    </p>
+                  )}
+                </div>
                 <button type="button" disabled={!googleSheetsStatus.enabled || actionLoading === 'sheets-retry'} onClick={() => void (async () => { setActionLoading('sheets-retry'); try { const result = await retryAdminGoogleSheets(adminKey); setActionMessage(`${result.queued} sincronização(ões) reenviada(s).`); await loadAdminData(); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Falha ao reenviar para o Google Sheets.'); } finally { setActionLoading(''); } })()} className="border border-brand/40 px-3 py-2 font-black uppercase text-brand disabled:opacity-40"><RefreshCcw className="mr-2 inline h-3 w-3" />Sincronizar com Google Sheets</button>
               </div>
             )}
@@ -1085,6 +1092,10 @@ function PaymentControlPanel({
                 <Detail label="Inscrição" value={details.payment.id} /><Detail label="Atleta" value={details.payment.fullName} />
                 <Detail label="Status sistema" value={statusLabels[details.payment.status]} /><Detail label="Status gateway" value={details.payment.gatewayStatus || 'Não informado'} />
                 <Detail label="Transação InfinitePay" value={details.payment.gatewayTransactionId || details.payment.providerPaymentId || 'Não informada'} /><Detail label="Método" value={details.payment.paymentMethod || 'Não informado'} />
+                <Detail label="Cupom" value={details.payment.couponCode || 'Não utilizado'} /><Detail label="Valor original" value={currencyFormatter.format((details.payment.originalPriceCents ?? details.payment.amountCents) / 100)} />
+                <Detail label="Desconto" value={`${details.payment.discountPercentage || 0}% · ${currencyFormatter.format((details.payment.discountAmountCents || 0) / 100)}`} /><Detail label="Valor final" value={currencyFormatter.format(details.payment.amountCents / 100)} />
+                {details.payment.couponAppliedAt && <Detail label="Cupom aplicado em" value={dateTimeFormatter.format(new Date(details.payment.couponAppliedAt))} />}
+                {details.payment.couponUsedAt && <Detail label="Cupom utilizado em" value={dateTimeFormatter.format(new Date(details.payment.couponUsedAt))} />}
               </div>
               <p className="mb-2 mt-5 text-xs font-black uppercase text-zinc-500">Payload do gateway</p>
               <pre className="max-h-72 overflow-auto border border-white/10 bg-black p-3 text-xs text-zinc-300">{JSON.stringify(details.gatewayPayload, null, 2) || 'Nenhum payload recebido'}</pre>
