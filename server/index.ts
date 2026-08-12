@@ -23,6 +23,7 @@ import {
   getPartnerDetailInPostgres,
   exportPartnerRegistrationsInPostgres,
   appendPartnerAuditLogInPostgres,
+  appendRemarketingCheckoutReturnInPostgres,
   appendPartnerPaymentStatusAuditInPostgres,
   findPartnerRegistrationBySessionInPostgres,
   listAdminPartnersInPostgres,
@@ -1684,6 +1685,19 @@ async function recordRemarketingCheckoutReturn(
   attribution: RegistrationFormData['attribution'],
 ) {
   if (!registrationId || !isVolta10RemarketingAttribution(attribution)) return;
+  if (usesPostgresDatabase()) {
+    await appendRemarketingCheckoutReturnInPostgres(createAuditLog(req, null, {
+      action: 'remarketing.checkout_returned',
+      entityType: 'registration',
+      entityId: registrationId,
+      payload: {
+        campaign: VOLTA10_REMARKETING_CAMPAIGN,
+        source: VOLTA10_REMARKETING_SOURCE,
+        personKey: null,
+      },
+    }));
+    return;
+  }
   await transaction((database) => {
     const alreadyRecorded = database.auditLogs.some((log) => log.action === 'remarketing.checkout_returned'
       && log.entityId === registrationId

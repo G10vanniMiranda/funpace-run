@@ -5,6 +5,8 @@ dist/
 data/
 backups/
 .vercel
+.codex-prod-sha/
+.codex-rollout-prod/
 
 # Local audits, exports, and inspection artifacts
 .tmp/

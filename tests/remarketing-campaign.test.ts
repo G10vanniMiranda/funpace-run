@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import type { AuditLogRecord, Database, PaymentRecord, RegistrationRecord } from '../server/database.js';
 import { getCouponCampaignAttribution } from '../server/coupons.js';
@@ -73,6 +74,25 @@ test('checkout return requires the exact campaign and never requires exposing th
   assert.equal(isVolta10RemarketingAttribution({ utmCampaign: VOLTA10_REMARKETING_CAMPAIGN.toUpperCase() }), true);
   assert.equal(isVolta10RemarketingAttribution({ utmCampaign: 'other_campaign' }), false);
   assert.equal(isVolta10RemarketingAttribution(undefined), false);
+});
+
+test('Postgres checkout return uses a narrow idempotent audit insert instead of full database persistence', () => {
+  const serverSource = readFileSync('server/index.ts', 'utf8');
+  const databaseSource = readFileSync('server/database.ts', 'utf8');
+  const handler = serverSource.slice(
+    serverSource.indexOf('async function recordRemarketingCheckoutReturn'),
+    serverSource.indexOf('async function handleCreateRegistration'),
+  );
+  const directWriter = databaseSource.slice(
+    databaseSource.indexOf('export async function appendRemarketingCheckoutReturnInPostgres'),
+    databaseSource.indexOf('export async function findPartnerRegistrationBySessionInPostgres'),
+  );
+
+  assert.match(handler, /if \(usesPostgresDatabase\(\)\)[\s\S]*appendRemarketingCheckoutReturnInPostgres/);
+  assert.match(directWriter, /insert into \$\{table\.auditLogs\}/);
+  assert.match(directWriter, /where not exists/);
+  assert.match(directWriter, /remarketing-checkout-return:/);
+  assert.doesNotMatch(directWriter, /savePostgresDatabase|funpace-run-write/);
 });
 
 test('campaign funnel deduplicates people and sums only legitimately paid coupon snapshots', () => {

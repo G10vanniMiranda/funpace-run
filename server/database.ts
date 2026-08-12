@@ -3098,6 +3098,36 @@ export async function appendPartnerAuditLogInPostgres(input: PartnerAuditInput) 
   return insertPartnerAudit(requirePool(), input);
 }
 
+export async function appendRemarketingCheckoutReturnInPostgres(log: AuditLogRecord) {
+  await ensurePostgresReady();
+  const client = await requirePool().connect();
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '2s'");
+    await client.query("set local statement_timeout = '5s'");
+    await client.query("select pg_advisory_xact_lock(hashtext('remarketing-checkout-return:' || $1))", [log.entityId]);
+    const result = await client.query(
+      `insert into ${table.auditLogs}
+       (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       select $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+       where not exists (
+         select 1 from ${table.auditLogs}
+         where action=$4 and entity_id=$6 and payload->>'campaign'=$12
+       )`,
+      [log.id, log.actor, log.actorRole || null, log.action, log.entityType, log.entityId, log.payload,
+        log.sessionId || null, log.ipAddress || null, log.userAgent || null, log.createdAt,
+        String((log.payload as Record<string, unknown> | null)?.campaign || '')],
+    );
+    await client.query('commit');
+    return (result.rowCount || 0) > 0;
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function findPartnerRegistrationBySessionInPostgres(input: { correlationId?: string | null; accessAuditId?: string | null }) {
   await ensurePostgresReady();
   if (!input.correlationId && !input.accessAuditId) return null;
