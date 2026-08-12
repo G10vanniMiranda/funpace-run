@@ -1,14 +1,15 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
-import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, ShieldCheck, Users, XCircle } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, ShieldCheck, TicketPercent, Users, XCircle } from 'lucide-react';
 import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
 import { usePrivacyConsent } from '../hooks/usePrivacyConsent';
-import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession } from '../lib/api';
+import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession, validateCoupon } from '../lib/api';
 import { getMetaBrowserContext, trackMetaEventOnce } from '../lib/metaPixel';
+import { captureCurrentMarketingAttribution } from '../lib/marketingAttribution';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
-import type { AvailabilityResponse, Gender, RaceDistance, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
+import type { AvailabilityResponse, Gender, RaceDistance, RegistrationCouponPricing, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
 import { Reveal } from './premium';
 
@@ -31,33 +32,6 @@ const initialRegistration: RegistrationFormData = {
   privacyAccepted: false,
 };
 
-function readMarketingAttribution(): RegistrationFormData['attribution'] {
-  const params = new URLSearchParams(window.location.search);
-  const previous = sessionStorage.getItem('funpace-attribution');
-  let stored: RegistrationFormData['attribution'];
-  try {
-    stored = previous ? JSON.parse(previous) as RegistrationFormData['attribution'] : undefined;
-  } catch {
-    sessionStorage.removeItem('funpace-attribution');
-  }
-  const utmSource = params.get('utm_source') || stored?.utmSource || '';
-  const utmMedium = params.get('utm_medium') || stored?.utmMedium || '';
-  const attribution = {
-    source: params.get('source') || stored?.source || utmSource || (utmMedium.toLowerCase().includes('qr') ? 'qr-code' : ''),
-    medium: params.get('medium') || stored?.medium || utmMedium,
-    campaign: params.get('campaign') || stored?.campaign || params.get('utm_campaign') || stored?.utmCampaign || '',
-    term: params.get('utm_term') || stored?.term || '',
-    content: params.get('utm_content') || stored?.content || '',
-    utmSource,
-    utmMedium,
-    utmCampaign: params.get('utm_campaign') || stored?.utmCampaign || '',
-    referrer: stored?.referrer || document.referrer,
-    landingPage: stored?.landingPage || window.location.href.slice(0, 300),
-  };
-  sessionStorage.setItem('funpace-attribution', JSON.stringify(attribution));
-  return attribution;
-}
-
 const inputClass = 'premium-input w-full min-w-0 bg-zinc-100 p-3.5 sm:p-4 border-b-2 border-black focus:outline-none focus:bg-zinc-200 transition-colors text-sm sm:text-base';
 const errorClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-wider text-red-700 leading-relaxed';
 const labelClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-widest leading-relaxed';
@@ -66,7 +40,7 @@ export function RegistrationSection() {
   const marketingAllowed = usePrivacyConsent().preferences.marketing;
   const [status, setStatus] = useState<null | 'submitting' | 'checkout_pending' | 'api_error'>(null);
   const [formData, setFormData] = useState<RegistrationFormData>(initialRegistration);
-  const [attribution] = useState<RegistrationFormData['attribution']>(() => readMarketingAttribution());
+  const [attribution] = useState<RegistrationFormData['attribution']>(() => captureCurrentMarketingAttribution());
   const [errors, setErrors] = useState<RegistrationErrors>({});
   const [apiMessage, setApiMessage] = useState('');
   const [registrationId, setRegistrationId] = useState('');
@@ -76,11 +50,15 @@ export function RegistrationSection() {
   const [partnerActionMessage, setPartnerActionMessage] = useState('');
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [showSlowCheckoutHint, setShowSlowCheckoutHint] = useState(false);
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState<RegistrationCouponPricing | null>(null);
+  const [couponStatus, setCouponStatus] = useState<null | 'applying' | 'error'>(null);
+  const [couponMessage, setCouponMessage] = useState('');
   const activeLot = availability?.lots.find((lot) => lot.name === eventInfo.currentLot)
     || availability?.lots.find((lot) => lot.status === 'active')
     || availability?.lots[0];
   const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
-  const registrationPrice = (partnerContext?.finalPriceCents ?? lotPriceCents) / 100;
+  const registrationPrice = (appliedCoupon?.finalPriceCents ?? partnerContext?.finalPriceCents ?? lotPriceCents) / 100;
   const isSubmitting = status === 'submitting';
   const checkoutSupportUrl = getWhatsAppUrl('Olá, tentei fazer minha inscrição na FunPace Run, mas não consegui abrir o checkout.');
 
@@ -110,7 +88,17 @@ export function RegistrationSection() {
     const request = activatedFromPartnerLink ? getPartnerSession() : clearPartnerSession();
 
     request
-      .then((response) => { if (isMounted) setPartnerContext(activatedFromPartnerLink ? response.partner : null); })
+      .then((response) => {
+        if (!isMounted) return;
+        const partner = activatedFromPartnerLink ? response.partner : null;
+        setPartnerContext(partner);
+        if (partner) {
+          setAppliedCoupon(null);
+          setCouponInput('');
+          setCouponStatus(null);
+          setCouponMessage('');
+        }
+      })
       .catch(() => { if (isMounted) setPartnerContext(null); })
       .finally(() => {
         if (!activatedFromPartnerLink) return;
@@ -149,6 +137,28 @@ export function RegistrationSection() {
     } finally {
       setClearingPartner(false);
     }
+  };
+
+  const applyCoupon = async () => {
+    setCouponStatus('applying');
+    setCouponMessage('');
+    try {
+      const coupon = await validateCoupon(couponInput, Boolean(partnerContext));
+      setAppliedCoupon(coupon);
+      setCouponInput(coupon.code);
+      setCouponStatus(null);
+    } catch (error) {
+      setAppliedCoupon(null);
+      setCouponStatus('error');
+      setCouponMessage(error instanceof ApiError ? error.message : 'Não foi possível validar o cupom.');
+    }
+  };
+
+  const removeCoupon = () => {
+    setAppliedCoupon(null);
+    setCouponInput('');
+    setCouponStatus(null);
+    setCouponMessage('');
   };
 
   useEffect(() => {
@@ -205,11 +215,13 @@ export function RegistrationSection() {
         attribution,
         partnerBenefitRequested: Boolean(partnerContext),
         checkoutRequested: true,
+        couponCode: appliedCoupon?.code,
         meta,
       });
 
       setRegistrationId(response.registrationId);
       setApiMessage(response.message);
+      const confirmedPrice = (response.coupon?.finalPriceCents ?? response.partner?.finalPriceCents ?? Math.round(registrationPrice * 100)) / 100;
 
       if (availability?.event.id && response.completeRegistrationEventId) {
         trackMetaEventOnce(
@@ -219,7 +231,7 @@ export function RegistrationSection() {
             content_name: availability.event.name,
             content_category: 'Inscrição em corrida',
             currency: 'BRL',
-            value: registrationPrice,
+            value: confirmedPrice,
             content_ids: [availability.event.id],
             content_type: 'product',
             status: true,
@@ -237,7 +249,7 @@ export function RegistrationSection() {
             content_ids: [availability.event.id],
             content_type: 'product',
             currency: 'BRL',
-            value: registrationPrice,
+            value: confirmedPrice,
             num_items: 1,
           },
           { eventID: response.attemptId },
@@ -287,9 +299,9 @@ export function RegistrationSection() {
             <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
               <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Valor atual</p>
               <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
-                {((partnerContext?.finalPriceCents ?? lotPriceCents) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                {((appliedCoupon?.finalPriceCents ?? partnerContext?.finalPriceCents ?? lotPriceCents) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
               </p>
-              {partnerContext && <p className="mt-1 text-xs font-bold opacity-60">Valor original: {(partnerContext.originalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</p>}
+              {(appliedCoupon || partnerContext) && <p className="mt-1 text-xs font-bold opacity-60">Valor original: {((appliedCoupon?.originalPriceCents ?? partnerContext?.originalPriceCents ?? lotPriceCents) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</p>}
             </div>
           </div>
 
@@ -324,6 +336,57 @@ export function RegistrationSection() {
                 {partnerActionMessage && <p className="mt-2 text-xs font-bold text-red-700">{partnerActionMessage}</p>}
               </div>
             )}
+            <div className="border border-black/15 bg-black/[0.03] p-4 sm:p-5">
+              <div className="flex items-center gap-2">
+                <TicketPercent className="h-4 w-4" />
+                <p className="text-[11px] font-black uppercase tracking-widest">Cupom de desconto</p>
+              </div>
+              {appliedCoupon ? (
+                <div className="mt-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="font-black">Cupom {appliedCoupon.code} aplicado</p>
+                      <p className="mt-1 text-xs font-bold opacity-60">Desconto de {appliedCoupon.discountPercentage}%</p>
+                    </div>
+                    <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-700" />
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-black/10 pt-4 text-sm sm:grid-cols-4">
+                    <PriceItem label="Valor da inscrição" value={(appliedCoupon.originalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} />
+                    <PriceItem label={`Cupom ${appliedCoupon.code}`} value={`-${appliedCoupon.discountPercentage}%`} />
+                    <PriceItem label="Desconto" value={`- ${(appliedCoupon.discountAmountCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`} />
+                    <PriceItem label="Total" value={(appliedCoupon.finalPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} strong />
+                  </div>
+                  <button type="button" onClick={removeCoupon} className="mt-4 text-[10px] font-black uppercase tracking-widest underline underline-offset-4">
+                    Remover cupom
+                  </button>
+                </div>
+              ) : (
+                <div className="mt-3">
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <input
+                      type="text"
+                      value={couponInput}
+                      onChange={(event) => { setCouponInput(event.target.value); setCouponMessage(''); setCouponStatus(null); }}
+                      onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void applyCoupon(); } }}
+                      disabled={Boolean(partnerContext) || couponStatus === 'applying'}
+                      className={`${inputClass} sm:flex-1`}
+                      placeholder="Digite seu cupom"
+                      aria-label="Cupom de desconto"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void applyCoupon()}
+                      disabled={!couponInput.trim() || Boolean(partnerContext) || couponStatus === 'applying'}
+                      className="min-h-12 bg-black px-6 text-xs font-black uppercase tracking-widest text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {couponStatus === 'applying' ? 'Aplicando...' : 'Aplicar'}
+                    </button>
+                  </div>
+                  {partnerContext && <p className="mt-2 text-xs font-bold opacity-60">Cupons não são cumulativos com o benefício de parceiro.</p>}
+                  {couponStatus === 'error' && couponMessage && <p className="mt-2 text-xs font-bold text-red-700" role="alert">{couponMessage}</p>}
+                </div>
+              )}
+            </div>
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
               <Field label="Nome Completo" error={errors.fullName}>
                 <input required type="text" value={formData.fullName} onChange={(event) => updateField('fullName', event.target.value)} className={inputClass} placeholder="Nome e sobrenome" aria-invalid={Boolean(errors.fullName)} />

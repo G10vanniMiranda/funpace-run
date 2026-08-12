@@ -4,7 +4,7 @@ import { MaintenancePage } from "./components/maintenance";
 import { MetaPixelTracker } from "./components/MetaPixelTracker";
 import { PrivacyConsentManager } from "./components/privacy/PrivacyConsentManager";
 import { usePrivacyConsent } from "./hooks/usePrivacyConsent";
-import { updateMarketingConsent } from "./lib/api";
+import { synchronizeMarketingConsent } from "./lib/marketingConsentSync";
 
 const SiteApp = lazy(() => import("./SiteApp"));
 
@@ -15,7 +15,7 @@ export default function App() {
 
   useEffect(() => {
     if (!consent.hasDecision) return;
-    void updateMarketingConsent(consent.preferences.marketing).catch(() => undefined);
+    void synchronizeMarketingConsent(consent.preferences.marketing, consent.updatedAt || new Date().toISOString());
   }, [consent.hasDecision, consent.preferences.marketing, consent.updatedAt]);
 
   if (maintenanceMode) {

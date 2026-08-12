@@ -7,6 +7,7 @@ import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStat
 import type { MetaServerEvent, MetaUserData, MetaCustomData } from './meta-conversions-api.js';
 import { selectAvailableLotCandidate } from './lot-capacity.js';
 import { calculatePartnerPricing } from './partner-discount.js';
+import { calculateCouponPricing, getCouponCampaignAttribution } from './coupons.js';
 import { assertDatabaseEnvironmentIsolation } from './environment.js';
 
 const { Pool } = pg;
@@ -65,6 +66,7 @@ export type RegistrationRecord = {
   updatedAt: string;
   marketingConsent?: boolean;
   marketingConsentUpdatedAt?: string | null;
+  metaContext?: Record<string, unknown>;
   expiresAt?: string | null;
   paidAt?: string | null;
   confirmedAt?: string | null;
@@ -83,6 +85,9 @@ export type RegistrationRecord = {
   discountAmountCents?: number;
   originalPriceCents?: number;
   finalPriceCents?: number;
+  couponCode?: string | null;
+  couponAppliedAt?: string | null;
+  couponUsedAt?: string | null;
 };
 
 export type PaymentRecord = {
@@ -111,7 +116,7 @@ export type PaymentEventRecord = {
   receivedAt: string;
 };
 
-export type IntegrationEventStatus = 'pending' | 'processing' | 'sent' | 'failed';
+export type IntegrationEventStatus = 'pending' | 'processing' | 'sent' | 'failed' | 'dead';
 
 export type IntegrationEventRecord = {
   id: string;
@@ -139,9 +144,9 @@ export type IntegrationEventRecord = {
 
 export type GoogleSheetSyncRecord = {
   id: string;
-  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary' | 'lot_summary' | 'alert' | 'partnership' | 'email';
+  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary' | 'lot_summary' | 'alert' | 'partnership' | 'email' | 'remarketing';
   entityId: string;
-  sheetName: 'registrations' | 'payments' | 'shirts' | 'check_in' | 'lots' | 'alerts' | 'partnerships' | 'emails';
+  sheetName: 'registrations' | 'payments' | 'shirts' | 'check_in' | 'lots' | 'alerts' | 'partnerships' | 'emails' | 'remarketing';
   operation: 'upsert' | 'replace';
   status: 'pending' | 'processing' | 'synchronized' | 'failed';
   rowNumber: number | null;
@@ -154,6 +159,10 @@ export type GoogleSheetSyncRecord = {
 };
 
 export type GoogleSheetSyncInput = Pick<GoogleSheetSyncRecord, 'entityType' | 'entityId' | 'sheetName' | 'operation'>;
+
+export const GOOGLE_SHEET_SYNC_LEASE_MS = 5 * 60_000;
+export const GOOGLE_SHEET_SYNC_MAX_ATTEMPTS = 8;
+export const GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE = 'TRANSIENT: requeued while a previous attempt was processing';
 
 export type CheckInRecord = {
   id: string;
@@ -260,6 +269,7 @@ export type Database = {
 
 export type PendingRegistrationInput = {
   payload: RegistrationFormData;
+  metaContext: Record<string, unknown>;
   cpfHash: string;
   paymentProvider: string;
   expiresAt: string;
@@ -271,6 +281,7 @@ export type PendingRegistrationInput = {
   ipAddress?: string | null;
   userAgent?: string | null;
   accessAuditId?: string | null;
+  couponCode?: string | null;
 };
 
 export type PendingRegistrationResult = CreateRegistrationResponse & {
@@ -350,7 +361,34 @@ type DatabaseReadScope =
   | 'partners';
 
 const databasePath = resolve(process.env.DATABASE_FILE || 'data/funpace-db.json');
-const databaseUrl = process.env.DATABASE_URL || '';
+const META_RECONCILIATION_CONTEXT_SQL = `
+  jsonb_typeof(registration.meta_context)='object'
+  and jsonb_typeof(registration.meta_context->'captured_at')='string'
+  and registration.meta_context->>'captured_at' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$'
+  and jsonb_typeof(registration.meta_context->'event_source_url')='string'
+  and registration.meta_context->>'event_source_url' ~ '^https?://'
+`;
+export function resolveDatabaseConnectionUrl(configuredUrl: string, serverless = Boolean(process.env.VERCEL)) {
+  if (!serverless || !configuredUrl) return configuredUrl;
+
+  try {
+    const parsed = new URL(configuredUrl);
+    const isSupabaseSharedPooler = parsed.hostname.endsWith('.pooler.supabase.com');
+    if (isSupabaseSharedPooler && parsed.port === '5432') {
+      // Supabase reserves 5432 on the shared pooler for session mode. Vercel
+      // functions need transaction mode so idle function instances do not own
+      // scarce database sessions.
+      parsed.port = '6543';
+      return parsed.toString();
+    }
+  } catch {
+    // Preserve the original value so pg returns its usual configuration error.
+  }
+
+  return configuredUrl;
+}
+
+const databaseUrl = resolveDatabaseConnectionUrl(process.env.DATABASE_URL || '');
 const databaseProvider = process.env.DATABASE_PROVIDER || (databaseUrl ? 'postgres' : 'json');
 const databaseSsl = (process.env.DATABASE_SSL || 'true') !== 'false';
 const databaseAutoMigrate = process.env.DATABASE_AUTO_MIGRATE === 'true'
@@ -477,20 +515,39 @@ const initialDatabase: Database = {
   partners: [],
 };
 
-const configuredDatabasePoolMax = Number.parseInt(process.env.DATABASE_POOL_MAX || '5', 10);
+// A Vercel instance owns its own Pool. Keeping the old default of five meant
+// that only three warm instances could exhaust Supabase's 15 session slots.
+const defaultDatabasePoolMax = process.env.VERCEL ? '1' : '5';
+const configuredDatabasePoolMax = Number.parseInt(process.env.DATABASE_POOL_MAX || defaultDatabasePoolMax, 10);
 const databasePoolMax = Number.isInteger(configuredDatabasePoolMax) && configuredDatabasePoolMax > 0
   ? configuredDatabasePoolMax
-  : 5;
+  : Number(defaultDatabasePoolMax);
 
 const pool = databaseUrl
   ? new Pool({
     connectionString: databaseUrl,
     ssl: databaseSsl ? { rejectUnauthorized: false } : false,
     max: databasePoolMax,
+    connectionTimeoutMillis: 5_000,
+    idleTimeoutMillis: process.env.VERCEL ? 5_000 : 30_000,
+    allowExitOnIdle: true,
   })
   : null;
 
 let postgresReady: Promise<void> | null = null;
+let googleSheetJsonMutationQueue: Promise<void> = Promise.resolve();
+
+async function serializeGoogleSheetJsonMutation<Result>(operation: () => Promise<Result>): Promise<Result> {
+  const previous = googleSheetJsonMutationQueue;
+  let release!: () => void;
+  googleSheetJsonMutationQueue = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
 
 function ensureJsonDatabase() {
   if (existsSync(databasePath)) {
@@ -596,6 +653,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       updated_at text not null,
       marketing_consent boolean not null default false,
       marketing_consent_updated_at text,
+      meta_context jsonb not null default '{}'::jsonb check (jsonb_typeof(meta_context) = 'object'),
       expires_at text,
       paid_at text,
       confirmed_at text,
@@ -615,7 +673,10 @@ async function ensurePostgresDatabase(client: Queryable) {
       discount_percentage numeric(5, 2) not null default 0,
       discount_amount integer not null default 0,
       original_price integer not null,
-      final_price integer not null
+      final_price integer not null,
+      coupon_code text,
+      coupon_applied_at text,
+      coupon_used_at text
     );
 
     create table if not exists ${table.payments} (
@@ -646,9 +707,9 @@ async function ensurePostgresDatabase(client: Queryable) {
 
     create table if not exists ${table.googleSheetSyncs} (
       id text primary key,
-      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email')),
+      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'remarketing')),
       entity_id text not null,
-      sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in', 'lots', 'alerts', 'partnerships', 'emails')),
+      sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in', 'lots', 'alerts', 'partnerships', 'emails', 'remarketing')),
       operation text not null check (operation in ('upsert', 'replace')),
       status text not null check (status in ('pending', 'processing', 'synchronized', 'failed')),
       row_number integer,
@@ -673,7 +734,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       user_data jsonb not null default '{}'::jsonb,
       client_context jsonb not null default '{}'::jsonb,
       custom_data jsonb not null default '{}'::jsonb,
-      status text not null check (status in ('pending', 'processing', 'sent', 'failed')),
+      status text not null check (status in ('pending', 'processing', 'sent', 'failed', 'dead')),
       attempt_count integer not null default 0,
       next_attempt_at text,
       last_attempt_at text,
@@ -900,6 +961,9 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.registrations} add column if not exists discount_amount integer default 0`);
   await client.query(`alter table ${table.registrations} add column if not exists original_price integer`);
   await client.query(`alter table ${table.registrations} add column if not exists final_price integer`);
+  await client.query(`alter table ${table.registrations} add column if not exists coupon_code text`);
+  await client.query(`alter table ${table.registrations} add column if not exists coupon_applied_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists coupon_used_at text`);
   await client.query(`update ${table.registrations} registration set partner_type = partner.partner_type from ${table.partners} partner where registration.partner_id = partner.id and registration.partner_type is null`);
   await client.query(`update ${table.registrations} set discount_percentage = coalesce(discount_percentage, 0), discount_amount = coalesce(discount_amount, 0), original_price = coalesce(original_price, amount_cents), final_price = coalesce(final_price, amount_cents)`);
   await client.query(`alter table ${table.registrations} alter column discount_percentage set not null`);
@@ -918,13 +982,23 @@ async function ensurePostgresDatabase(client: Queryable) {
     alter table "run-registrations" drop constraint if exists "run-registrations_partner_type_check";
     alter table "run-registrations" add constraint "run-registrations_partner_type_check" check (partner_type is null or partner_type in ('sports_advisory', 'influencer'));
     alter table "run-registrations" drop constraint if exists "run-registrations_partner_metadata_check";
-    alter table "run-registrations" add constraint "run-registrations_partner_metadata_check" check ((partner_id is null and partner_name is null and partner_type is null and discount_percentage = 0 and discount_amount = 0) or (partner_id is not null and partner_name is not null and partner_type is not null and discount_percentage > 0 and discount_amount > 0));
+    alter table "run-registrations" add constraint "run-registrations_partner_metadata_check" check (
+      (partner_id is null and partner_name is null and partner_type is null and coupon_code is null and discount_percentage = 0 and discount_amount = 0)
+      or (partner_id is not null and partner_name is not null and partner_type is not null and coupon_code is null and discount_percentage > 0 and discount_amount > 0)
+      or (partner_id is null and partner_name is null and partner_type is null and coupon_code is not null and discount_percentage > 0 and discount_amount > 0)
+    );
+    alter table "run-registrations" drop constraint if exists "run-registrations_coupon_snapshot_check";
+    alter table "run-registrations" add constraint "run-registrations_coupon_snapshot_check" check (
+      (coupon_code is null and coupon_applied_at is null and coupon_used_at is null)
+      or (coupon_code = upper(btrim(coupon_code)) and coupon_code <> '' and coupon_applied_at is not null)
+    );
     create or replace function public.run_registration_pricing_defaults() returns trigger language plpgsql set search_path = public as $$ begin new.discount_percentage := coalesce(new.discount_percentage, 0); new.discount_amount := coalesce(new.discount_amount, 0); new.original_price := coalesce(new.original_price, new.amount_cents); new.final_price := coalesce(new.final_price, new.amount_cents); return new; end; $$;
     drop trigger if exists "run-registrations_pricing_defaults" on "run-registrations";
     create trigger "run-registrations_pricing_defaults" before insert on "run-registrations" for each row execute function public.run_registration_pricing_defaults();
-    create or replace function public.protect_confirmed_partner_snapshot() returns trigger language plpgsql set search_path = pg_catalog, public as $$ begin if old.confirmed_at is not null and (new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name or new.partner_type is distinct from old.partner_type or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price) then raise exception 'confirmed partner snapshot is immutable'; end if; return new; end; $$;
+    create or replace function public.protect_confirmed_partner_snapshot() returns trigger language plpgsql set search_path = pg_catalog, public as $$ begin if old.confirmed_at is not null and (new.partner_id is distinct from old.partner_id or new.partner_name is distinct from old.partner_name or new.partner_type is distinct from old.partner_type or new.partner_link is distinct from old.partner_link or new.partner_identified_at is distinct from old.partner_identified_at or new.discount_percentage is distinct from old.discount_percentage or new.discount_amount is distinct from old.discount_amount or new.original_price is distinct from old.original_price or new.final_price is distinct from old.final_price or new.coupon_code is distinct from old.coupon_code or new.coupon_applied_at is distinct from old.coupon_applied_at or new.coupon_used_at is distinct from old.coupon_used_at) then raise exception 'confirmed pricing snapshot is immutable'; end if; return new; end; $$;
     drop trigger if exists "run-registrations_partner_snapshot_immutable" on "run-registrations";
     create trigger "run-registrations_partner_snapshot_immutable" before update on "run-registrations" for each row execute function public.protect_confirmed_partner_snapshot();
+    create index if not exists "run-registrations_coupon_code_created_idx" on "run-registrations"(coupon_code, created_at desc) where coupon_code is not null;
   `);
   await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
   await client.query(`alter table ${table.lots} add column if not exists order_index integer not null default 0`);
@@ -1002,6 +1076,19 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`alter table ${table.auditLogs} add column if not exists user_agent text`);
   await client.query(`alter table ${table.registrations} add column if not exists marketing_consent boolean not null default false`);
   await client.query(`alter table ${table.registrations} add column if not exists marketing_consent_updated_at text`);
+  await client.query(`alter table ${table.registrations} add column if not exists meta_context jsonb not null default '{}'::jsonb`);
+  await client.query(`do $$
+    begin
+      if not exists (
+        select 1 from pg_constraint
+        where conname='run-integration-events_status_check'
+          and pg_get_constraintdef(oid) like '%dead%'
+      ) then
+        alter table ${table.integrationEvents} drop constraint if exists "run-integration-events_status_check";
+        alter table ${table.integrationEvents} add constraint "run-integration-events_status_check"
+          check (status in ('pending','processing','sent','failed','dead'));
+      end if;
+    end $$`);
   await client.query(`create index if not exists "run-integration-events_retry_idx" on ${table.integrationEvents}(status, next_attempt_at)`);
   await client.query(`create index if not exists "run-integration-events_entity_idx" on ${table.integrationEvents}(entity_type, entity_id, created_at)`);
 
@@ -1164,7 +1251,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
   const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
   const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`) : emptyRows;
-  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price from ${table.registrations}`) : emptyRows;
+  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price, coupon_code, coupon_applied_at, coupon_used_at from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
@@ -1222,6 +1309,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       updatedAt: row.updated_at,
       marketingConsent: row.marketing_consent === true,
       marketingConsentUpdatedAt: row.marketing_consent_updated_at,
+      metaContext: (row.meta_context || {}) as Record<string, unknown>,
       expiresAt: row.expires_at,
       paidAt: row.paid_at,
       confirmedAt: row.confirmed_at,
@@ -1240,6 +1328,9 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       discountAmountCents: Number(row.discount_amount || 0),
       originalPriceCents: Number(row.original_price ?? row.amount_cents),
       finalPriceCents: Number(row.final_price ?? row.amount_cents),
+      couponCode: row.coupon_code || null,
+      couponAppliedAt: row.coupon_applied_at || null,
+      couponUsedAt: row.coupon_used_at || null,
     })),
     payments: payments.rows.map((row) => ({
       id: row.id,
@@ -1408,8 +1499,8 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
 
   for (const item of database.registrations) {
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price, coupon_code, coupon_applied_at, coupon_used_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)
        on conflict (id) do update set
          event_id = excluded.event_id,
          distance_id = excluded.distance_id,
@@ -1421,6 +1512,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          updated_at = excluded.updated_at,
          marketing_consent = excluded.marketing_consent,
          marketing_consent_updated_at = excluded.marketing_consent_updated_at,
+         meta_context = excluded.meta_context,
          expires_at = excluded.expires_at,
          paid_at = excluded.paid_at,
          confirmed_at = excluded.confirmed_at,
@@ -1438,7 +1530,10 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
          discount_percentage = excluded.discount_percentage,
          discount_amount = excluded.discount_amount,
          original_price = excluded.original_price,
-         final_price = excluded.final_price`,
+         final_price = excluded.final_price,
+         coupon_code = excluded.coupon_code,
+         coupon_applied_at = excluded.coupon_applied_at,
+         coupon_used_at = excluded.coupon_used_at`,
       [
         item.id,
         item.eventId,
@@ -1452,6 +1547,7 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.updatedAt,
         item.marketingConsent ?? item.payload.meta?.marketingConsent === true,
         item.marketingConsentUpdatedAt || item.createdAt,
+        item.metaContext || {},
         item.expiresAt || null,
         item.paidAt || null,
         item.confirmedAt || null,
@@ -1470,6 +1566,9 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.discountAmountCents || 0,
         item.originalPriceCents ?? item.amountCents,
         item.finalPriceCents ?? item.amountCents,
+        item.couponCode || null,
+        item.couponAppliedAt || null,
+        item.couponUsedAt || null,
       ],
     );
   }
@@ -1833,8 +1932,9 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
               registration.amount_cents, registration.partner_id, registration.partner_name, registration.partner_type,
               registration.discount_percentage, registration.discount_amount,
               registration.original_price, registration.final_price,
+              registration.coupon_code, registration.coupon_applied_at, registration.coupon_used_at,
               payment.id as payment_id, payment.checkout_url,
-              distance.name as distance_name, lot.name as lot_name
+              distance.name as distance_name, lot.name as lot_name, lot.price_cents as lot_price_cents
        from ${table.registrations} registration
        left join ${table.payments} payment on payment.registration_id = registration.id
        join ${table.distances} distance on distance.id = registration.distance_id
@@ -1849,11 +1949,63 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
 
     if (existing) {
       const recoveredAt = new Date().toISOString();
+      const requestedCouponDiffers = existing.status === 'pending_payment'
+        && String(existing.coupon_code || '') !== String(input.couponCode || '');
+      if (requestedCouponDiffers) {
+        if (existing.partner_id && input.couponCode) {
+          await client.query('rollback');
+          return {
+            statusCode: 409, success: false, registrationId: existing.id, paymentId: existing.payment_id || null,
+            registrationStatus: existing.status, checkoutStatus: existing.checkout_url ? 'created' : 'not_configured',
+            checkoutUrl: existing.checkout_url || null,
+            message: 'O cupom não pode ser combinado com outro desconto.',
+          };
+        }
+        const repricedCoupon = calculateCouponPricing(Number(existing.lot_price_cents), input.couponCode);
+        if (input.couponCode && !repricedCoupon) throw new Error('Invalid coupon reached repricing.');
+        const repricedAmountCents = repricedCoupon?.finalPriceCents ?? Number(existing.lot_price_cents);
+        await client.query(
+          `update ${table.registrations}
+           set amount_cents=$1, discount_percentage=$2, discount_amount=$3,
+               original_price=$4, final_price=$1, coupon_code=$5, coupon_applied_at=$6,
+               coupon_used_at=null, updated_at=$6
+           where id=$7 and status='pending_payment'`,
+          [repricedAmountCents, repricedCoupon?.discountPercentage || 0, repricedCoupon?.discountAmountCents || 0,
+            Number(existing.lot_price_cents), repricedCoupon?.code || null, recoveredAt, existing.id],
+        );
+        await client.query(
+          `update ${table.payments}
+           set amount_cents=$1, provider_payment_id=null, checkout_url=null,
+               gateway_status=null, gateway_transaction_id=null, gateway_payload=null, updated_at=$2
+           where id=$3 and status='pending_payment'`,
+          [repricedAmountCents, recoveredAt, existing.payment_id],
+        );
+        await client.query(
+          `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+           values ($1, 'system', $2, 'registration', $3, $4, $5)`,
+          [randomUUID(), repricedCoupon ? 'coupon.applied' : 'coupon.removed', existing.id, {
+            previousCouponCode: existing.coupon_code || null,
+            previousAmountCents: Number(existing.amount_cents),
+            ...(repricedCoupon || { originalPriceCents: Number(existing.lot_price_cents), finalPriceCents: repricedAmountCents }),
+            ...(repricedCoupon ? getCouponCampaignAttribution(repricedCoupon.code) || {} : {}),
+          }, recoveredAt],
+        );
+        existing.amount_cents = repricedAmountCents;
+        existing.discount_percentage = repricedCoupon?.discountPercentage || 0;
+        existing.discount_amount = repricedCoupon?.discountAmountCents || 0;
+        existing.original_price = Number(existing.lot_price_cents);
+        existing.final_price = repricedAmountCents;
+        existing.coupon_code = repricedCoupon?.code || null;
+        existing.coupon_applied_at = repricedCoupon ? recoveredAt : null;
+        existing.coupon_used_at = null;
+        existing.checkout_url = null;
+      }
       const recoveredMarketingConsent = input.payload.meta?.marketingConsent === true;
       await client.query(
         `update ${table.registrations}
          set marketing_consent=$1,
              marketing_consent_updated_at=$2,
+             meta_context=$4,
              payload=jsonb_set(
                payload,
                '{meta}',
@@ -1861,12 +2013,12 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
                true
              )
          where id=$3`,
-        [recoveredMarketingConsent, recoveredAt, existing.id],
+        [recoveredMarketingConsent, recoveredAt, existing.id, recoveredMarketingConsent ? input.metaContext : {}],
       );
       if (!recoveredMarketingConsent) {
         await client.query(
           `update ${table.integrationEvents}
-           set status='failed',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
+           set status='dead',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
            where provider='meta' and entity_id=$2 and status in ('pending','failed')`,
           [recoveredAt, existing.id],
         );
@@ -1921,6 +2073,15 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
           discountAmountCents: Number(existing.discount_amount),
           originalPriceCents: Number(existing.original_price),
           finalPriceCents: Number(existing.final_price),
+        } : null,
+        coupon: existing.coupon_code ? {
+          code: String(existing.coupon_code),
+          discountPercentage: Number(existing.discount_percentage),
+          discountAmountCents: Number(existing.discount_amount),
+          originalPriceCents: Number(existing.original_price),
+          finalPriceCents: Number(existing.final_price),
+          appliedAt: existing.coupon_applied_at || null,
+          usedAt: existing.coupon_used_at || null,
         } : null,
       };
     }
@@ -2032,7 +2193,9 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       deletedAt: partnerRow.deleted_at,
     }) : null;
     const partnerType = partnerPricing ? partnerRow.partner_type as PartnerType : null;
-    const amountCents = partnerPricing?.finalPriceCents ?? originalPriceCents;
+    const couponPricing = partnerPricing ? null : calculateCouponPricing(originalPriceCents, input.couponCode);
+    if (input.couponCode && !couponPricing) throw new Error('Invalid coupon reached persistence.');
+    const amountCents = couponPricing?.finalPriceCents ?? partnerPricing?.finalPriceCents ?? originalPriceCents;
 
     if (input.partnerId && !partnerPricing) {
       await insertPartnerAudit(client, {
@@ -2049,13 +2212,15 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
     }
 
     await client.query(
-      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $9, $11, null, null, null, null, null, null, null, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+      `insert into ${table.registrations} (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price, coupon_code, coupon_applied_at, coupon_used_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $9, $11, $12, null, null, null, null, null, null, null, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, null)`,
       [registrationId, event.id, distance.id, lot.id, input.cpfHash, 'pending_payment', amountCents, input.payload, now,
-        input.payload.meta?.marketingConsent === true, input.expiresAt,
+        input.payload.meta?.marketingConsent === true, input.metaContext, input.expiresAt,
         partnerPricing?.partnerId || null, partnerPricing?.partnerName || null, partnerType,
         partnerPricing ? `/p/${input.partnerSlug || ''}` : null, partnerPricing ? now : null,
-        partnerPricing?.discountPercentage || 0, partnerPricing?.discountAmountCents || 0, originalPriceCents, amountCents],
+        couponPricing?.discountPercentage || partnerPricing?.discountPercentage || 0,
+        couponPricing?.discountAmountCents || partnerPricing?.discountAmountCents || 0,
+        originalPriceCents, amountCents, couponPricing?.code || null, couponPricing ? now : null],
     );
     await client.query(
       `insert into ${table.payments} (id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload)
@@ -2079,6 +2244,13 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'registration.started', registrationId, eventId: event.id, newData: { partnerName: partnerPricing.partnerName, partnerLink: `/p/${input.partnerSlug || ''}`, partnerType }, metadata: auditMetadata, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
       await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'discount.applied', registrationId, eventId: event.id, newData: { discountPercentage: partnerPricing.discountPercentage, discountAmountCents: partnerPricing.discountAmountCents, originalPriceCents, finalPriceCents: amountCents }, metadata: auditMetadata, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
       await insertPartnerAudit(client, { partnerId: partnerPricing.partnerId, action: 'partner.snapshot_persisted', registrationId, eventId: event.id, newData: { partnerId: partnerPricing.partnerId, partnerName: partnerPricing.partnerName, partnerType, partnerLink: `/p/${input.partnerSlug || ''}`, discountPercentage: partnerPricing.discountPercentage, discountAmountCents: partnerPricing.discountAmountCents, originalPriceCents, finalPriceCents: amountCents }, metadata: auditMetadata, ipAddress: input.ipAddress, userAgent: input.userAgent, createdAt: now });
+    }
+    if (couponPricing) {
+      await client.query(
+        `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+         values ($1, 'system', 'coupon.applied', 'registration', $2, $3, $4)`,
+        [randomUUID(), registrationId, { ...couponPricing, ...(getCouponCampaignAttribution(couponPricing.code) || {}) }, now],
+      );
     }
     await client.query('commit');
 
@@ -2105,6 +2277,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
         originalPriceCents: partnerPricing.originalPriceCents,
         finalPriceCents: partnerPricing.finalPriceCents,
       } : null,
+      coupon: couponPricing ? { ...couponPricing, appliedAt: now, usedAt: null } : null,
     };
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
@@ -2175,6 +2348,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
     const result = await client.query(
       `select registration.id, registration.status, registration.amount_cents, registration.final_price,
               registration.lot_id, registration.partner_id, registration.partner_type, registration.event_id,
+              registration.coupon_code,
               payment.id as payment_id, payment.status as payment_status, payment.amount_cents as payment_amount_cents,
               payment.gateway_transaction_id as existing_gateway_transaction_id,
               lot.status as lot_status, lot.price_cents as lot_price_cents,
@@ -2258,6 +2432,7 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
       `update ${table.registrations}
        set status = 'paid', updated_at = $1, expires_at = null,
            paid_at = coalesce(paid_at, $1), confirmed_at = coalesce(confirmed_at, $1),
+           coupon_used_at = case when coupon_code is not null then coalesce(coupon_used_at, $1) else null end,
            bib_number = coalesce(bib_number, $3)
        where id = $2`,
       [now, row.id, nextBibNumber],
@@ -2923,6 +3098,36 @@ export async function appendPartnerAuditLogInPostgres(input: PartnerAuditInput) 
   return insertPartnerAudit(requirePool(), input);
 }
 
+export async function appendRemarketingCheckoutReturnInPostgres(log: AuditLogRecord) {
+  await ensurePostgresReady();
+  const client = await requirePool().connect();
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '2s'");
+    await client.query("set local statement_timeout = '5s'");
+    await client.query("select pg_advisory_xact_lock(hashtext('remarketing-checkout-return:' || $1))", [log.entityId]);
+    const result = await client.query(
+      `insert into ${table.auditLogs}
+       (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       select $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+       where not exists (
+         select 1 from ${table.auditLogs}
+         where action=$4 and entity_id=$6 and payload->>'campaign'=$12
+       )`,
+      [log.id, log.actor, log.actorRole || null, log.action, log.entityType, log.entityId, log.payload,
+        log.sessionId || null, log.ipAddress || null, log.userAgent || null, log.createdAt,
+        String((log.payload as Record<string, unknown> | null)?.campaign || '')],
+    );
+    await client.query('commit');
+    return (result.rowCount || 0) > 0;
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function findPartnerRegistrationBySessionInPostgres(input: { correlationId?: string | null; accessAuditId?: string | null }) {
   await ensurePostgresReady();
   if (!input.correlationId && !input.accessAuditId) return null;
@@ -3153,11 +3358,18 @@ export async function synchronizeOperationalAlertsInPostgres(alerts: Array<{
   dedupeKey: string; severity: 'info' | 'warning' | 'critical'; alertType: string; title: string; message: string;
   entityType?: string | null; entityId?: string | null; payload?: Record<string, unknown>;
 }>) {
+  await ensurePostgresReady();
   const client = await requirePool().connect();
   const now = new Date().toISOString();
   try {
-    await ensurePostgresReady();
     await client.query('begin');
+    const synchronizationLock = await client.query(
+      "select pg_try_advisory_xact_lock(hashtext('funpace-run-operational-alert-sync')) locked",
+    );
+    if (synchronizationLock.rows[0]?.locked !== true) {
+      await client.query('rollback');
+      return false;
+    }
     for (const alert of alerts) {
       const persisted = await client.query(
         `insert into ${table.operationalAlerts}
@@ -3181,6 +3393,7 @@ export async function synchronizeOperationalAlertsInPostgres(alerts: Array<{
       }
     }
     await client.query('commit');
+    return true;
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;
@@ -3406,7 +3619,7 @@ export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promi
   const now = new Date().toISOString();
 
   if (!shouldUsePostgres()) {
-    return transaction((database) => {
+    return serializeGoogleSheetJsonMutation(() => transaction((database) => {
       const existing = database.googleSheetSyncs.find((item) => (
         item.entityType === input.entityType
         && item.entityId === input.entityId
@@ -3414,10 +3627,13 @@ export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promi
       ));
 
       if (existing) {
+        const wasProcessing = existing.status === 'processing';
         existing.operation = input.operation;
         existing.status = 'pending';
         existing.synchronizedAt = null;
-        existing.lastError = null;
+        existing.lastError = wasProcessing
+          ? GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE
+          : null;
         existing.updatedAt = now;
         return existing;
       }
@@ -3436,7 +3652,7 @@ export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promi
       };
       database.googleSheetSyncs.push(created);
       return created;
-    });
+    }));
   }
 
   await ensurePostgresReady();
@@ -3447,36 +3663,54 @@ export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promi
        operation = excluded.operation,
        status = 'pending',
        synchronized_at = null,
-       last_error = null,
+       last_error = case
+         when ${table.googleSheetSyncs}.status = 'processing' then $7
+         else null
+       end,
        updated_at = excluded.updated_at
      returning id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at`,
-    [randomUUID(), input.entityType, input.entityId, input.sheetName, input.operation, now],
+    [randomUUID(), input.entityType, input.entityId, input.sheetName, input.operation, now, GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE],
   );
   return mapGoogleSheetSyncRow(result.rows[0]);
 }
 
 export async function claimGoogleSheetSync(syncId: string): Promise<GoogleSheetSyncRecord | null> {
   const now = new Date().toISOString();
+  const leaseExpiredAt = new Date(Date.now() - GOOGLE_SHEET_SYNC_LEASE_MS).toISOString();
 
   if (!shouldUsePostgres()) {
-    return transaction((database) => {
-      const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
-      if (!item || !['pending', 'failed'].includes(item.status)) return null;
-      item.status = 'processing';
-      item.attempts += 1;
-      item.lastAttemptAt = now;
-      item.updatedAt = now;
-      return item;
-    });
+    return serializeGoogleSheetJsonMutation(() => transaction((database) => {
+        const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
+        const staleProcessing = item?.status === 'processing'
+          && Boolean(item.lastAttemptAt)
+          && new Date(item.lastAttemptAt!).getTime() <= new Date(leaseExpiredAt).getTime();
+        const deferredPending = item?.status === 'pending'
+          && item.lastError === GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE
+          && Boolean(item.lastAttemptAt)
+          && new Date(item.lastAttemptAt!).getTime() > new Date(leaseExpiredAt).getTime();
+        if (!item || deferredPending || (!['pending', 'failed'].includes(item.status) && !staleProcessing)) return null;
+        item.status = 'processing';
+        item.attempts += 1;
+        item.lastAttemptAt = now;
+        item.updatedAt = now;
+        return item;
+    }));
   }
 
   await ensurePostgresReady();
   const result = await requirePool().query(
     `update ${table.googleSheetSyncs}
      set status = 'processing', attempts = attempts + 1, last_attempt_at = $1, updated_at = $1
-     where id = $2 and status in ('pending', 'failed')
+     where id = $2
+       and (
+         status = 'failed'
+         or (status = 'pending' and not (
+           coalesce(last_error, '') = $4 and last_attempt_at::timestamptz > $3::timestamptz
+         ))
+         or (status = 'processing' and last_attempt_at::timestamptz <= $3::timestamptz)
+       )
      returning id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at`,
-    [now, syncId],
+    [now, syncId, leaseExpiredAt, GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE],
   );
   return result.rows[0] ? mapGoogleSheetSyncRow(result.rows[0]) : null;
 }
@@ -3487,7 +3721,7 @@ export async function completeGoogleSheetSync(syncId: string, rowNumber: number 
   if (!shouldUsePostgres()) {
     await transaction((database) => {
       const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
-      if (!item) return;
+      if (!item || item.status !== 'processing') return;
       item.status = 'synchronized';
       item.rowNumber = rowNumber ?? item.rowNumber;
       item.synchronizedAt = now;
@@ -3501,19 +3735,23 @@ export async function completeGoogleSheetSync(syncId: string, rowNumber: number 
   await requirePool().query(
     `update ${table.googleSheetSyncs}
      set status = 'synchronized', row_number = coalesce($1, row_number), synchronized_at = $2, last_error = null, updated_at = $2
-     where id = $3`,
+     where id = $3 and status = 'processing'`,
     [rowNumber, now, syncId],
   );
 }
 
 export async function failGoogleSheetSync(syncId: string, error: unknown): Promise<void> {
   const now = new Date().toISOString();
-  const safeError = (error instanceof Error ? error.message : String(error || 'Unknown error')).slice(0, 500);
+  const retryable = !(error && typeof error === 'object' && 'retryable' in error)
+    || (error as { retryable?: unknown }).retryable !== false;
+  const prefix = retryable ? 'TRANSIENT: ' : 'PERMANENT: ';
+  const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+  const safeError = `${prefix}${message}`.slice(0, 500);
 
   if (!shouldUsePostgres()) {
     await transaction((database) => {
       const item = database.googleSheetSyncs.find((candidate) => candidate.id === syncId);
-      if (!item) return;
+      if (!item || item.status !== 'processing') return;
       item.status = 'failed';
       item.lastError = safeError;
       item.updatedAt = now;
@@ -3523,9 +3761,66 @@ export async function failGoogleSheetSync(syncId: string, error: unknown): Promi
 
   await ensurePostgresReady();
   await requirePool().query(
-    `update ${table.googleSheetSyncs} set status = 'failed', last_error = $1, updated_at = $2 where id = $3`,
+    `update ${table.googleSheetSyncs} set status = 'failed', last_error = $1, updated_at = $2 where id = $3 and status = 'processing'`,
     [safeError, now, syncId],
   );
+}
+
+function googleSheetRetryDelayMs(attempts: number) {
+  return Math.min(30 * 60_000, 30_000 * (2 ** Math.max(attempts - 1, 0)));
+}
+
+export async function listClaimableGoogleSheetSyncs(limit = 10): Promise<GoogleSheetSyncRecord[]> {
+  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 50);
+  const now = Date.now();
+  const leaseExpiredAt = new Date(now - GOOGLE_SHEET_SYNC_LEASE_MS).toISOString();
+
+  if (!shouldUsePostgres()) {
+    return (await snapshot()).googleSheetSyncs
+      .filter((item) => {
+        const lastAttempt = item.lastAttemptAt ? new Date(item.lastAttemptAt).getTime() : 0;
+        if (item.status === 'processing') return lastAttempt > 0 && lastAttempt <= now - GOOGLE_SHEET_SYNC_LEASE_MS;
+        if (item.status === 'pending') {
+          return item.lastError !== GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE
+            || lastAttempt <= now - GOOGLE_SHEET_SYNC_LEASE_MS;
+        }
+        if (item.status !== 'failed' || item.lastError?.startsWith('PERMANENT:')) return false;
+        return item.attempts < GOOGLE_SHEET_SYNC_MAX_ATTEMPTS
+          && lastAttempt <= now - googleSheetRetryDelayMs(item.attempts);
+      })
+      .sort((a, b) => {
+        const priority = (item: GoogleSheetSyncRecord) => item.status === 'processing' ? 0 : item.status === 'pending' ? 1 : 2;
+        return priority(a) - priority(b) || a.updatedAt.localeCompare(b.updatedAt);
+      })
+      .slice(0, boundedLimit);
+  }
+
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts,
+            last_attempt_at, synchronized_at, last_error, created_at, updated_at
+     from ${table.googleSheetSyncs}
+     where
+       (status = 'processing' and last_attempt_at::timestamptz <= $1::timestamptz)
+       or (status = 'pending' and not (
+         coalesce(last_error, '') = $2 and last_attempt_at::timestamptz > $1::timestamptz
+       ))
+       or (status = 'failed'
+         and attempts < $3
+         and coalesce(last_error, '') not like 'PERMANENT:%'
+         and (
+           last_attempt_at is null
+           or last_attempt_at::timestamptz <= now() - make_interval(
+             secs => least(1800, (30 * power(2, greatest(attempts - 1, 0)))::int)
+           )
+         )
+       )
+     order by case status when 'processing' then 0 when 'pending' then 1 else 2 end,
+              updated_at asc
+     limit $4`,
+    [leaseExpiredAt, GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE, GOOGLE_SHEET_SYNC_MAX_ATTEMPTS, boundedLimit],
+  );
+  return result.rows.map(mapGoogleSheetSyncRow);
 }
 
 export function getDatabaseConfigurationIssue() {
@@ -3766,9 +4061,9 @@ export async function failMetaIntegrationEventInPostgres(input: {
   const errorCode = /^[A-Z0-9_-]{1,100}$/.test(input.errorCode) ? input.errorCode : 'META_UNKNOWN_ERROR';
   await requirePool().query(
     `update ${table.integrationEvents}
-     set status='failed',next_attempt_at=$1,last_error=$2,response_code=$3,events_received=null,updated_at=$4
-     where id=$5 and status='processing'`,
-    [input.retryAt, errorCode, input.responseCode, now, input.id],
+     set status=$1,next_attempt_at=$2,last_error=$3,response_code=$4,events_received=null,updated_at=$5
+     where id=$6 and status='processing'`,
+    [input.retryAt ? 'failed' : 'dead', input.retryAt, errorCode, input.responseCode, now, input.id],
   );
 }
 
@@ -3811,20 +4106,18 @@ export async function getMetaRegistrationSnapshotInPostgres(registrationId: stri
   const result = await requirePool().query(
     `select registration.id,registration.status,registration.amount_cents,registration.created_at,
             registration.paid_at,registration.confirmed_at,registration.payload,
-            registration.marketing_consent,registration.marketing_consent_updated_at,
+            registration.marketing_consent,registration.marketing_consent_updated_at,registration.meta_context,
             event.id event_id,event.name event_name,
             payment.status payment_status,payment.amount_cents payment_amount_cents,payment.paid_at payment_paid_at,
-            context.client_context,context.event_source_url
+            checkout.received_at checkout_created_at
      from ${table.registrations} registration
      join ${table.events} event on event.id=registration.event_id
      left join ${table.payments} payment on payment.registration_id=registration.id
      left join lateral (
-       select client_context,event_source_url
-       from ${table.integrationEvents}
-       where provider='meta' and entity_id=registration.id and client_context <> '{}'::jsonb
-       order by created_at asc
-       limit 1
-     ) context on true
+       select received_at from ${table.paymentEvents}
+       where payment_id=payment.id and event_type='infinitepay.checkout_created'
+       order by received_at asc limit 1
+     ) checkout on true
      where registration.id=$1
      limit 1`,
     [registrationId],
@@ -3845,8 +4138,9 @@ export async function getMetaRegistrationSnapshotInPostgres(registrationId: stri
     marketingConsentUpdatedAt: row.marketing_consent_updated_at ? String(row.marketing_consent_updated_at) : null,
     eventId: String(row.event_id),
     eventName: String(row.event_name),
-    clientContext: (row.client_context || {}) as MetaUserData,
-    eventSourceUrl: row.event_source_url ? String(row.event_source_url) : null,
+    clientContext: (row.meta_context || {}) as MetaUserData,
+    eventSourceUrl: typeof row.meta_context?.event_source_url === 'string' ? row.meta_context.event_source_url : null,
+    checkoutCreatedAt: row.checkout_created_at ? String(row.checkout_created_at) : null,
   };
 }
 
@@ -3858,6 +4152,7 @@ export async function listPaidRegistrationsMissingMetaPurchaseInPostgres(limit =
      join ${table.payments} payment on payment.registration_id=registration.id
      where registration.status='paid' and payment.status='paid'
        and registration.marketing_consent=true
+       and ${META_RECONCILIATION_CONTEXT_SQL}
        and registration.marketing_consent_updated_at is not null
        and registration.marketing_consent_updated_at::timestamptz
          <= coalesce(payment.paid_at,registration.paid_at,registration.confirmed_at)::timestamptz
@@ -3873,6 +4168,53 @@ export async function listPaidRegistrationsMissingMetaPurchaseInPostgres(limit =
     [Math.max(1, Math.min(limit, 100))],
   );
   return result.rows.map((row) => String(row.id));
+}
+
+export async function listRegistrationsMissingMetaLifecycleEventsInPostgres(limit = 20) {
+  await ensurePostgresReady();
+  const safeLimit = Math.max(1, Math.min(limit, 100));
+  const result = await requirePool().query(
+    `with missing as (
+       select registration.id registration_id,'CompleteRegistration' event_name,registration.created_at event_at
+       from ${table.registrations} registration
+       where registration.marketing_consent=true
+         and ${META_RECONCILIATION_CONTEXT_SQL}
+         and registration.marketing_consent_updated_at is not null
+         and registration.marketing_consent_updated_at::timestamptz <= registration.created_at::timestamptz
+         and registration.created_at::timestamptz >= now() - interval '7 days'
+         and not exists (
+           select 1 from ${table.integrationEvents} integration
+           where integration.provider='meta' and integration.event_name='CompleteRegistration'
+             and integration.event_id='complete_registration_' || registration.id
+         )
+       union all
+       select registration.id,'InitiateCheckout',checkout.received_at
+       from ${table.registrations} registration
+       join ${table.payments} payment on payment.registration_id=registration.id
+       join lateral (
+         select received_at from ${table.paymentEvents}
+         where payment_id=payment.id and event_type='infinitepay.checkout_created'
+         order by received_at asc limit 1
+       ) checkout on true
+       where registration.marketing_consent=true
+         and ${META_RECONCILIATION_CONTEXT_SQL}
+         and registration.marketing_consent_updated_at is not null
+         and registration.marketing_consent_updated_at::timestamptz <= checkout.received_at::timestamptz
+         and checkout.received_at::timestamptz >= now() - interval '7 days'
+         and not exists (
+           select 1 from ${table.integrationEvents} integration
+           where integration.provider='meta' and integration.event_name='InitiateCheckout'
+             and integration.event_id='initiate_checkout_' || registration.id
+         )
+     )
+     select registration_id,event_name,event_at from missing order by event_at asc limit $1`,
+    [safeLimit],
+  );
+  return result.rows.map((row) => ({
+    registrationId: String(row.registration_id),
+    eventName: row.event_name as 'CompleteRegistration' | 'InitiateCheckout',
+    eventAt: String(row.event_at),
+  }));
 }
 
 export async function updateMetaMarketingConsentInPostgres(
@@ -3891,6 +4233,7 @@ export async function updateMetaMarketingConsentInPostgres(
       `update ${table.registrations}
        set marketing_consent=$1,
            marketing_consent_updated_at=$2,
+           meta_context=case when $1 then meta_context else '{}'::jsonb end,
            payload=jsonb_set(
              payload,
              '{meta}',
@@ -3906,7 +4249,7 @@ export async function updateMetaMarketingConsentInPostgres(
       const matchedIds = registrations.rows.map((row) => String(row.id));
       const blocked = await client.query(
         `update ${table.integrationEvents}
-         set status='failed',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
+         set status='dead',next_attempt_at=null,last_error='MARKETING_CONSENT_REVOKED',updated_at=$1
          where provider='meta'
            and entity_id=any($2::text[])
            and status in ('pending','failed')`,
@@ -3949,7 +4292,21 @@ export async function cleanupMetaClientContextInPostgres() {
        )`,
     [now],
   );
-  return result.rowCount || 0;
+  const registrations = await requirePool().query(
+    `update ${table.registrations} registration
+     set meta_context='{}'::jsonb,updated_at=registration.updated_at
+     where meta_context <> '{}'::jsonb
+       and (
+         marketing_consent=false
+         or created_at::timestamptz < now() - interval '7 days'
+         or exists (
+           select 1 from ${table.integrationEvents} purchase
+           where purchase.entity_id=registration.id and purchase.provider='meta'
+             and purchase.event_name='Purchase' and purchase.status='sent'
+         )
+       )`,
+  );
+  return (result.rowCount || 0) + (registrations.rowCount || 0);
 }
 
 export async function getMetaIntegrationStatusInPostgres() {
@@ -3957,13 +4314,15 @@ export async function getMetaIntegrationStatusInPostgres() {
   const result = await requirePool().query(
     `select
        max(sent_at) filter (where status='sent') last_successful_event_at,
-       count(*) filter (where status='failed' and updated_at::timestamptz >= now() - interval '24 hours')::int recent_failures,
-       count(*) filter (where status='pending')::int pending_events
+       count(*) filter (where status in ('failed','dead') and updated_at::timestamptz >= now() - interval '24 hours')::int recent_failures,
+       count(*) filter (where status='pending')::int pending_events,
+       count(*) filter (where status='dead')::int dead_events
      from ${table.integrationEvents}`,
   );
   return {
     lastSuccessfulEventAt: result.rows[0]?.last_successful_event_at || null,
     recentFailures: Number(result.rows[0]?.recent_failures || 0),
     pendingEvents: Number(result.rows[0]?.pending_events || 0),
+    deadEvents: Number(result.rows[0]?.dead_events || 0),
   };
 }

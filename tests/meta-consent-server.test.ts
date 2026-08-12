@@ -7,7 +7,7 @@ import {
   signMetaConsentSession,
   verifyMetaConsentSession,
 } from '../server/meta-consent-session';
-import { canQueueMetaPurchase } from '../server/meta-events';
+import { canQueueMetaPurchase, canTrackMetaBrowserPurchase } from '../server/meta-events';
 
 const secret = 'meta-consent-test-secret-with-at-least-32-characters';
 const registrationA = '123e4567-e89b-42d3-a456-426614174000';
@@ -60,6 +60,7 @@ test('revocation blocks unsent events and leaves sent events intact', () => {
   const updateEnd = database.indexOf('export async function cleanupMetaClientContextInPostgres', updateStart);
   const updateBlock = database.slice(updateStart, updateEnd);
   assert.match(updateBlock, /status in \('pending','failed'\)/);
+  assert.match(updateBlock, /set status='dead'/);
   assert.match(updateBlock, /last_error='MARKETING_CONSENT_REVOKED'/);
   assert.doesNotMatch(updateBlock, /status in \([^)]*sent/);
   assert.doesNotMatch(updateBlock, /delete from/);
@@ -123,7 +124,17 @@ test('browser Purchase requires server-confirmed temporal eligibility', () => {
   const successPage = readFileSync('src/pages/Success.tsx', 'utf8');
   const server = readFileSync('server/index.ts', 'utf8');
   assert.match(successPage, /registration\.metaPurchaseEligible/);
-  assert.match(server, /metaPurchaseEligible: canQueueMetaPurchase/);
+  assert.match(server, /metaPurchaseEligible: canTrackMetaBrowserPurchase/);
+});
+
+test('browser Purchase is restricted to the bound browser and a 24 hour window', () => {
+  const paidAt = '2026-08-03T10:00:00.000Z';
+  const consentAt = '2026-08-03T09:00:00.000Z';
+  const soon = Date.parse(paidAt) + 60_000;
+  assert.equal(canTrackMetaBrowserPurchase('paid', 'paid', paidAt, true, consentAt, true, soon), true);
+  assert.equal(canTrackMetaBrowserPurchase('paid', 'paid', paidAt, true, consentAt, false, soon), false);
+  assert.equal(canTrackMetaBrowserPurchase('paid', 'paid', paidAt, true, consentAt, true, soon + 25 * 60 * 60 * 1000), false);
+  assert.equal(canTrackMetaBrowserPurchase('pending_payment', 'pending_payment', null, true, consentAt, true, soon), false);
 });
 
 test('browser synchronizes consent without accepting a registration id', () => {
@@ -131,7 +142,7 @@ test('browser synchronizes consent without accepting a registration id', () => {
   const api = readFileSync('src/lib/api.ts', 'utf8');
   const server = readFileSync('server/index.ts', 'utf8');
   const vercelRoute = readFileSync('api/privacy/marketing-consent.ts', 'utf8');
-  assert.match(app, /updateMarketingConsent\(consent\.preferences\.marketing\)/);
+  assert.match(app, /synchronizeMarketingConsent\(consent\.preferences\.marketing/);
   assert.match(api, /JSON\.stringify\(\{ marketing \}\)/);
   assert.match(server, /HttpOnly; SameSite=Strict/);
   assert.match(server, /parseMarketingConsentDecision\(body\)/);

@@ -17,6 +17,7 @@ import type {
   AdminAlertsResponse,
   AdminMonitoringResponse,
   AvailabilityResponse,
+  CouponValidationResponse,
   CreateRegistrationResponse,
   PartnershipLeadRequest,
   PartnershipLeadResponse,
@@ -281,6 +282,15 @@ export function createRegistration(data: RegistrationFormData) {
     body: JSON.stringify(data),
     timeoutMs: REGISTRATION_REQUEST_TIMEOUT_MS,
     retry: false,
+    sensitive: true,
+  });
+}
+
+export function validateCoupon(code: string, partnerBenefitRequested = false) {
+  return apiFetch<CouponValidationResponse>('/api/coupons/validate', {
+    method: 'POST',
+    body: JSON.stringify({ code, partnerBenefitRequested }),
+    retry: false,
   });
 }
 
@@ -357,7 +367,10 @@ async function adminFetch<ResponsePayload>(path: string, adminKey: string, init:
   return apiFetch<ResponsePayload>(path, {
     ...init,
     headers,
-    retry: init.retry ?? true,
+    // Admin screens already poll and expose an explicit refresh action.
+    // Retrying each 5xx four times amplifies a saturated database, and retrying
+    // mutations can repeat administrative actions.
+    retry: init.retry ?? false,
     sensitive: true,
   });
 }

@@ -6,6 +6,18 @@ export type Gender = 'female' | 'male';
 
 export type AdminGender = Gender | '';
 
+export type MarketingAttributionTouch = {
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  term?: string;
+  content?: string;
+  fbclid?: string;
+  referrer?: string;
+  landingPage?: string;
+  capturedAt?: string;
+};
+
 export type RegistrationFormData = {
   fullName: string;
   email: string;
@@ -25,10 +37,12 @@ export type RegistrationFormData = {
   privacyAccepted: boolean;
   partnerBenefitRequested?: boolean;
   checkoutRequested?: boolean;
+  couponCode?: string;
   meta?: {
     initiatedAt?: number;
     fbp?: string;
     fbc?: string;
+    fbclid?: string;
     sourceUrl?: string;
     marketingConsent?: boolean;
   };
@@ -43,6 +57,9 @@ export type RegistrationFormData = {
     utmCampaign?: string;
     referrer?: string;
     landingPage?: string;
+    fbclid?: string;
+    firstTouch?: MarketingAttributionTouch;
+    lastTouch?: MarketingAttributionTouch;
   };
 };
 
@@ -67,6 +84,18 @@ export type RegistrationPartnerPricing = {
   finalPriceCents: number;
 };
 
+export type RegistrationCouponPricing = {
+  code: string;
+  discountPercentage: number;
+  discountAmountCents: number;
+  originalPriceCents: number;
+  finalPriceCents: number;
+  appliedAt?: string | null;
+  usedAt?: string | null;
+};
+
+export type CouponValidationResponse = RegistrationCouponPricing;
+
 export type CreateRegistrationResponse = {
   success: boolean;
   registrationId: string;
@@ -82,6 +111,7 @@ export type CreateRegistrationResponse = {
   message: string;
   expiresAt?: string | null;
   partner?: RegistrationPartnerPricing | null;
+  coupon?: RegistrationCouponPricing | null;
 };
 
 export type RegistrationStatusResponse = {
@@ -97,6 +127,7 @@ export type RegistrationStatusResponse = {
   paidAt?: string | null;
   confirmedAt?: string | null;
   partner?: RegistrationPartnerPricing | null;
+  coupon?: RegistrationCouponPricing | null;
   gatewayStatus?: string | null;
   gatewayTransactionId?: string | null;
   confirmationEmailSentAt?: string | null;
@@ -216,6 +247,9 @@ export type AdminRegistration = {
   discountAmountCents?: number;
   originalPriceCents?: number;
   finalPriceCents?: number;
+  couponCode?: string | null;
+  couponAppliedAt?: string | null;
+  couponUsedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   expiresAt: string | null;
@@ -237,7 +271,44 @@ export type AdminRegistrationsResponse = {
   registrations: AdminRegistration[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
-export type AdminGoogleSheetsStatus = { enabled: boolean; configured: boolean; configurationIssue: string | null; counts: { pending: number; processing: number; synchronized: number; failed: number }; lastSynchronizedAt: string | null };
+export type RemarketingCampaignMetrics = {
+  campaign: 'whatsapp_remarketing_volta10';
+  source: 'whatsapp';
+  eligible: number;
+  currentlyEligible: number;
+  messagesSent: number;
+  checkoutReturns: number;
+  couponApplied: number;
+  paymentsConfirmed: number;
+  recoveredRevenueCents: number;
+  totalDiscountCents: number;
+  conversionRate: number;
+};
+export type AdminGoogleSheetsStatus = {
+  enabled: boolean;
+  configured: boolean;
+  configurationIssue: string | null;
+  counts: { pending: number; processing: number; synchronized: number; failed: number };
+  lastSynchronizedAt: string | null;
+  backlog?: {
+    oldestPendingAt: string | null;
+    oldestProcessingAt: string | null;
+    staleProcessing: number;
+    permanentFailures: number;
+    retryableFailures: number;
+  };
+  remarketing?: {
+    totalLeads: number;
+    eligible: number;
+    suppressedPaid: number;
+    suppressedTest: number;
+    suppressedAdminCancelled: number;
+    failedSyncs: number;
+    backlog: number;
+    oldestEventAt: string | null;
+    volta10Campaign?: RemarketingCampaignMetrics;
+  };
+};
 export type AdminReconciliationDashboard = {
   runs: Array<{
     id: string; triggerSource: string; mode: 'dry_run' | 'apply'; status: string;

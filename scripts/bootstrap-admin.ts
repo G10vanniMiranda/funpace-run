@@ -46,7 +46,7 @@ async function main() {
     });
   }, { scope: 'admin-auth' });
 
-  console.log(`Admin user ensured in database: ${email}`);
+  console.log(JSON.stringify({ message: 'admin_bootstrap_ensured' }));
 }
 
 main().catch((error) => {

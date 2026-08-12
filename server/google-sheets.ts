@@ -1,10 +1,12 @@
 import { createSign } from 'node:crypto';
 import { isGoogleSheetsAllowed } from './environment.js';
+import { buildRemarketingProjections, type RemarketingProjection } from './remarketing.js';
 import {
   claimGoogleSheetSync,
   completeGoogleSheetSync,
   enqueueGoogleSheetSync,
   failGoogleSheetSync,
+  listClaimableGoogleSheetSyncs,
   snapshot,
   synchronizeOperationalAlertsInPostgres,
   listOperationalAlertsInPostgres,
@@ -19,6 +21,7 @@ import {
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+export const GOOGLE_SHEETS_REQUEST_TIMEOUT_MS = 20_000;
 
 export const GOOGLE_SHEET_TABS = {
   registrations: 'Inscrições',
@@ -29,6 +32,7 @@ export const GOOGLE_SHEET_TABS = {
   alerts: 'Alertas',
   partnerships: 'Patrocínio',
   emails: 'Emails enviados',
+  remarketing: 'Remarketing',
 } as const;
 
 export const GOOGLE_SHEET_HEADERS = {
@@ -41,10 +45,12 @@ export const GOOGLE_SHEET_HEADERS = {
   alerts: ['Gravidade', 'Tipo', 'Título', 'Status', 'Origem', 'Responsável', 'Horário', 'ID'],
   partnerships: ['Empresa', 'Contato', 'Cargo', 'E-mail', 'Status', 'Origem', 'Criado em', 'ID'],
   emails: ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro'],
+  remarketing: ['person_key', 'registration_id_reference', 'full_name', 'whatsapp', 'email', 'cpf_masked', 'first_registration_at', 'last_registration_at', 'last_payment_attempt_at', 'amount', 'lot', 'distance', 'registration_status', 'payment_status', 'attempt_count', 'checkout_count', 'partner_or_origin', 'remarketing_status', 'eligible', 'suppression_reason', 'last_payment_check_at', 'updated_at'],
 } as const;
 
 export type GoogleSheetsConfig = {
   enabled: boolean;
+  remarketingEnabled: boolean;
   spreadsheetId: string;
   serviceAccountEmail: string;
   privateKey: string;
@@ -89,6 +95,7 @@ export function normalizeGooglePrivateKey(value: string | undefined) {
 
 export function getGoogleSheetsConfig(environment: NodeJS.ProcessEnv = process.env): GoogleSheetsConfig {
   const enabled = isGoogleSheetsAllowed(environment);
+  const remarketingEnabled = enabled && environment.GOOGLE_SHEETS_REMARKETING_ENABLED === 'true';
   const spreadsheetId = (environment.GOOGLE_SHEETS_SPREADSHEET_ID || '').trim();
   const serviceAccountEmail = (environment.GOOGLE_SERVICE_ACCOUNT_EMAIL || '').trim();
   const privateKey = normalizeGooglePrivateKey(environment.GOOGLE_PRIVATE_KEY);
@@ -100,6 +107,7 @@ export function getGoogleSheetsConfig(environment: NodeJS.ProcessEnv = process.e
 
   return {
     enabled,
+    remarketingEnabled,
     spreadsheetId,
     serviceAccountEmail,
     privateKey,
@@ -189,6 +197,33 @@ export function buildCheckInSheetRow(context: CheckInSheetContext): SheetCell[] 
   ];
 }
 
+export function buildRemarketingSheetRow(projection: RemarketingProjection): SheetCell[] {
+  return [
+    projection.personKey,
+    projection.registrationIdReference,
+    sanitizeSheetText(projection.fullName),
+    sanitizeSheetText(projection.whatsapp),
+    sanitizeSheetText(projection.email),
+    projection.cpfMasked,
+    projection.firstRegistrationAt,
+    projection.lastRegistrationAt,
+    projection.lastPaymentAttemptAt,
+    projection.amountCents / 100,
+    sanitizeSheetText(projection.lot),
+    sanitizeSheetText(projection.distance),
+    projection.registrationStatus,
+    projection.paymentStatus,
+    projection.attemptCount,
+    projection.checkoutCount,
+    sanitizeSheetText(projection.partnerOrOrigin),
+    projection.remarketingStatus,
+    projection.eligible,
+    projection.suppressionReason,
+    projection.lastPaymentCheckAt,
+    projection.updatedAt,
+  ];
+}
+
 export function createServiceAccountAssertion(config: GoogleSheetsConfig, nowSeconds = Math.floor(Date.now() / 1000)) {
   if (!isGoogleSheetsConfigured(config)) {
     throw new Error(config.configurationIssue || 'Google Sheets não está habilitado.');
@@ -231,9 +266,9 @@ export async function getGoogleSheetsAccessToken(
       grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
       assertion: createServiceAccountAssertion(config),
     }),
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(GOOGLE_SHEETS_REQUEST_TIMEOUT_MS),
   });
-  const payload = await response.json() as { access_token?: string; expires_in?: number; error?: string };
+  const payload = (await response.json().catch(() => null) || {}) as { access_token?: string; expires_in?: number; error?: string };
 
   if (!response.ok || !payload.access_token) {
     throw new Error(`Falha ao autenticar no Google Sheets (${response.status}${payload.error ? `: ${payload.error}` : ''}).`);
@@ -274,6 +309,27 @@ export class GoogleSheetsApiError extends Error {
   }
 }
 
+export class GoogleSheetSyncFailure extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+    this.name = 'GoogleSheetSyncFailure';
+  }
+}
+
+export function classifyGoogleSheetSyncFailure(error: unknown) {
+  if (error instanceof GoogleSheetSyncFailure) return error;
+  if (error instanceof GoogleSheetsApiError) {
+    const retryable = error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+    return new GoogleSheetSyncFailure(error.message, retryable);
+  }
+  const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+  const normalizedMessage = message.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+  const transient = error instanceof DOMException && error.name === 'TimeoutError'
+    || /timeout|timed out|aborted|econn|eai_again|enotfound|socket|network|temporar/i.test(normalizedMessage);
+  const permanent = /cabecalho inesperado|nao encontrad[oa]|linha invalida|chave de sincronizacao invalida|nao suportado|faltam variaveis|nao esta habilitado/i.test(normalizedMessage);
+  return new GoogleSheetSyncFailure(message, transient || !permanent);
+}
+
 function quoteSheetTitle(title: string) {
   return `'${title.replace(/'/g, "''")}'`;
 }
@@ -312,6 +368,7 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
   const accessTokenProvider = options.accessTokenProvider
     || (() => getGoogleSheetsAccessToken(config, fetchImplementation));
   const baseUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}`;
+  const keyIndexCache = new Map<string, Map<string, number>>();
 
   async function request<ResponsePayload>(
     operation: string,
@@ -330,7 +387,7 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
         ...(init.body ? { 'Content-Type': 'application/json' } : {}),
         ...init.headers,
       },
-      signal: init.signal || AbortSignal.timeout(10_000),
+      signal: init.signal || AbortSignal.timeout(GOOGLE_SHEETS_REQUEST_TIMEOUT_MS),
     });
     const payload = response.status === 204
       ? null
@@ -345,7 +402,7 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
       );
     }
 
-    return payload as ResponsePayload;
+    return (payload ?? {}) as ResponsePayload;
   }
 
   async function getValues(range: string) {
@@ -426,6 +483,7 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
 
     const title = GOOGLE_SHEET_TABS[sheetKey];
     const keyColumn = columnName(keyColumnIndex);
+    const keyIndexCacheKey = `${sheetKey}:${keyColumnIndex}`;
     let rowNumber = preferredRowNumber && preferredRowNumber >= 2 ? preferredRowNumber : null;
 
     if (rowNumber) {
@@ -435,22 +493,33 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
     }
 
     if (!rowNumber) {
-      const keysRange = `${quoteSheetTitle(title)}!${keyColumn}2:${keyColumn}`;
-      const keys = (await getValues(keysRange)).values || [];
-      const foundIndex = keys.findIndex((item) => normalizeComparableCell(item[0]) === keyValue.trim());
-      if (foundIndex >= 0) rowNumber = foundIndex + 2;
+      let keyIndex = keyIndexCache.get(keyIndexCacheKey);
+      if (!keyIndex) {
+        const keysRange = `${quoteSheetTitle(title)}!${keyColumn}2:${keyColumn}`;
+        const keys = (await getValues(keysRange)).values || [];
+        keyIndex = new Map<string, number>();
+        keys.forEach((item, index) => {
+          const key = normalizeComparableCell(item[0]);
+          if (key && !keyIndex!.has(key)) keyIndex!.set(key, index + 2);
+        });
+        keyIndexCache.set(keyIndexCacheKey, keyIndex);
+      }
+      rowNumber = keyIndex.get(keyValue.trim()) || null;
     }
 
     if (rowNumber) {
       const rowRange = `${quoteSheetTitle(title)}!A${rowNumber}:${columnName(headers.length - 1)}${rowNumber}`;
       await updateValues(rowRange, [row]);
+      keyIndexCache.get(keyIndexCacheKey)?.set(keyValue.trim(), rowNumber);
       return { action: 'updated' as const, rowNumber };
     }
 
     const appended = await appendValues(`${quoteSheetTitle(title)}!A:${columnName(headers.length - 1)}`, [row]);
     const updatedRange = appended.updates?.updatedRange || appended.updatedRange;
     const match = updatedRange?.match(/![A-Z]+(\d+)(?::|$)/);
-    return { action: 'created' as const, rowNumber: match ? Number(match[1]) : null };
+    const appendedRowNumber = match ? Number(match[1]) : null;
+    if (appendedRowNumber) keyIndexCache.get(keyIndexCacheKey)?.set(keyValue.trim(), appendedRowNumber);
+    return { action: 'created' as const, rowNumber: appendedRowNumber };
   }
 
   async function replaceRows(sheetKey: GoogleSheetKey, rows: SheetCell[][]) {
@@ -591,6 +660,12 @@ export async function executeGoogleSheetSyncTask(
     return client.upsertRow('alerts', row, 7, alert.id, task.rowNumber);
   }
 
+  if (task.entityType === 'remarketing') {
+    const projection = buildRemarketingProjections(database).find((item) => item.personKey === task.entityId);
+    if (!projection) throw new Error(`Pessoa técnica ${task.entityId} não encontrada para Remarketing.`);
+    return client.upsertRow('remarketing', buildRemarketingSheetRow(projection), 0, projection.personKey, task.rowNumber);
+  }
+
   throw new Error(`Tipo de sincronização não suportado: ${task.entityType}.`);
 }
 
@@ -601,6 +676,7 @@ type ProcessGoogleSheetSyncDependencies = {
   claim?: typeof claimGoogleSheetSync;
   complete?: typeof completeGoogleSheetSync;
   fail?: typeof failGoogleSheetSync;
+  synchronizeAlerts?: typeof synchronizeOperationalAlertsInPostgres;
 };
 
 export async function queueRegistrationGoogleSheetSync(
@@ -647,6 +723,7 @@ export async function queueConfirmedPaymentGoogleSheetSync(
   dependencies: {
     config?: GoogleSheetsConfig;
     enqueue?: typeof enqueueGoogleSheetSync;
+    loadDatabase?: () => Promise<Database>;
   } = {},
 ) {
   const config = dependencies.config || getGoogleSheetsConfig();
@@ -684,6 +761,13 @@ export async function queueConfirmedPaymentGoogleSheetSync(
       }));
     }
   }
+
+  const remarketingTask = await queueRemarketingGoogleSheetSyncForRegistration(registrationId, {
+    config,
+    enqueue,
+    loadDatabase: dependencies.loadDatabase,
+  });
+  if (remarketingTask) queued.push(remarketingTask);
 
   return queued;
 }
@@ -737,6 +821,59 @@ export function queueLotSummaryGoogleSheetSync(dependencies: { config?: GoogleSh
 export function queuePartnershipGoogleSheetSync(partnershipId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'partnership', entityId: partnershipId, sheetName: 'partnerships', operation: 'upsert' }, dependencies); }
 export function queueEmailGoogleSheetSync(registrationId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'email', entityId: registrationId, sheetName: 'emails', operation: 'upsert' }, dependencies); }
 
+export async function queueRemarketingGoogleSheetSyncForRegistration(
+  registrationId: string,
+  dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync; loadDatabase?: () => Promise<Database> } = {},
+) {
+  const config = dependencies.config || getGoogleSheetsConfig();
+  if (!config.remarketingEnabled || config.configurationIssue) return null;
+  try {
+    const database = await (dependencies.loadDatabase || snapshot)();
+    const projection = buildRemarketingProjections(database).find((item) => item.registrationIds.includes(registrationId));
+    if (!projection) return null;
+    return await (dependencies.enqueue || enqueueGoogleSheetSync)({
+      entityType: 'remarketing', entityId: projection.personKey, sheetName: 'remarketing', operation: 'upsert',
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      at: new Date().toISOString(), message: 'remarketing_sync_queue_failed', registrationId,
+      error: error instanceof Error ? error.message.slice(0, 300) : 'Unknown error',
+    }));
+    return null;
+  }
+}
+
+export async function reconcileRemarketingGoogleSheetSyncs(
+  limit = 25,
+  dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync; loadDatabase?: () => Promise<Database> } = {},
+) {
+  const config = dependencies.config || getGoogleSheetsConfig();
+  if (!config.remarketingEnabled || config.configurationIssue) {
+    return { candidates: 0, pendingReconciliation: 0, queued: 0, unchanged: 0, rolloutEnabled: false };
+  }
+  const database = await (dependencies.loadDatabase || snapshot)();
+  const projections = buildRemarketingProjections(database);
+  const existingByPerson = new Map(database.googleSheetSyncs
+    .filter((task) => task.entityType === 'remarketing')
+    .map((task) => [task.entityId, task]));
+  const stale = projections.filter((projection) => {
+    const task = existingByPerson.get(projection.personKey);
+    if (!task) return true;
+    if (task.status !== 'synchronized') return false;
+    return Boolean(task.synchronizedAt && task.synchronizedAt < projection.updatedAt);
+  }).sort((left, right) => {
+    const paidPriority = Number(right.suppressionReason === 'PAID') - Number(left.suppressionReason === 'PAID');
+    return paidPriority || right.updatedAt.localeCompare(left.updatedAt) || left.personKey.localeCompare(right.personKey);
+  });
+  const selected = stale.slice(0, Math.min(Math.max(Math.trunc(limit), 1), 50));
+  for (const projection of selected) {
+    await (dependencies.enqueue || enqueueGoogleSheetSync)({
+      entityType: 'remarketing', entityId: projection.personKey, sheetName: 'remarketing', operation: 'upsert',
+    });
+  }
+  return { candidates: projections.length, pendingReconciliation: stale.length, queued: selected.length, unchanged: projections.length - stale.length, rolloutEnabled: true };
+}
+
 export async function processQueuedGoogleSheetSyncs(tasks: ReadonlyArray<Pick<GoogleSheetSyncRecord, 'id'>>) {
   const results = [];
   for (const task of tasks) {
@@ -768,7 +905,7 @@ export async function processGoogleSheetSync(
       syncId,
       error: error instanceof Error ? error.message.slice(0, 500) : 'Unknown error',
     }));
-    await synchronizeOperationalAlertsInPostgres([{
+    await (dependencies.synchronizeAlerts || synchronizeOperationalAlertsInPostgres)([{
       dedupeKey: `google-sheets:claim:${syncId}`, severity: 'warning', alertType: 'google_sheets_error',
       title: 'Erro no Google Sheets', message: error instanceof Error ? error.message.slice(0, 500) : 'Falha na sincronização.',
       entityType: 'google_sheet_sync', entityId: syncId, payload: { stage: 'claim' },
@@ -808,8 +945,9 @@ export async function processGoogleSheetSync(
     }));
     return { status: 'synchronized' as const, ...result };
   } catch (error) {
+    const failure = classifyGoogleSheetSyncFailure(error);
     try {
-      await fail(task.id, error);
+      await fail(task.id, failure);
     } catch (persistenceError) {
       console.error(JSON.stringify({
         at: new Date().toISOString(),
@@ -825,9 +963,56 @@ export async function processGoogleSheetSync(
       entityType: task.entityType,
       entityId: task.entityId,
       sheetName: task.sheetName,
-      error: error instanceof Error ? error.message.slice(0, 500) : 'Unknown error',
+      error: failure.message.slice(0, 500),
+      retryable: failure.retryable,
       elapsedMs: Date.now() - startedAt,
     }));
-    return { status: 'failed' as const };
+    return { status: 'failed' as const, retryable: failure.retryable };
   }
+}
+
+type ProcessGoogleSheetSyncBacklogDependencies = ProcessGoogleSheetSyncDependencies & {
+  list?: typeof listClaimableGoogleSheetSyncs;
+};
+
+export async function processGoogleSheetSyncBacklog(
+  limit = 10,
+  dependencies: ProcessGoogleSheetSyncBacklogDependencies = {},
+) {
+  const config = dependencies.config || getGoogleSheetsConfig();
+  if (!config.enabled || config.configurationIssue) {
+    return {
+      selected: 0, synchronized: 0, failed: 0, skipped: 0, recoveredStale: 0,
+      configurationIssue: config.configurationIssue || (config.enabled ? null : 'disabled'),
+    };
+  }
+
+  const candidates = await (dependencies.list || listClaimableGoogleSheetSyncs)(limit);
+  if (candidates.length === 0) {
+    return { selected: 0, synchronized: 0, failed: 0, skipped: 0, recoveredStale: 0, configurationIssue: null };
+  }
+
+  const database = await (dependencies.loadDatabase || snapshot)();
+  const client = dependencies.client || createGoogleSheetsClient({ config });
+  const counts = {
+    selected: candidates.length,
+    synchronized: 0,
+    failed: 0,
+    skipped: 0,
+    recoveredStale: candidates.filter((item) => item.status === 'processing').length,
+    configurationIssue: null as string | null,
+  };
+
+  for (const candidate of candidates) {
+    const result = await processGoogleSheetSync(candidate.id, {
+      ...dependencies,
+      config,
+      client,
+      loadDatabase: async () => database,
+    });
+    if (result.status === 'synchronized') counts.synchronized += 1;
+    else if (result.status === 'failed') counts.failed += 1;
+    else counts.skipped += 1;
+  }
+  return counts;
 }
