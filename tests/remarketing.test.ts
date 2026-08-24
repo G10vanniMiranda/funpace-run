@@ -229,6 +229,85 @@ test('16: incremental reconciliation advances deterministically without requeuei
   assert.equal(first.queued, 25); assert.equal(second.queued, 5); assert.equal(new Set(enqueued.map((item) => item.entityId)).size, 30);
 });
 
+test('Fase 3E: flag absent stays fail-closed and exposes observability fields (enabled/configurationIssue)', async () => {
+  const db = database([registration('flag-absent')]);
+  let enqueueCalls = 0;
+  const enqueue = async (input: any) => { enqueueCalls++; return { id: 'task', ...input, status: 'pending', rowNumber: null, attempts: 0, lastAttemptAt: null, synchronizedAt: null, lastError: null, createdAt: BASE_TIME, updatedAt: BASE_TIME }; };
+  const config = getGoogleSheetsConfig({ GOOGLE_SHEETS_ENABLED: 'true', GOOGLE_SHEETS_SPREADSHEET_ID: 'test', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'test@test.iam.gserviceaccount.com', GOOGLE_PRIVATE_KEY: 'key' });
+  const result = await reconcileRemarketingGoogleSheetSyncs(25, { config, enqueue, loadDatabase: async () => db });
+  assert.equal(result.rolloutEnabled, false);
+  assert.equal(result.queued, 0);
+  assert.equal(enqueueCalls, 0);
+  assert.equal(result.enabled, true);
+  assert.equal(result.configurationIssue, null);
+});
+
+test('Fase 3E: flag explicitly false behaves identically to absent (never a default-to-true path)', async () => {
+  const db = database([registration('flag-false')]);
+  let enqueueCalls = 0;
+  const enqueue = async (input: any) => { enqueueCalls++; return { id: 'task', ...input, status: 'pending', rowNumber: null, attempts: 0, lastAttemptAt: null, synchronizedAt: null, lastError: null, createdAt: BASE_TIME, updatedAt: BASE_TIME }; };
+  const config = getGoogleSheetsConfig({ GOOGLE_SHEETS_ENABLED: 'true', GOOGLE_SHEETS_REMARKETING_ENABLED: 'false', GOOGLE_SHEETS_SPREADSHEET_ID: 'test', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'test@test.iam.gserviceaccount.com', GOOGLE_PRIVATE_KEY: 'key' });
+  const result = await reconcileRemarketingGoogleSheetSyncs(25, { config, enqueue, loadDatabase: async () => db });
+  assert.equal(result.rolloutEnabled, false);
+  assert.equal(enqueueCalls, 0);
+});
+
+test('Fase 3E: flag true keeps the reconciler operational and exposes enabled=true, configurationIssue=null', async () => {
+  const db = database([registration('flag-true')]);
+  const enqueue = async (input: any) => ({ id: 'task', ...input, status: 'pending', rowNumber: null, attempts: 0, lastAttemptAt: null, synchronizedAt: null, lastError: null, createdAt: BASE_TIME, updatedAt: BASE_TIME });
+  const config = getGoogleSheetsConfig({ GOOGLE_SHEETS_ENABLED: 'true', GOOGLE_SHEETS_REMARKETING_ENABLED: 'true', GOOGLE_SHEETS_SPREADSHEET_ID: 'test', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'test@test.iam.gserviceaccount.com', GOOGLE_PRIVATE_KEY: 'key' });
+  const result = await reconcileRemarketingGoogleSheetSyncs(25, { config, enqueue, loadDatabase: async () => db });
+  assert.equal(result.rolloutEnabled, true);
+  assert.equal(result.queued, 1);
+  assert.equal(result.enabled, true);
+  assert.equal(result.configurationIssue, null);
+});
+
+test('Fase 3E — Caso B/C: an existing synchronized task becomes stale when the person changes after last sync, and is re-queued', async () => {
+  const item = registration('stale-person', { createdAt: BASE_TIME, updatedAt: BASE_TIME });
+  const db = database([item]);
+  const personKey = project(db)[0].personKey;
+  const syncedBeforeChange = '2026-08-01T00:00:00.000Z';
+  db.googleSheetSyncs.push({
+    id: 'existing-task', entityType: 'remarketing', entityId: personKey, sheetName: 'remarketing', operation: 'upsert',
+    status: 'synchronized', rowNumber: 3, attempts: 1, lastAttemptAt: syncedBeforeChange, synchronizedAt: syncedBeforeChange,
+    lastError: null, createdAt: syncedBeforeChange, updatedAt: syncedBeforeChange,
+  });
+  // Person's payment status changes AFTER their last remarketing sync — projection.updatedAt now postdates synchronizedAt.
+  db.registrations[0] = { ...item, status: 'expired', updatedAt: '2026-08-05T00:00:00.000Z' };
+  db.payments[0] = { ...db.payments[0], status: 'payment_failed', updatedAt: '2026-08-05T00:00:00.000Z' };
+
+  const enqueued: unknown[] = [];
+  const enqueue = async (input: any) => { enqueued.push(input); return { id: 'requeued', ...input, status: 'pending', rowNumber: null, attempts: 0, lastAttemptAt: null, synchronizedAt: null, lastError: null, createdAt: BASE_TIME, updatedAt: BASE_TIME }; };
+  const config = getGoogleSheetsConfig({ GOOGLE_SHEETS_ENABLED: 'true', GOOGLE_SHEETS_REMARKETING_ENABLED: 'true', GOOGLE_SHEETS_SPREADSHEET_ID: 'test', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'test@test.iam.gserviceaccount.com', GOOGLE_PRIVATE_KEY: 'key' });
+  const result = await reconcileRemarketingGoogleSheetSyncs(25, { config, enqueue, loadDatabase: async () => db });
+
+  assert.equal(result.pendingReconciliation, 1);
+  assert.equal(result.queued, 1);
+  assert.equal((enqueued[0] as any).entityId, personKey);
+});
+
+test('Fase 3E — control for Caso B/C: a synchronized task that stayed fresh (synchronizedAt after projection.updatedAt) is NOT re-queued', async () => {
+  const item = registration('fresh-person', { createdAt: BASE_TIME, updatedAt: BASE_TIME });
+  const db = database([item]);
+  const personKey = project(db)[0].personKey;
+  const syncedAfterEverything = '2026-08-09T00:00:00.000Z';
+  db.googleSheetSyncs.push({
+    id: 'fresh-task', entityType: 'remarketing', entityId: personKey, sheetName: 'remarketing', operation: 'upsert',
+    status: 'synchronized', rowNumber: 4, attempts: 1, lastAttemptAt: syncedAfterEverything, synchronizedAt: syncedAfterEverything,
+    lastError: null, createdAt: syncedAfterEverything, updatedAt: syncedAfterEverything,
+  });
+
+  let enqueueCalls = 0;
+  const enqueue = async (input: any) => { enqueueCalls++; return { id: 'x', ...input, status: 'pending', rowNumber: null, attempts: 0, lastAttemptAt: null, synchronizedAt: null, lastError: null, createdAt: BASE_TIME, updatedAt: BASE_TIME }; };
+  const config = getGoogleSheetsConfig({ GOOGLE_SHEETS_ENABLED: 'true', GOOGLE_SHEETS_REMARKETING_ENABLED: 'true', GOOGLE_SHEETS_SPREADSHEET_ID: 'test', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'test@test.iam.gserviceaccount.com', GOOGLE_PRIVATE_KEY: 'key' });
+  const result = await reconcileRemarketingGoogleSheetSyncs(25, { config, enqueue, loadDatabase: async () => db });
+
+  assert.equal(result.pendingReconciliation, 0);
+  assert.equal(result.queued, 0);
+  assert.equal(enqueueCalls, 0);
+});
+
 test('summary reports eligible status distribution and zero paid eligible', () => {
   const eligible = registration('summary-eligible');
   const paid = registration('summary-paid', { status: 'paid', paidAt: BASE_TIME });

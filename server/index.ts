@@ -3371,6 +3371,24 @@ async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerRespo
 
   const startedAt = Date.now();
   const remarketing = await reconcileRemarketingGoogleSheetSyncs(25);
+  if (remarketing.enabled && !remarketing.rolloutEnabled) {
+    console.warn(JSON.stringify({
+      at: new Date().toISOString(),
+      message: 'google_sheets_remarketing_disabled',
+      enabled: remarketing.enabled,
+      remarketingEnabled: remarketing.rolloutEnabled,
+      configurationIssue: remarketing.configurationIssue,
+    }));
+  } else if (remarketing.rolloutEnabled) {
+    console.log(JSON.stringify({
+      at: new Date().toISOString(),
+      message: 'google_sheets_remarketing_reconciliation',
+      candidates: remarketing.candidates,
+      pendingReconciliation: remarketing.pendingReconciliation,
+      queued: remarketing.queued,
+      unchanged: remarketing.unchanged,
+    }));
+  }
   const result = await processGoogleSheetSyncBacklog(10);
   console.log(JSON.stringify({
     at: new Date().toISOString(),
