@@ -41,6 +41,7 @@ async function seedPerson(id: string) {
 function client(upsert: (...args: any[]) => Promise<any>) {
   return {
     ensureSpreadsheetStructure: async () => ({ createdSheets: [] }),
+    ensureSpreadsheetLayout: async () => ({ sheetCount: 1, requestCount: 0 }),
     getValues: async () => ({}), updateValues: async () => ({}), appendValues: async () => ({}), clearValues: async () => undefined,
     upsertRow: upsert, replaceRows: async () => ({ rowCount: 0 }),
   };

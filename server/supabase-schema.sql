@@ -110,9 +110,9 @@ create table if not exists "run-payment-events" (
 
 create table if not exists "run-google-sheet-sync" (
   id text primary key,
-  entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'remarketing')),
+  entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'remarketing', 'confirmed_payments_projection')),
   entity_id text not null,
-  sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in', 'lots', 'alerts', 'partnerships', 'emails', 'remarketing')),
+  sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in', 'lots', 'alerts', 'partnerships', 'emails', 'remarketing', 'confirmed_payments')),
   operation text not null check (operation in ('upsert', 'replace')),
   status text not null check (status in ('pending', 'processing', 'synchronized', 'failed')),
   row_number integer,
