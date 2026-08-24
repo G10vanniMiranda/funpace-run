@@ -849,7 +849,10 @@ export async function reconcileRemarketingGoogleSheetSyncs(
 ) {
   const config = dependencies.config || getGoogleSheetsConfig();
   if (!config.remarketingEnabled || config.configurationIssue) {
-    return { candidates: 0, pendingReconciliation: 0, queued: 0, unchanged: 0, rolloutEnabled: false };
+    return {
+      candidates: 0, pendingReconciliation: 0, queued: 0, unchanged: 0, rolloutEnabled: false,
+      enabled: config.enabled, configurationIssue: config.configurationIssue,
+    };
   }
   const database = await (dependencies.loadDatabase || snapshot)();
   const projections = buildRemarketingProjections(database);
@@ -871,7 +874,10 @@ export async function reconcileRemarketingGoogleSheetSyncs(
       entityType: 'remarketing', entityId: projection.personKey, sheetName: 'remarketing', operation: 'upsert',
     });
   }
-  return { candidates: projections.length, pendingReconciliation: stale.length, queued: selected.length, unchanged: projections.length - stale.length, rolloutEnabled: true };
+  return {
+    candidates: projections.length, pendingReconciliation: stale.length, queued: selected.length, unchanged: projections.length - stale.length, rolloutEnabled: true,
+    enabled: config.enabled, configurationIssue: config.configurationIssue,
+  };
 }
 
 export async function processQueuedGoogleSheetSyncs(tasks: ReadonlyArray<Pick<GoogleSheetSyncRecord, 'id'>>) {
