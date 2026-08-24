@@ -1,6 +1,12 @@
 import { createSign } from 'node:crypto';
 import { isGoogleSheetsAllowed } from './environment.js';
 import { buildRemarketingProjections, type RemarketingProjection } from './remarketing.js';
+import { buildConfirmedPaymentsProjection, type ConfirmedPaymentProjection } from './confirmed-payments.js';
+import {
+  buildGoogleSheetLayoutRequests,
+  googleSheetsDateSerial,
+  type ActualGoogleSheetLayout,
+} from './google-sheets-layout.js';
 import {
   claimGoogleSheetSync,
   completeGoogleSheetSync,
@@ -33,6 +39,7 @@ export const GOOGLE_SHEET_TABS = {
   partnerships: 'Patrocínio',
   emails: 'Emails enviados',
   remarketing: 'Remarketing',
+  confirmed_payments: 'Pagamentos Confirmados',
 } as const;
 
 export const GOOGLE_SHEET_HEADERS = {
@@ -46,6 +53,7 @@ export const GOOGLE_SHEET_HEADERS = {
   partnerships: ['Empresa', 'Contato', 'Cargo', 'E-mail', 'Status', 'Origem', 'Criado em', 'ID'],
   emails: ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro'],
   remarketing: ['person_key', 'registration_id_reference', 'full_name', 'whatsapp', 'email', 'cpf_masked', 'first_registration_at', 'last_registration_at', 'last_payment_attempt_at', 'amount', 'lot', 'distance', 'registration_status', 'payment_status', 'attempt_count', 'checkout_count', 'partner_or_origin', 'remarketing_status', 'eligible', 'suppression_reason', 'last_payment_check_at', 'updated_at'],
+  confirmed_payments: ['Data do pagamento', 'Nome completo', 'CPF parcial', 'WhatsApp', 'E-mail', 'Distância', 'Camisa', 'Lote', 'Número de peito', 'Valor pago', 'Meio de pagamento', 'Parceiro', 'Tipo de parceiro', 'Origem de aquisição', 'Cupom', 'Desconto', 'ID da inscrição', 'ID do pagamento', 'Provider'],
 } as const;
 
 export type GoogleSheetsConfig = {
@@ -146,7 +154,7 @@ export function buildRegistrationSheetRow(context: RegistrationSheetContext): Sh
   const { registration, payment } = context;
 
   return [
-    registration.createdAt,
+    googleSheetsDateSerial(registration.createdAt) || '',
     registration.status,
     sanitizeSheetText(registration.payload.fullName),
     maskCpfForSheet(registration.payload.cpf),
@@ -167,7 +175,7 @@ export function buildPaymentSheetRow(context: PaymentSheetContext): SheetCell[] 
   const { payment } = context;
 
   return [
-    payment.paidAt || payment.updatedAt,
+    googleSheetsDateSerial(payment.paidAt || payment.updatedAt) || '',
     payment.registrationId,
     payment.id,
     payment.status,
@@ -191,7 +199,7 @@ export function buildCheckInSheetRow(context: CheckInSheetContext): SheetCell[] 
     sanitizeSheetText(context.distanceName),
     registration.payload.shirtSize,
     kitDelivery ? 'Sim' : 'Não',
-    checkIn?.checkedInAt || '',
+    checkIn?.checkedInAt ? googleSheetsDateSerial(checkIn.checkedInAt) || '' : '',
     sanitizeSheetText(checkIn?.checkedInBy || kitDelivery?.deliveredBy),
     registration.id,
   ];
@@ -205,9 +213,9 @@ export function buildRemarketingSheetRow(projection: RemarketingProjection): She
     sanitizeSheetText(projection.whatsapp),
     sanitizeSheetText(projection.email),
     projection.cpfMasked,
-    projection.firstRegistrationAt,
-    projection.lastRegistrationAt,
-    projection.lastPaymentAttemptAt,
+    googleSheetsDateSerial(projection.firstRegistrationAt) || '',
+    googleSheetsDateSerial(projection.lastRegistrationAt) || '',
+    googleSheetsDateSerial(projection.lastPaymentAttemptAt) || '',
     projection.amountCents / 100,
     sanitizeSheetText(projection.lot),
     sanitizeSheetText(projection.distance),
@@ -219,8 +227,32 @@ export function buildRemarketingSheetRow(projection: RemarketingProjection): She
     projection.remarketingStatus,
     projection.eligible,
     projection.suppressionReason,
-    projection.lastPaymentCheckAt,
-    projection.updatedAt,
+    googleSheetsDateSerial(projection.lastPaymentCheckAt) || '',
+    googleSheetsDateSerial(projection.updatedAt) || '',
+  ];
+}
+
+export function buildConfirmedPaymentSheetRow(projection: ConfirmedPaymentProjection): SheetCell[] {
+  return [
+    googleSheetsDateSerial(projection.paidAt) || '',
+    sanitizeSheetText(projection.fullName),
+    projection.cpfMasked,
+    sanitizeSheetText(projection.whatsapp),
+    sanitizeSheetText(projection.email),
+    sanitizeSheetText(projection.distance),
+    projection.shirtSize,
+    sanitizeSheetText(projection.lot),
+    sanitizeSheetText(projection.bibNumber),
+    projection.amountCents / 100,
+    sanitizeSheetText(projection.paymentMethod),
+    sanitizeSheetText(projection.partner),
+    sanitizeSheetText(projection.partnerType),
+    sanitizeSheetText(projection.acquisitionOrigin),
+    sanitizeSheetText(projection.coupon),
+    projection.discountCents / 100,
+    projection.registrationId,
+    projection.paymentId,
+    sanitizeSheetText(projection.provider),
   ];
 }
 
@@ -289,7 +321,7 @@ type GoogleSheetsClientOptions = {
 };
 
 type SpreadsheetMetadata = {
-  sheets?: Array<{ properties?: { title?: string } }>;
+  sheets?: ActualGoogleSheetLayout[];
 };
 
 type ValueRange = {
@@ -406,7 +438,20 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
   }
 
   async function getValues(range: string) {
-    return request<ValueRange>('leitura de valores', `/values/${encodeURIComponent(range)}?majorDimension=ROWS`);
+    return request<ValueRange>('leitura de valores', `/values/${encodeURIComponent(range)}?majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER`);
+  }
+
+  async function batchUpdate(requests: Array<Record<string, unknown>>) {
+    if (requests.length === 0) return { replies: [] };
+    return request<{ replies?: unknown[] }>('formatação da planilha', ':batchUpdate', {
+      method: 'POST',
+      body: JSON.stringify({ requests }),
+    });
+  }
+
+  async function getSpreadsheetMetadata() {
+    const fields = 'sheets(properties(sheetId,title,gridProperties),basicFilter,protectedRanges,conditionalFormats,bandedRanges,data(columnMetadata,rowMetadata))';
+    return request<SpreadsheetMetadata>('leitura da estrutura completa', `?includeGridData=true&fields=${encodeURIComponent(fields)}`);
   }
 
   async function updateValues(range: string, values: SheetCell[][]) {
@@ -464,6 +509,23 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
     }
 
     return { createdSheets: missingTitles };
+  }
+
+  async function ensureSpreadsheetLayout(sheetKeys: GoogleSheetKey[] = Object.keys(GOOGLE_SHEET_TABS) as GoogleSheetKey[]) {
+    const metadata = await getSpreadsheetMetadata();
+    const byTitle = new Map((metadata.sheets || []).map((sheet) => [sheet.properties?.title, sheet]));
+    const requests: Array<Record<string, unknown>> = [];
+    for (const sheetKey of sheetKeys) {
+      const sheet = byTitle.get(GOOGLE_SHEET_TABS[sheetKey]);
+      const sheetId = sheet?.properties?.sheetId;
+      if (typeof sheetId !== 'number' || !sheet) throw new Error(`Aba ${GOOGLE_SHEET_TABS[sheetKey]} não encontrada para layout.`);
+      const title = GOOGLE_SHEET_TABS[sheetKey];
+      const firstColumnValues = (await getValues(`${quoteSheetTitle(title)}!A:A`)).values || [];
+      const dataRowCount = Math.max(firstColumnValues.length - 1, 0);
+      requests.push(...buildGoogleSheetLayoutRequests(sheetKey, sheetId, sheet, config.serviceAccountEmail, dataRowCount));
+    }
+    await batchUpdate(requests);
+    return { sheetCount: sheetKeys.length, requestCount: requests.length };
   }
 
   async function upsertRow(
@@ -530,13 +592,32 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
 
     const title = GOOGLE_SHEET_TABS[sheetKey];
     const endColumn = columnName(headers.length - 1);
-    await clearValues(`${quoteSheetTitle(title)}!A:${endColumn}`);
-    await updateValues(`${quoteSheetTitle(title)}!A1:${endColumn}${rows.length + 1}`, [headers, ...rows]);
+    const fullRange = `${quoteSheetTitle(title)}!A:${endColumn}`;
+    const previousRows = (await getValues(fullRange)).values || [];
+    const replacement = [headers, ...rows];
+    const writeRange = `${quoteSheetTitle(title)}!A1:${endColumn}${replacement.length}`;
+    await updateValues(writeRange, replacement);
+
+    const written = (await getValues(writeRange)).values || [];
+    const matches = replacement.length === written.length && replacement.every((expectedRow, rowIndex) => (
+      expectedRow.every((cell, columnIndex) => normalizeComparableCell(cell) === normalizeComparableCell(written[rowIndex]?.[columnIndex]))
+    ));
+    if (!matches) {
+      throw new Error(`Verificação pós-escrita falhou na aba ${title}; a cauda anterior foi preservada.`);
+    }
+
+    if (previousRows.length > replacement.length) {
+      await clearValues(`${quoteSheetTitle(title)}!A${replacement.length + 1}:${endColumn}${previousRows.length}`);
+    }
+    keyIndexCache.clear();
     return { rowCount: rows.length };
   }
 
   return {
     ensureSpreadsheetStructure,
+    ensureSpreadsheetLayout,
+    getSpreadsheetMetadata,
+    batchUpdate,
     getValues,
     updateValues,
     appendValues,
@@ -634,7 +715,7 @@ export async function executeGoogleSheetSyncTask(
       const confirmed = related.filter((registration) => registration.status === 'paid').length;
       const reserved = related.filter((registration) => registration.status === 'pending_payment' && (!registration.expiresAt || new Date(registration.expiresAt) > now)).length;
       const occupied = confirmed + reserved;
-      return [lot.name, lot.capacity, confirmed, reserved, Math.max(lot.capacity - occupied, 0), lot.capacity ? Number((occupied / lot.capacity * 100).toFixed(1)) : 0, now.toISOString()] as SheetCell[];
+      return [lot.name, lot.capacity, confirmed, reserved, Math.max(lot.capacity - occupied, 0), lot.capacity ? Number((occupied / lot.capacity * 100).toFixed(1)) : 0, googleSheetsDateSerial(now.toISOString()) || ''] as SheetCell[];
     });
     await client.replaceRows('lots', rows); return { action: 'replaced' as const, rowNumber: null };
   }
@@ -642,21 +723,22 @@ export async function executeGoogleSheetSyncTask(
   if (task.entityType === 'partnership') {
     const lead = database.partnershipLeads.find((item) => item.id === task.entityId);
     if (!lead) throw new Error(`Parceria ${task.entityId} não encontrada.`);
-    const row: SheetCell[] = [sanitizeSheetText(lead.companyName), sanitizeSheetText(lead.contactName), sanitizeSheetText(lead.contactRole), sanitizeSheetText(lead.corporateEmail), lead.status, lead.source, lead.createdAt, lead.id];
+    const row: SheetCell[] = [sanitizeSheetText(lead.companyName), sanitizeSheetText(lead.contactName), sanitizeSheetText(lead.contactRole), sanitizeSheetText(lead.corporateEmail), lead.status, lead.source, googleSheetsDateSerial(lead.createdAt) || '', lead.id];
     return client.upsertRow('partnerships', row, 7, lead.id, task.rowNumber);
   }
 
   if (task.entityType === 'email') {
     const registration = database.registrations.find((item) => item.id === task.entityId);
     if (!registration) throw new Error(`Inscrição ${task.entityId} não encontrada.`);
-    const row: SheetCell[] = [registration.confirmationEmailSentAt || registration.confirmationEmailLastAttemptAt || registration.updatedAt, registration.id, sanitizeSheetText(registration.payload.email), registration.confirmationEmailSentAt ? 'enviado' : 'falhou', registration.confirmationEmailProvider || '', registration.confirmationEmailId || '', sanitizeSheetText(registration.confirmationEmailError)];
+    const emailAt = registration.confirmationEmailSentAt || registration.confirmationEmailLastAttemptAt || registration.updatedAt;
+    const row: SheetCell[] = [googleSheetsDateSerial(emailAt) || '', registration.id, sanitizeSheetText(registration.payload.email), registration.confirmationEmailSentAt ? 'enviado' : 'falhou', registration.confirmationEmailProvider || '', registration.confirmationEmailId || '', sanitizeSheetText(registration.confirmationEmailError)];
     return client.upsertRow('emails', row, 1, registration.id, task.rowNumber);
   }
 
   if (task.entityType === 'alert') {
     const alert = (await listOperationalAlertsInPostgres()).find((item) => item.id === task.entityId);
     if (!alert) throw new Error(`Alerta ${task.entityId} não encontrado.`);
-    const row: SheetCell[] = [alert.severity, alert.alertType, sanitizeSheetText(alert.title), alert.status, alert.entityType || '', alert.acknowledgedBy || '', alert.detectedAt, alert.id];
+    const row: SheetCell[] = [alert.severity, alert.alertType, sanitizeSheetText(alert.title), alert.status, alert.entityType || '', alert.acknowledgedBy || '', googleSheetsDateSerial(alert.detectedAt) || '', alert.id];
     return client.upsertRow('alerts', row, 7, alert.id, task.rowNumber);
   }
 
@@ -664,6 +746,19 @@ export async function executeGoogleSheetSyncTask(
     const projection = buildRemarketingProjections(database).find((item) => item.personKey === task.entityId);
     if (!projection) throw new Error(`Pessoa técnica ${task.entityId} não encontrada para Remarketing.`);
     return client.upsertRow('remarketing', buildRemarketingSheetRow(projection), 0, projection.personKey, task.rowNumber);
+  }
+
+  if (task.entityType === 'confirmed_payments_projection') {
+    const result = buildConfirmedPaymentsProjection(database);
+    if (result.diagnostics.registrationPaidWithoutPaidPayment > 0 || result.diagnostics.paymentPaidWithoutPaidRegistration > 0) {
+      console.warn(JSON.stringify({
+        at: new Date().toISOString(),
+        message: 'confirmed_payments_projection_mismatch',
+        diagnostics: result.diagnostics,
+      }));
+    }
+    await client.replaceRows('confirmed_payments', result.projections.map(buildConfirmedPaymentSheetRow));
+    return { action: 'replaced' as const, rowNumber: null, diagnostics: result.diagnostics };
   }
 
   throw new Error(`Tipo de sincronização não suportado: ${task.entityType}.`);
@@ -735,6 +830,7 @@ export async function queueConfirmedPaymentGoogleSheetSync(
     { entityType: 'payment', entityId: paymentId, sheetName: 'payments', operation: 'upsert' },
     { entityType: 'shirt_summary', entityId: 'paid-registrations', sheetName: 'shirts', operation: 'replace' },
     { entityType: 'lot_summary', entityId: 'all-lots', sheetName: 'lots', operation: 'replace' },
+    { entityType: 'confirmed_payments_projection', entityId: 'paid-and-paid', sheetName: 'confirmed_payments', operation: 'replace' },
   ] as const;
   const queued: GoogleSheetSyncRecord[] = [];
 
@@ -820,6 +916,18 @@ async function queueProjection(input: GoogleSheetSyncInput, dependencies: { conf
 export function queueLotSummaryGoogleSheetSync(dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'lot_summary', entityId: 'all-lots', sheetName: 'lots', operation: 'replace' }, dependencies); }
 export function queuePartnershipGoogleSheetSync(partnershipId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'partnership', entityId: partnershipId, sheetName: 'partnerships', operation: 'upsert' }, dependencies); }
 export function queueEmailGoogleSheetSync(registrationId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'email', entityId: registrationId, sheetName: 'emails', operation: 'upsert' }, dependencies); }
+export function queueConfirmedPaymentsProjectionGoogleSheetSync(dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'confirmed_payments_projection', entityId: 'paid-and-paid', sheetName: 'confirmed_payments', operation: 'replace' }, dependencies); }
+
+export async function reconcileConfirmedPaymentsGoogleSheetSync(
+  dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {},
+) {
+  const config = dependencies.config || getGoogleSheetsConfig();
+  if (!config.enabled || config.configurationIssue) {
+    return { queued: false, enabled: config.enabled, configurationIssue: config.configurationIssue };
+  }
+  const task = await queueConfirmedPaymentsProjectionGoogleSheetSync(dependencies);
+  return { queued: Boolean(task), task, enabled: true, configurationIssue: null };
+}
 
 export async function queueRemarketingGoogleSheetSyncForRegistration(
   registrationId: string,
@@ -937,6 +1045,7 @@ export async function processGoogleSheetSync(
     const client = dependencies.client || createGoogleSheetsClient({ config });
     await ensureSpreadsheetStructureOnce(config.spreadsheetId, client);
     const result = await executeGoogleSheetSyncTask(task, database, client);
+    await client.ensureSpreadsheetLayout([task.sheetName]);
     await complete(task.id, result.rowNumber);
     console.log(JSON.stringify({
       at: new Date().toISOString(),

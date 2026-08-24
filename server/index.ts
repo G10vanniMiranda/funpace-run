@@ -71,6 +71,7 @@ import {
   queueEmailGoogleSheetSync,
   queueRemarketingGoogleSheetSyncForRegistration,
   reconcileRemarketingGoogleSheetSyncs,
+  reconcileConfirmedPaymentsGoogleSheetSync,
 } from './google-sheets.js';
 import { checkInfinitePayPayment, createInfinitePayCheckout, InfinitePayError } from './infinitepay.js';
 import { calculateLotCapacity, selectLotWithAvailability, synchronizeLotProjections } from './lot-capacity.js';
@@ -3370,6 +3371,7 @@ async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerRespo
   }
 
   const startedAt = Date.now();
+  const confirmedPayments = await reconcileConfirmedPaymentsGoogleSheetSync();
   const remarketing = await reconcileRemarketingGoogleSheetSyncs(25);
   if (remarketing.enabled && !remarketing.rolloutEnabled) {
     console.warn(JSON.stringify({
@@ -3395,12 +3397,14 @@ async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerRespo
     message: 'google_sheets_backlog_processed',
     ...result,
     remarketing,
+    confirmedPayments,
     elapsedMs: Date.now() - startedAt,
   }));
   json(res, result.configurationIssue ? 503 : 200, {
     success: !result.configurationIssue,
     ...result,
     remarketing,
+    confirmedPayments,
     elapsedMs: Date.now() - startedAt,
   });
 }

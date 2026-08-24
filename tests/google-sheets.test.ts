@@ -3,6 +3,7 @@ import { generateKeyPairSync, verify } from 'node:crypto';
 import test from 'node:test';
 import type { Database, GoogleSheetSyncRecord, PaymentRecord, RegistrationRecord } from '../server/database.js';
 import { buildRemarketingProjections } from '../server/remarketing.js';
+import { googleSheetsDateSerial } from '../server/google-sheets-layout.js';
 import {
   buildPaymentSheetRow,
   buildRegistrationSheetRow,
@@ -160,7 +161,7 @@ test('builds registration row in the documented column order', () => {
 
   assert.equal(row.length, 14);
   assert.deepEqual(row.slice(0, 6), [
-    registration.createdAt,
+    googleSheetsDateSerial(registration.createdAt),
     registration.status,
     registration.payload.fullName,
     '123.***.***-01',
@@ -172,7 +173,7 @@ test('builds registration row in the documented column order', () => {
 
 test('builds payment row with internal and gateway identifiers', () => {
   assert.deepEqual(buildPaymentSheetRow({ payment, paymentMethod: 'pix' }), [
-    payment.paidAt,
+    googleSheetsDateSerial(payment.paidAt || ''),
     registration.id,
     payment.id,
     'paid',
@@ -282,10 +283,14 @@ test('appends a new payment and captures its row number', async () => {
   assert.deepEqual(methods, ['GET', 'POST']);
 });
 
-test('replaces shirt summary by clearing stale rows first', async () => {
+test('replaces rows, verifies the write and only then clears the stale tail', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(input), init });
+    if (!init?.method && calls.filter((call) => !call.init?.method).length === 1) {
+      return jsonResponse({ values: [['Tamanho', 'Quantidade'], ['P', 1], ['M', 1], ['G', 99], ['GG', 99]] });
+    }
+    if (!init?.method) return jsonResponse({ values: [['Tamanho', 'Quantidade'], ['P', 10], ['M', 20]] });
     return jsonResponse({});
   }) as typeof fetch;
   const client = createGoogleSheetsClient({
@@ -297,15 +302,36 @@ test('replaces shirt summary by clearing stale rows first', async () => {
   const result = await client.replaceRows('shirts', [['P', 10], ['M', 20]]);
 
   assert.deepEqual(result, { rowCount: 2 });
-  assert.equal(calls.length, 2);
-  assert.match(calls[0].url, /'Camisas'!A%3AB:clear$/);
-  assert.equal(calls[0].init?.method, 'POST');
+  assert.equal(calls.length, 4);
+  assert.equal(calls[0].init?.method, undefined);
   assert.equal(calls[1].init?.method, 'PUT');
+  assert.equal(calls[2].init?.method, undefined);
+  assert.match(calls[3].url, /'Camisas'!A4%3AB5:clear$/);
+  assert.equal(calls[3].init?.method, 'POST');
   assert.deepEqual(JSON.parse(String(calls[1].init?.body)).values, [
     ['Tamanho', 'Quantidade'],
     ['P', 10],
     ['M', 20],
   ]);
+});
+
+test('preserves the old tail when replacement verification fails', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    if (!init?.method && calls.filter((call) => !call.init?.method).length === 1) {
+      return jsonResponse({ values: [['Tamanho', 'Quantidade'], ['P', 1], ['M', 1], ['G', 99]] });
+    }
+    if (!init?.method) return jsonResponse({ values: [['Tamanho', 'Quantidade'], ['P', 999]] });
+    return jsonResponse({});
+  }) as typeof fetch;
+  const client = createGoogleSheetsClient({
+    config: getGoogleSheetsConfig(configuredEnvironment), fetchImplementation: fetchMock,
+    accessTokenProvider: async () => 'test-token',
+  });
+
+  await assert.rejects(client.replaceRows('shirts', [['P', 10], ['M', 20]]), /cauda anterior foi preservada/);
+  assert.equal(calls.some((call) => call.url.endsWith(':clear')), false);
 });
 
 test('executes registration task using persisted row as an idempotency hint', async () => {
@@ -346,9 +372,11 @@ test('builds shirt summary only from paid registrations', async () => {
 
 test('marks a claimed sync as completed', async () => {
   let completed: { id: string; rowNumber: number | null } | null = null;
+  let layoutSheets: string[] = [];
   const task = syncTask();
   const client = {
     ensureSpreadsheetStructure: async () => ({ createdSheets: [] }),
+    ensureSpreadsheetLayout: async (sheetKeys: string[]) => { layoutSheets = sheetKeys; return { sheetCount: 1, requestCount: 0 }; },
     upsertRow: async () => ({ action: 'updated' as const, rowNumber: 9 }),
   } as unknown as GoogleSheetsClient;
 
@@ -363,6 +391,7 @@ test('marks a claimed sync as completed', async () => {
 
   assert.equal(result.status, 'synchronized');
   assert.deepEqual(completed, { id: task.id, rowNumber: 9 });
+  assert.deepEqual(layoutSheets, ['registrations']);
 });
 
 test('records failure without throwing into the main flow', async () => {
@@ -370,6 +399,7 @@ test('records failure without throwing into the main flow', async () => {
   const task = syncTask();
   const client = {
     ensureSpreadsheetStructure: async () => ({ createdSheets: [] }),
+    ensureSpreadsheetLayout: async () => ({ sheetCount: 1, requestCount: 0 }),
     upsertRow: async () => { throw new Error('simulated Sheets outage'); },
   } as unknown as GoogleSheetsClient;
 
@@ -488,12 +518,13 @@ test('queues registration, payment and shirt summary after confirmation', async 
     },
   });
 
-  assert.equal(tasks.length, 5);
+  assert.equal(tasks.length, 6);
   assert.deepEqual(received, [
     { entityType: 'registration', entityId: registration.id, sheetName: 'registrations', operation: 'upsert' },
     { entityType: 'payment', entityId: payment.id, sheetName: 'payments', operation: 'upsert' },
     { entityType: 'shirt_summary', entityId: 'paid-registrations', sheetName: 'shirts', operation: 'replace' },
     { entityType: 'lot_summary', entityId: 'all-lots', sheetName: 'lots', operation: 'replace' },
+    { entityType: 'confirmed_payments_projection', entityId: 'paid-and-paid', sheetName: 'confirmed_payments', operation: 'replace' },
     { entityType: 'remarketing', entityId: buildRemarketingProjections(database)[0].personKey, sheetName: 'remarketing', operation: 'upsert' },
   ]);
 });
@@ -517,8 +548,8 @@ test('continues queuing remaining payment projections after one outbox failure',
     },
   });
 
-  assert.equal(attempt, 5);
-  assert.deepEqual(tasks.map((task) => task.entityType), ['registration', 'shirt_summary', 'lot_summary', 'remarketing']);
+  assert.equal(attempt, 6);
+  assert.deepEqual(tasks.map((task) => task.entityType), ['registration', 'shirt_summary', 'lot_summary', 'confirmed_payments_projection', 'remarketing']);
 });
 
 test('queues check-in projection with registration as idempotency key', async () => {
@@ -564,7 +595,7 @@ test('check-in executor reflects delivery and keeps technical registration id', 
 
   assert.equal(receivedRow.length, 8);
   assert.equal(receivedRow[4], 'Sim');
-  assert.equal(receivedRow[5], '2026-09-20T09:00:00.000Z');
+  assert.equal(receivedRow[5], googleSheetsDateSerial('2026-09-20T09:00:00.000Z'));
   assert.equal(receivedRow[7], registration.id);
 });
 
