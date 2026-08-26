@@ -9,6 +9,16 @@ import { selectAvailableLotCandidate } from './lot-capacity.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { calculateCouponPricing, getCouponCampaignAttribution } from './coupons.js';
 import { assertDatabaseEnvironmentIsolation } from './environment.js';
+import {
+  EMAIL_DELIVERY_COOLDOWN_MS,
+  buildLegacyEmailSummaryPatch,
+  buildEmailDeliveryIdempotencyKey,
+  canClaimEmailDeliveryAfterLegacySummary,
+  hashEmailRecipient,
+  normalizeRecipientEmail,
+  resolveEmailDeliveryContextKey,
+  type EmailDeliveryRecord,
+} from './email-delivery-history.js';
 
 const { Pool } = pg;
 
@@ -144,7 +154,7 @@ export type IntegrationEventRecord = {
 
 export type GoogleSheetSyncRecord = {
   id: string;
-  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary' | 'lot_summary' | 'alert' | 'partnership' | 'email' | 'remarketing' | 'confirmed_payments_projection';
+  entityType: 'registration' | 'payment' | 'check_in' | 'shirt_summary' | 'lot_summary' | 'alert' | 'partnership' | 'email' | 'email_delivery' | 'remarketing' | 'confirmed_payments_projection';
   entityId: string;
   sheetName: 'registrations' | 'payments' | 'shirts' | 'check_in' | 'lots' | 'alerts' | 'partnerships' | 'emails' | 'remarketing' | 'confirmed_payments';
   operation: 'upsert' | 'replace';
@@ -257,6 +267,7 @@ export type Database = {
   registrations: RegistrationRecord[];
   payments: PaymentRecord[];
   paymentEvents: PaymentEventRecord[];
+  emailDeliveries?: EmailDeliveryRecord[];
   googleSheetSyncs: GoogleSheetSyncRecord[];
   checkIns: CheckInRecord[];
   kitDeliveries: KitDeliveryRecord[];
@@ -292,12 +303,18 @@ export type PendingRegistrationResult = CreateRegistrationResponse & {
 };
 
 export type RegistrationEmailDeliveryContext = {
+  deliveryId: string;
   registration: RegistrationRecord;
   event: EventRecord;
   distanceName: string;
   lot: LotRecord | null;
   paymentMethod?: string | null;
   deliveryKey: string;
+};
+
+export type RegistrationEmailClaimOptions = {
+  force?: boolean;
+  contextKey?: string | null;
 };
 
 export type RegistrationEmailDeliveryResult = {
@@ -332,6 +349,28 @@ export type PaymentConfirmationResult = {
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>;
 
+function mapEmailDeliveryRow(row: Record<string, unknown>): EmailDeliveryRecord {
+  return {
+    id: String(row.id),
+    registrationId: String(row.registration_id),
+    kind: row.kind as EmailDeliveryRecord['kind'],
+    recipientEmail: String(row.recipient_email),
+    recipientHash: String(row.recipient_hash),
+    contextKey: String(row.context_key),
+    idempotencyKey: String(row.idempotency_key),
+    provider: String(row.provider),
+    providerMessageId: row.provider_message_id ? String(row.provider_message_id) : null,
+    status: row.status as EmailDeliveryRecord['status'],
+    attemptCount: Number(row.attempt_count),
+    attemptedAt: String(row.attempted_at),
+    sentAt: row.sent_at ? String(row.sent_at) : null,
+    failedAt: row.failed_at ? String(row.failed_at) : null,
+    error: row.error ? String(row.error) : null,
+    metadata: (row.metadata || {}) as Record<string, unknown>,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
 function mapGoogleSheetSyncRow(row: Record<string, unknown>): GoogleSheetSyncRecord {
   return {
     id: String(row.id),
@@ -401,6 +440,7 @@ const table = {
   registrations: '"run-registrations"',
   payments: '"run-payments"',
   paymentEvents: '"run-payment-events"',
+  emailDeliveries: '"run-email-deliveries"',
   googleSheetSyncs: '"run-google-sheet-sync"',
   checkIns: '"run-check-ins"',
   kitDeliveries: '"run-kit-deliveries"',
@@ -505,6 +545,7 @@ const initialDatabase: Database = {
   registrations: [],
   payments: [],
   paymentEvents: [],
+  emailDeliveries: [],
   googleSheetSyncs: [],
   checkIns: [],
   kitDeliveries: [],
@@ -576,6 +617,7 @@ function normalizeDatabase(database: Partial<Database>): Database {
     registrations: database.registrations || [],
     payments: database.payments || [],
     paymentEvents: database.paymentEvents || [],
+    emailDeliveries: database.emailDeliveries || [],
     googleSheetSyncs: database.googleSheetSyncs || [],
     checkIns: database.checkIns || [],
     kitDeliveries: database.kitDeliveries || [],
@@ -705,9 +747,35 @@ async function ensurePostgresDatabase(client: Queryable) {
       received_at text not null
     );
 
+    create table if not exists ${table.emailDeliveries} (
+      id text primary key,
+      registration_id text not null references ${table.registrations}(id),
+      kind text not null check (kind in ('confirmation')),
+      recipient_email text not null,
+      recipient_hash text not null check (recipient_hash ~ '^[0-9a-f]{64}$'),
+      context_key text not null,
+      idempotency_key text not null,
+      provider text not null,
+      provider_message_id text,
+      status text not null check (status in ('attempting', 'sent', 'failed')),
+      attempt_count integer not null default 1 check (attempt_count > 0),
+      attempted_at text not null,
+      sent_at text,
+      failed_at text,
+      error text,
+      metadata jsonb not null default '{}'::jsonb check (jsonb_typeof(metadata) = 'object'),
+      created_at text not null,
+      updated_at text not null,
+      constraint "run-email-deliveries_idempotency_key_key" unique (idempotency_key),
+      constraint "run-email-deliveries_status_timestamps_check" check (
+        (status = 'attempting' and sent_at is null and failed_at is null)
+        or (status = 'sent' and sent_at is not null and failed_at is null and error is null and provider_message_id is not null)
+        or (status = 'failed' and sent_at is null and failed_at is not null and error is not null)
+      )
+    );
     create table if not exists ${table.googleSheetSyncs} (
       id text primary key,
-      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'remarketing', 'confirmed_payments_projection')),
+      entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'email_delivery', 'remarketing', 'confirmed_payments_projection')),
       entity_id text not null,
       sheet_name text not null check (sheet_name in ('registrations', 'payments', 'shirts', 'check_in', 'lots', 'alerts', 'partnerships', 'emails', 'remarketing', 'confirmed_payments')),
       operation text not null check (operation in ('upsert', 'replace')),
@@ -907,6 +975,9 @@ async function ensurePostgresDatabase(client: Queryable) {
     create index if not exists "run-payments_registration_id_idx" on ${table.payments}(registration_id);
     create index if not exists "run-payments_status_updated_idx" on ${table.payments}(status, updated_at desc);
     create index if not exists "run-payment-events_payment_received_idx" on ${table.paymentEvents}(payment_id, received_at asc);
+    create unique index if not exists "run-email-deliveries_provider_message_id_idx" on ${table.emailDeliveries}(provider, provider_message_id) where provider_message_id is not null and btrim(provider_message_id) <> '';
+    create index if not exists "run-email-deliveries_registration_created_idx" on ${table.emailDeliveries}(registration_id, created_at asc);
+    create index if not exists "run-email-deliveries_status_attempted_idx" on ${table.emailDeliveries}(status, attempted_at asc);
     create index if not exists "run-google-sheet-sync_status_idx" on ${table.googleSheetSyncs}(status);
     create index if not exists "run-google-sheet-sync_entity_idx" on ${table.googleSheetSyncs}(entity_type, entity_id);
     create index if not exists "run-google-sheet-sync_updated_at_idx" on ${table.googleSheetSyncs}(updated_at);
@@ -929,6 +1000,8 @@ async function ensurePostgresDatabase(client: Queryable) {
     create index if not exists "run-operational-alerts_status_idx" on ${table.operationalAlerts}(status, severity, detected_at desc);
   `);
 
+  await client.query(`alter table ${table.googleSheetSyncs} drop constraint if exists "run-google-sheet-sync_entity_type_check"`);
+  await client.query(`alter table ${table.googleSheetSyncs} add constraint "run-google-sheet-sync_entity_type_check" check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'email_delivery', 'remarketing', 'confirmed_payments_projection'))`);
   await client.query(`alter table ${table.partners} add column if not exists partner_type text`);
   await client.query(`update ${table.partners} set partner_type = 'sports_advisory' where partner_type is null or btrim(partner_type) = ''`);
   await client.query(`alter table ${table.partners} alter column partner_type set default 'sports_advisory'`);
@@ -1200,6 +1273,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       registrations: [],
       payments: [],
       paymentEvents: [],
+      emailDeliveries: [],
       googleSheetSyncs: [],
       checkIns: [],
       kitDeliveries: [],
@@ -1236,6 +1310,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     registrations: ['all', 'availability', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
     payments: ['all', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
     paymentEvents: ['all', 'checkout', 'admin-registrations'].includes(scope),
+    emailDeliveries: ['all', 'checkout', 'admin-registrations'].includes(scope),
     googleSheetSyncs: ['all', 'admin-registrations'].includes(scope),
     checkIns: ['all', 'admin-registrations'].includes(scope),
     kitDeliveries: ['all', 'admin-registrations'].includes(scope),
@@ -1254,6 +1329,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price, coupon_code, coupon_applied_at, coupon_used_at from ${table.registrations}`) : emptyRows;
   const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
   const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
+  const emailDeliveries = include.emailDeliveries ? await client.query(`select id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider, provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at from ${table.emailDeliveries}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
   const checkIns = include.checkIns ? await client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows;
   const kitDeliveries = include.kitDeliveries ? await client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows;
@@ -1356,6 +1432,7 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
       payload: row.payload,
       receivedAt: row.received_at,
     })),
+    emailDeliveries: emailDeliveries.rows.map(mapEmailDeliveryRow),
     googleSheetSyncs: googleSheetSyncs.rows.map(mapGoogleSheetSyncRow),
     checkIns: checkIns.rows.map((row) => ({
       id: row.id,
@@ -1623,6 +1700,30 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
     );
   }
 
+  for (const item of database.emailDeliveries || []) {
+    await client.query(
+      `insert into ${table.emailDeliveries}
+       (id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider,
+        provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       on conflict (id) do update set
+         provider = excluded.provider,
+         provider_message_id = excluded.provider_message_id,
+         status = excluded.status,
+         attempt_count = excluded.attempt_count,
+         attempted_at = excluded.attempted_at,
+         sent_at = excluded.sent_at,
+         failed_at = excluded.failed_at,
+         error = excluded.error,
+         metadata = excluded.metadata,
+         updated_at = excluded.updated_at`,
+      [
+        item.id, item.registrationId, item.kind, item.recipientEmail, item.recipientHash, item.contextKey,
+        item.idempotencyKey, item.provider, item.providerMessageId, item.status, item.attemptCount,
+        item.attemptedAt, item.sentAt, item.failedAt, item.error, item.metadata, item.createdAt, item.updatedAt,
+      ],
+    );
+  }
   for (const item of database.googleSheetSyncs) {
     await client.query(
       `insert into ${table.googleSheetSyncs} (id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at)
@@ -3459,7 +3560,7 @@ function findPaymentMethod(value: unknown, depth = 0): string | null {
 export async function claimRegistrationEmailInPostgres(
   registrationId: string,
   provider: string,
-  options: { force?: boolean } = {},
+  options: RegistrationEmailClaimOptions = {},
 ): Promise<RegistrationEmailDeliveryContext | null> {
   const client = await requirePool().connect();
 
@@ -3492,18 +3593,65 @@ export async function claimRegistrationEmailInPostgres(
       return null;
     }
 
-    const recentAttempt = row.confirmation_email_last_attempt_at
-      && Date.now() - new Date(row.confirmation_email_last_attempt_at).getTime() < 5 * 60_000;
+    const recipientEmail = normalizeRecipientEmail(String(row.payload.email || ''));
+    const recipientHash = hashEmailRecipient(recipientEmail);
+    const contextKey = resolveEmailDeliveryContextKey(recipientEmail, options.contextKey);
+    const idempotencyKey = buildEmailDeliveryIdempotencyKey({
+      registrationId,
+      kind: 'confirmation',
+      recipientEmail,
+      contextKey,
+    });
+    const existingResult = await client.query(
+      `select id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider,
+              provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at
+       from ${table.emailDeliveries} where idempotency_key = $1 for update`,
+      [idempotencyKey],
+    );
+    const existing = existingResult.rows[0] ? mapEmailDeliveryRow(existingResult.rows[0]) : null;
+    const recentAttempt = existing?.status === 'attempting'
+      && Date.now() - new Date(existing.attemptedAt).getTime() < EMAIL_DELIVERY_COOLDOWN_MS;
 
-    if (!options.force && (row.confirmation_email_sent_at || recentAttempt)) {
+    if (existing?.status === 'sent' || recentAttempt || !canClaimEmailDeliveryAfterLegacySummary({
+      legacySentAt: row.confirmation_email_sent_at,
+      force: options.force,
+      contextKey: options.contextKey,
+      existingDelivery: Boolean(existing),
+    })) {
       await client.query('commit');
       return null;
     }
 
     const attemptedAt = new Date().toISOString();
-    const deliveryKey = options.force
-      ? `confirmation/${registrationId}/${randomUUID()}`
-      : `confirmation/${registrationId}`;
+    let delivery: EmailDeliveryRecord;
+    if (existing) {
+      const claimed = await client.query(
+        `update ${table.emailDeliveries}
+         set provider = $1, status = 'attempting', attempt_count = attempt_count + 1,
+             attempted_at = $2, sent_at = null, failed_at = null, error = null, updated_at = $2
+         where id = $3
+         returning id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider,
+                   provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at`,
+        [provider, attemptedAt, existing.id],
+      );
+      delivery = mapEmailDeliveryRow(claimed.rows[0]);
+    } else {
+      const deliveryId = randomUUID();
+      const inserted = await client.query(
+        `insert into ${table.emailDeliveries}
+         (id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider,
+          provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at)
+         values ($1,$2,'confirmation',$3,$4,$5,$6,$7,null,'attempting',1,$8,null,null,null,$9,$8,$8)
+         returning id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider,
+                   provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at`,
+        [deliveryId, registrationId, recipientEmail, recipientHash, contextKey, idempotencyKey, provider, attemptedAt, {
+          source: 'registration_confirmation',
+        }],
+      );
+      delivery = mapEmailDeliveryRow(inserted.rows[0]);
+    }
+    const deliveryKey = `confirmation/${registrationId}/${delivery.id}`;
+
 
     await client.query(
       `update ${table.registrations} set confirmation_email_last_attempt_at = $1 where id = $2`,
@@ -3515,12 +3663,14 @@ export async function claimRegistrationEmailInPostgres(
       [randomUUID(), 'system', 'email.confirmation.attempted', 'registration', registrationId, {
         provider,
         email: row.payload.email,
+        deliveryId: delivery.id,
         deliveryKey,
       }, attemptedAt],
     );
     await client.query('commit');
 
     return {
+      deliveryId: delivery.id,
       registration: {
         id: row.id,
         eventId: row.event_id,
@@ -3580,33 +3730,99 @@ export async function claimRegistrationEmailInPostgres(
 
 export async function completeRegistrationEmailInPostgres(
   registrationId: string,
+  deliveryId: string,
   result: RegistrationEmailDeliveryResult,
 ) {
   const client = await requirePool().connect();
   const completedAt = new Date().toISOString();
+  const effectiveResult = result.ok && !result.providerMessageId
+    ? { ...result, ok: false, error: 'Email provider did not return a message id.' }
+    : result;
 
   try {
     await ensurePostgresReady();
     await client.query('begin');
-    await client.query(
-      `update ${table.registrations}
-       set confirmation_email_sent_at = case when $1 then $2 else confirmation_email_sent_at end,
-           confirmation_email_provider = $3,
-           confirmation_email_id = case when $1 then $4 else confirmation_email_id end,
-           confirmation_email_error = case when $1 then null else $5 end
-       where id = $6`,
-      [result.ok, completedAt, result.provider, result.providerMessageId || null, result.error || 'Email send failed', registrationId],
+    const registrationResult = await client.query(
+      `select id
+       from ${table.registrations}
+       where id = $1
+       for update`,
+      [registrationId],
     );
+    if (registrationResult.rowCount !== 1) throw new Error('Registration not found for email completion.');
+    const deliveryResult = await client.query(
+      `select id
+       from ${table.emailDeliveries}
+       where id = $1 and registration_id = $2
+       for update`,
+      [deliveryId, registrationId],
+    );
+    if (deliveryResult.rowCount !== 1) throw new Error('Email delivery not found for completion.');
+    const legacySummary = buildLegacyEmailSummaryPatch(effectiveResult, completedAt);
+    await client.query(
+      `update ${table.emailDeliveries}
+       set provider = $1,
+           provider_message_id = case when $2 then $3 else provider_message_id end,
+           status = case when $2 then 'sent' else 'failed' end,
+           sent_at = case when $2 then $4 else null end,
+           failed_at = case when $2 then null else $4 end,
+           error = case when $2 then null else $5 end,
+           updated_at = $4
+       where id = $6`,
+      [effectiveResult.provider, effectiveResult.ok, effectiveResult.providerMessageId || null, completedAt,
+        effectiveResult.error || 'Email send failed', deliveryId],
+    );
+    const latestDeliveryResult = await client.query(
+      `select id
+       from ${table.emailDeliveries}
+       where registration_id = $1
+       order by attempted_at desc, created_at desc, id desc
+       limit 1`,
+      [registrationId],
+    );
+    if (latestDeliveryResult.rows[0]?.id === deliveryId) {
+      await client.query(
+        `update ${table.registrations}
+         set confirmation_email_sent_at = $1,
+             confirmation_email_provider = $2,
+             confirmation_email_id = $3,
+             confirmation_email_error = $4
+         where id = $5`,
+        [legacySummary.confirmationEmailSentAt, legacySummary.confirmationEmailProvider,
+          legacySummary.confirmationEmailId, legacySummary.confirmationEmailError, registrationId],
+      );
+    }
     await client.query(
       `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
        values ($1, $2, $3, $4, $5, $6, $7)`,
-      [randomUUID(), 'system', result.ok ? 'email.confirmation.sent' : 'email.confirmation.failed', 'registration', registrationId, {
-        provider: result.provider,
-        providerMessageId: result.providerMessageId || null,
-        error: result.ok ? null : result.error || 'Email send failed',
-      }, completedAt],
+      [randomUUID(), 'system', effectiveResult.ok ? 'email.confirmation.sent' : 'email.confirmation.failed',
+        'registration', registrationId, {
+          deliveryId,
+          provider: effectiveResult.provider,
+          providerMessageId: effectiveResult.providerMessageId || null,
+          error: effectiveResult.ok ? null : effectiveResult.error || 'Email send failed',
+        }, completedAt],
+    );
+    const emailSheetSync = await client.query(
+      `insert into ${table.googleSheetSyncs}
+       (id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts,
+        last_attempt_at, synchronized_at, last_error, created_at, updated_at)
+       values ($1, 'email_delivery', $2, 'emails', 'upsert', 'pending', null, 0, null, null, null, $3, $3)
+       on conflict (entity_type, entity_id, sheet_name) do update set
+         operation = excluded.operation,
+         status = 'pending',
+         synchronized_at = null,
+         last_error = case
+           when ${table.googleSheetSyncs}.status = 'processing' then $4
+           else null
+         end,
+         updated_at = excluded.updated_at
+       returning id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts,
+                 last_attempt_at, synchronized_at, last_error, created_at, updated_at`,
+      [randomUUID(), deliveryId, completedAt, GOOGLE_SHEET_SYNC_DEFERRED_REQUEUE],
     );
     await client.query('commit');
+    return mapGoogleSheetSyncRow(emailSheetSync.rows[0]);
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;
