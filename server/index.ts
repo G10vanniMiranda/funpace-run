@@ -58,6 +58,15 @@ import { normalizePartnerSlug, partnerTypes, validatePartnerInput } from './part
 import { getPartnerAuditEventTitle } from './partner-audit-labels.js';
 import { getEmailProvider, isEmailConfigured, sendRegistrationConfirmationEmail, type RegistrationEmailContext } from './email.js';
 import {
+  buildLegacyEmailSummaryPatch,
+  buildEmailDeliveryIdempotencyKey,
+  canClaimEmailDeliveryAfterLegacySummary,
+  claimEmailDeliveryInMemory,
+  completeEmailDeliveryInMemory,
+  isLatestEmailDelivery,
+  upsertEmailDeliveryOutboxInMemory,
+} from './email-delivery-history.js';
+import {
   processGoogleSheetSync,
   processGoogleSheetSyncBacklog,
   processQueuedGoogleSheetSyncs,
@@ -68,7 +77,6 @@ import {
   queueRegistrationGoogleSheetSync,
   queueLotSummaryGoogleSheetSync,
   queuePartnershipGoogleSheetSync,
-  queueEmailGoogleSheetSync,
   queueRemarketingGoogleSheetSyncForRegistration,
   reconcileRemarketingGoogleSheetSyncs,
   reconcileConfirmedPaymentsGoogleSheetSync,
@@ -1289,7 +1297,7 @@ function findPaymentMethod(value: unknown, depth = 0): string | null {
   return null;
 }
 
-export async function processRegistrationEmail(registrationId: string, options: { force?: boolean } = {}) {
+export async function processRegistrationEmail(registrationId: string, options: { force?: boolean; contextKey?: string | null } = {}) {
   const provider = getEmailProvider();
   const now = new Date().toISOString();
 
@@ -1329,7 +1337,7 @@ export async function processRegistrationEmail(registrationId: string, options: 
 
   const context = usesPostgresDatabase()
     ? await claimRegistrationEmailInPostgres(registrationId, provider, options)
-    : await transaction<RegistrationEmailContext | null>((database) => {
+    : await transaction<(RegistrationEmailContext & { deliveryId: string }) | null>((database) => {
       const registration = database.registrations.find((item) => item.id === registrationId);
 
       if (!registration) {
@@ -1337,10 +1345,6 @@ export async function processRegistrationEmail(registrationId: string, options: 
       }
 
       if (registration.status !== 'paid') {
-        return null;
-      }
-
-      if (registration.confirmationEmailSentAt && !options.force) {
         return null;
       }
 
@@ -1366,6 +1370,31 @@ export async function processRegistrationEmail(registrationId: string, options: 
         return null;
       }
 
+
+      const emailDeliveries = database.emailDeliveries || (database.emailDeliveries = []);
+      const idempotencyKey = buildEmailDeliveryIdempotencyKey({
+        registrationId: registration.id,
+        kind: 'confirmation',
+        recipientEmail: registration.payload.email,
+        contextKey: options.contextKey,
+      });
+      const existingDelivery = emailDeliveries.some((item) => item.idempotencyKey === idempotencyKey);
+      if (!canClaimEmailDeliveryAfterLegacySummary({
+        legacySentAt: registration.confirmationEmailSentAt,
+        force: options.force,
+        contextKey: options.contextKey,
+        existingDelivery,
+      })) return null;
+      const deliveryClaim = claimEmailDeliveryInMemory(emailDeliveries, {
+        registrationId: registration.id,
+        kind: 'confirmation',
+        recipientEmail: registration.payload.email,
+        provider,
+        contextKey: options.contextKey,
+        metadata: { source: 'registration_confirmation' },
+      }, now);
+      if (deliveryClaim.outcome !== 'claimed') return null;
+      const delivery = deliveryClaim.delivery;
       registration.confirmationEmailLastAttemptAt = now;
 
       database.auditLogs.push({
@@ -1377,19 +1406,19 @@ export async function processRegistrationEmail(registrationId: string, options: 
         payload: {
           provider,
           email: registration.payload.email,
+          deliveryId: delivery.id,
         },
         createdAt: now,
       });
 
       return {
+        deliveryId: delivery.id,
         registration: { ...registration, payload: { ...registration.payload } },
         event: { ...event },
         distanceName: distance.name,
         lot: lot ? { ...lot } : null,
         paymentMethod: findPaymentMethod(payment?.gatewayPayload) || payment?.gatewayStatus || null,
-        deliveryKey: options.force
-          ? `confirmation/${registration.id}/${randomUUID()}`
-          : `confirmation/${registration.id}`,
+        deliveryKey: `confirmation/${registration.id}/${delivery.id}`,
       };
     }, { scope: 'checkout' });
 
@@ -1418,49 +1447,51 @@ export async function processRegistrationEmail(registrationId: string, options: 
     await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
   }
 
+  if (result.ok && !result.providerMessageId) {
+    result = { ok: false, provider: result.provider, error: 'Email provider did not return a message id.' };
+  }
+
   const completedAt = new Date().toISOString();
 
-  if (usesPostgresDatabase()) {
-    await completeRegistrationEmailInPostgres(registrationId, result);
-  } else {
-    await transaction((database) => {
+  const emailSheetSync = usesPostgresDatabase()
+    ? await completeRegistrationEmailInPostgres(registrationId, context.deliveryId, result)
+    : await transaction((database) => {
       const registration = database.registrations.find((item) => item.id === registrationId);
 
       if (!registration) {
-        return;
+        return null;
       }
 
-      if (result.ok) {
-        registration.confirmationEmailSentAt = completedAt;
+      const delivery = database.emailDeliveries?.find((item) => item.id === context.deliveryId);
+      if (!delivery) throw new Error('Email delivery not found for completion.');
+      completeEmailDeliveryInMemory(delivery, result, completedAt);
+      if (isLatestEmailDelivery(database.emailDeliveries || [], delivery.id)) {
+        Object.assign(registration, buildLegacyEmailSummaryPatch(result, completedAt));
       }
 
-      registration.confirmationEmailProvider = result.provider;
-      registration.confirmationEmailId = result.ok ? result.providerMessageId || null : registration.confirmationEmailId || null;
-      registration.confirmationEmailError = result.ok ? null : result.error || 'Email send failed';
-
-    database.auditLogs.push({
-      id: randomUUID(),
-      actor: 'system',
-      action: result.ok ? 'email.confirmation.sent' : 'email.confirmation.failed',
-      entityType: 'registration',
-      entityId: registration.id,
-      payload: {
-        provider: result.provider,
-        email: registration.payload.email,
-        providerMessageId: result.providerMessageId || null,
-        error: result.ok ? null : result.error || 'Email send failed',
-      },
-      createdAt: completedAt,
-    });
+      database.auditLogs.push({
+        id: randomUUID(),
+        actor: 'system',
+        action: result.ok ? 'email.confirmation.sent' : 'email.confirmation.failed',
+        entityType: 'registration',
+        entityId: registration.id,
+        payload: {
+          deliveryId: context.deliveryId,
+          provider: result.provider,
+          email: registration.payload.email,
+          providerMessageId: result.providerMessageId || null,
+          error: result.ok ? null : result.error || 'Email send failed',
+        },
+        createdAt: completedAt,
+      });
+      return upsertEmailDeliveryOutboxInMemory(database.googleSheetSyncs, context.deliveryId, completedAt);
     }, { scope: 'checkout' });
-  }
 
   if (!result.ok) await recordOperationalAlert({
     dedupeKey: `resend:${registrationId}`, severity: 'critical', alertType: 'resend_error',
     title: 'Erro no Resend', message: result.error || 'Falha no envio do e-mail de confirmação.', entityType: 'registration', entityId: registrationId,
   });
-  const emailSheetSync = await queueEmailGoogleSheetSync(registrationId);
-  if (emailSheetSync) await processGoogleSheetSync(emailSheetSync.id);
+  if (emailSheetSync && getGoogleSheetsConfig().enabled) await processGoogleSheetSync(emailSheetSync.id);
 
   console.log(JSON.stringify({
     at: completedAt,

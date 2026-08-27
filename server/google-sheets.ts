@@ -2,6 +2,7 @@ import { createSign } from 'node:crypto';
 import { isGoogleSheetsAllowed } from './environment.js';
 import { buildRemarketingProjections, type RemarketingProjection } from './remarketing.js';
 import { buildConfirmedPaymentsProjection, type ConfirmedPaymentProjection } from './confirmed-payments.js';
+import type { EmailDeliveryRecord } from './email-delivery-history.js';
 import {
   buildGoogleSheetLayoutRequests,
   googleSheetsDateSerial,
@@ -51,10 +52,12 @@ export const GOOGLE_SHEET_HEADERS = {
   lots: ['Lote', 'Capacidade', 'Pagas', 'Reservadas', 'Disponíveis', 'Ocupação %', 'Atualizado em'],
   alerts: ['Gravidade', 'Tipo', 'Título', 'Status', 'Origem', 'Responsável', 'Horário', 'ID'],
   partnerships: ['Empresa', 'Contato', 'Cargo', 'E-mail', 'Status', 'Origem', 'Criado em', 'ID'],
-  emails: ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro'],
+  emails: ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro', 'Delivery ID'],
   remarketing: ['person_key', 'registration_id_reference', 'full_name', 'whatsapp', 'email', 'cpf_masked', 'first_registration_at', 'last_registration_at', 'last_payment_attempt_at', 'amount', 'lot', 'distance', 'registration_status', 'payment_status', 'attempt_count', 'checkout_count', 'partner_or_origin', 'remarketing_status', 'eligible', 'suppression_reason', 'last_payment_check_at', 'updated_at'],
   confirmed_payments: ['Data do pagamento', 'Nome completo', 'CPF parcial', 'WhatsApp', 'E-mail', 'Distância', 'Camisa', 'Lote', 'Número de peito', 'Valor pago', 'Meio de pagamento', 'Parceiro', 'Tipo de parceiro', 'Origem de aquisição', 'Cupom', 'Desconto', 'ID da inscrição', 'ID do pagamento', 'Provider'],
 } as const;
+
+export const LEGACY_EMAIL_SHEET_HEADERS = ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro'] as const;
 
 export type GoogleSheetsConfig = {
   enabled: boolean;
@@ -183,6 +186,21 @@ export function buildPaymentSheetRow(context: PaymentSheetContext): SheetCell[] 
     payment.amountCents / 100,
     sanitizeSheetText(payment.provider),
     sanitizeSheetText(payment.gatewayTransactionId || payment.providerPaymentId),
+  ];
+}
+
+export function buildEmailDeliverySheetRow(delivery: EmailDeliveryRecord): SheetCell[] {
+  const deliveryAt = delivery.sentAt || delivery.failedAt || delivery.attemptedAt;
+  const status = delivery.status === 'sent' ? 'enviado' : delivery.status === 'failed' ? 'falhou' : 'tentando';
+  return [
+    googleSheetsDateSerial(deliveryAt) || '',
+    delivery.registrationId,
+    sanitizeSheetText(delivery.recipientEmail),
+    status,
+    sanitizeSheetText(delivery.provider),
+    sanitizeSheetText(delivery.providerMessageId),
+    sanitizeSheetText(delivery.error),
+    delivery.id,
   ];
 }
 
@@ -503,7 +521,10 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
 
       const matches = headers.length === current.length
         && headers.every((header, index) => normalizeComparableCell(current[index]) === header);
-      if (!matches) {
+      const acceptedLegacyEmailHeader = sheetKey === 'emails'
+        && LEGACY_EMAIL_SHEET_HEADERS.length === current.length
+        && LEGACY_EMAIL_SHEET_HEADERS.every((header, index) => normalizeComparableCell(current[index]) === header);
+      if (!matches && !acceptedLegacyEmailHeader) {
         throw new Error(`Cabeçalho inesperado na aba ${title}. Corrija a primeira linha antes de sincronizar.`);
       }
     }
@@ -728,11 +749,19 @@ export async function executeGoogleSheetSyncTask(
   }
 
   if (task.entityType === 'email') {
-    const registration = database.registrations.find((item) => item.id === task.entityId);
-    if (!registration) throw new Error(`Inscrição ${task.entityId} não encontrada.`);
-    const emailAt = registration.confirmationEmailSentAt || registration.confirmationEmailLastAttemptAt || registration.updatedAt;
-    const row: SheetCell[] = [googleSheetsDateSerial(emailAt) || '', registration.id, sanitizeSheetText(registration.payload.email), registration.confirmationEmailSentAt ? 'enviado' : 'falhou', registration.confirmationEmailProvider || '', registration.confirmationEmailId || '', sanitizeSheetText(registration.confirmationEmailError)];
-    return client.upsertRow('emails', row, 1, registration.id, task.rowNumber);
+    throw new GoogleSheetSyncFailure('Legacy email sync is disabled after email delivery history migration.', false);
+  }
+
+  if (task.entityType === 'email_delivery') {
+    const header = (await client.getValues("'Emails enviados'!A1:H1")).values?.[0] || [];
+    const migratedHeader = GOOGLE_SHEET_HEADERS.emails.length === header.length
+      && GOOGLE_SHEET_HEADERS.emails.every((value, index) => normalizeComparableCell(header[index]) === value);
+    if (!migratedHeader) {
+      throw new GoogleSheetSyncFailure('Email delivery sheet migration is required before delivery sync.', false);
+    }
+    const delivery = database.emailDeliveries?.find((item) => item.id === task.entityId);
+    if (!delivery) throw new GoogleSheetSyncFailure(`Delivery ${task.entityId} não encontrado para sincronização.`, false);
+    return client.upsertRow('emails', buildEmailDeliverySheetRow(delivery), 7, delivery.id, task.rowNumber);
   }
 
   if (task.entityType === 'alert') {
@@ -916,6 +945,7 @@ async function queueProjection(input: GoogleSheetSyncInput, dependencies: { conf
 export function queueLotSummaryGoogleSheetSync(dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'lot_summary', entityId: 'all-lots', sheetName: 'lots', operation: 'replace' }, dependencies); }
 export function queuePartnershipGoogleSheetSync(partnershipId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'partnership', entityId: partnershipId, sheetName: 'partnerships', operation: 'upsert' }, dependencies); }
 export function queueEmailGoogleSheetSync(registrationId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'email', entityId: registrationId, sheetName: 'emails', operation: 'upsert' }, dependencies); }
+export function queueEmailDeliveryGoogleSheetSync(deliveryId: string, dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'email_delivery', entityId: deliveryId, sheetName: 'emails', operation: 'upsert' }, dependencies); }
 export function queueConfirmedPaymentsProjectionGoogleSheetSync(dependencies: { config?: GoogleSheetsConfig; enqueue?: typeof enqueueGoogleSheetSync } = {}) { return queueProjection({ entityType: 'confirmed_payments_projection', entityId: 'paid-and-paid', sheetName: 'confirmed_payments', operation: 'replace' }, dependencies); }
 
 export async function reconcileConfirmedPaymentsGoogleSheetSync(
