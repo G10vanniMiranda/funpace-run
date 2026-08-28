@@ -1,0 +1,76 @@
+name: CI
+
+# Quality gate for the GitHub-first pipeline.
+# Runs on every PR targeting main and on every push to main (post-merge check).
+# This workflow is a QUALITY GATE only. It never deploys, never touches
+# Production, and is given no Production secrets.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege: the gate only needs to read the repository.
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same PR / ref to save minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          # Full history so diff-check and gitleaks can compare against the base.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Print runtime versions
+        run: |
+          node -p "'CI Node: ' + process.version"
+          npm -v
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Whitespace / conflict-marker check
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            echo "git diff --check against origin/${{ github.base_ref }}"
+            git diff --check "origin/${{ github.base_ref }}...HEAD"
+          else
+            echo "git diff --check for the pushed range"
+            git diff --check "${{ github.event.before }}..${{ github.sha }}" || \
+              git diff --check "HEAD^..HEAD"
+          fi
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No GITLEAKS_LICENSE required: this is a personal (User) account repo.
