@@ -68,8 +68,8 @@ export default function SiteApp() {
         <Hero />
         <Marquee />
         <KitSection />
-        <RegistrationSection />
         {showCourseMap && <CourseMap />}
+        <RegistrationSection />
         <Gallery />
         <FAQSection />
         <SponsorSection />
