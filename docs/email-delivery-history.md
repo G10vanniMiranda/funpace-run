@@ -24,6 +24,29 @@ Backfill is separate from the schema migration. Run `scripts/dry-run-email-deliv
 
 Production backfill requires a separately reviewed and authorized execution artifact. Every fallback, collision and ambiguous candidate must be resolved first. The execution must insert only collision-free, unambiguous candidates, preserve audit logs and never update registration, payment, lot, bib, Meta or provider records.
 
+### Cohort classification (read-only)
+
+`npm run email:audit-backfill -- --dry-run --json` recomputes, in a read-only
+transaction, the current cohort of legacy-email registrations that have no
+append-only history and classifies each one:
+
+- **evidence** — `PROVEN` / `RECOVERABLE` / `AMBIGUOUS` / `UNRESOLVED`. The
+  current registration email is never accepted as proof of the historical
+  recipient.
+- **gap** — position of the send relative to the history rollout (derived from
+  the earliest live delivery, not hard-coded): `PRE_HISTORY_EXPECTED_BACKFILL`,
+  `POST_HISTORY_LIVE_FLOW_GAP`, `MIGRATION_WINDOW`, `AMBIGUOUS_TIMELINE`.
+- **collision** — whether the candidate's provider message id already lives on
+  another delivery (`SAME_EVENT_DIFFERENT_CONTEXT`, `TRANSFER_IDENTITY_CHANGE`,
+  `LEGACY_CONTEXT_DRIFT`, `DATA_INCONSISTENCY`).
+- **plan (model only)** — `PLANNED_INSERT_HIGH_CONFIDENCE` only for
+  `PROVEN + PRE_HISTORY` with no collision; `POST_HISTORY_LIVE_FLOW_GAP` is
+  `HOLD_FOR_ROOT_CAUSE`; everything else is a review/no-backfill class.
+
+The tool has no `--apply` / `--execute` / `--write` path and cannot insert. It
+does not import the email sender, provider, cron, webhook or any outbox, and it
+carries no production snapshot and no real identifiers.
+
 ## Google Sheets contract
 
 Old header:
