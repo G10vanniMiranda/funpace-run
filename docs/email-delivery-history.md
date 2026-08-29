@@ -47,6 +47,39 @@ The tool has no `--apply` / `--execute` / `--write` path and cannot insert. It
 does not import the email sender, provider, cron, webhook or any outbox, and it
 carries no production snapshot and no real identifiers.
 
+### Guarded backfill executor (dormant)
+
+`server/email-delivery-backfill-execution.ts` + `scripts/apply-email-delivery-backfill.mjs`
+build the append-only rows for the approved cohort. The executor is **dormant**:
+it is never run during build, startup, deploy or cron, and it refuses to write
+unless every gate is present.
+
+- **Eligible cohort** = `RECOVERABLE_ACCEPTABLE` with `ELIGIBLE_FOR_HUMAN_APPROVAL`
+  only. `UNRESOLVED`, `AMBIGUOUS`, `RECOVERABLE_STRONG`, `RECOVERABLE_WEAK`,
+  `RECOVERABLE_CONFLICT`, provider-message collisions and rows that already have
+  history are excluded by construction. The cohort is recomputed every run — no
+  fixed count.
+- **`--dry-run`** (default) is a read-only transaction: it prints the sanitized
+  plan (`candidateFingerprint`, status, `recipientSource`, provider presence,
+  `idempotencyFingerprint`) and the deterministic `planFingerprint`. `writes=0`.
+- **`--apply`** requires, together: `--approved-plan <sha256 planFingerprint>`
+  (matched against a freshly recomputed plan), `--confirm
+  APPLY_APPROVED_EMAIL_HISTORY_BACKFILL`, and `EMAIL_HISTORY_BACKFILL_ENVIRONMENT=production`.
+  It runs `serializable` + a Postgres advisory lock, re-classifies, rebuilds the
+  plan, re-checks the fingerprint and provider collisions, then
+  `INSERT … ON CONFLICT (idempotency_key) DO NOTHING RETURNING id` and verifies
+  the inserted count. `UPDATE = 0`, `DELETE = 0`. A second identical run inserts
+  0 rows and reports `IDEMPOTENT_NOOP`.
+- **Historical timestamps** (`attempted_at`, `sent_at`, `created_at`) are
+  preserved from the evidence — never `NOW()`. Operational time is only
+  `metadata.recordedAt`. Provenance: `metadata.{historical, backfill,
+  backfillBatchId, backfillCohort, recipientSource, evidenceVersion}`.
+- **Rollback** is design-only: a narrow `DELETE` scoped to the exact
+  `backfillBatchId` + cohort + an explicit idempotency-key list. Executing it
+  needs a separate emergency gate.
+- No import of the email sender, provider, SMTP, cron, webhook, an outbox or a
+  recovery script. No legacy-summary patch, no audit-log write, no schema change.
+
 ## Google Sheets contract
 
 Old header:

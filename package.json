@@ -19,6 +19,7 @@
     "email:resend": "node --import tsx scripts/resend-registration-email.mjs",
     "email:recover-confirmations": "node --import tsx scripts/recover-confirmation-emails.mjs",
     "email:audit-backfill": "node --import tsx scripts/audit-email-delivery-backfill.mjs",
+    "email:apply-backfill": "node --import tsx scripts/apply-email-delivery-backfill.mjs",
     "sheets:sync-existing": "node --import tsx scripts/sync-existing-registrations-to-sheets.mjs",
     "sheets:audit-layout": "node --import tsx scripts/audit-google-sheets-layout.mjs",
     "db:migrate": "node --import tsx scripts/apply-migrations.mjs",
