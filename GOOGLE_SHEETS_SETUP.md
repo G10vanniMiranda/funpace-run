@@ -19,3 +19,23 @@ GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\
 ## Rollback
 
 Defina `GOOGLE_SHEETS_ENABLED=false`. Inscrições e pagamentos continuarão no Supabase. Não remova a tabela da outbox: ela preserva o histórico e permite reprocessamento posterior.
+
+## Layout drift safety (RELEASE-04 Stage 1)
+
+O sync de layout reconcilia formatação (colunas, freeze, filtros, banding,
+formatação condicional, protected range) a cada tarefa da outbox. Ele **não**
+altera cabeçalhos, colunas ou dados.
+
+- `GOOGLE_SHEETS_STRICT_LAYOUT_GUARD` — **default `false`**. Com `false` o
+  comportamento é idêntico ao já publicado. Com `true` o sync passa a **falhar
+  fechado** (`LAYOUT_DRIFT_DETECTED`, não-retryable, requer ação do operador) ao
+  encontrar formatação condicional, banding ou basic filter que não reconhece
+  como FUNPACE-managed, em vez de sobrescrevê-los silenciosamente. Não habilite
+  antes do fingerprint da planilha de Produção (Stage 2).
+- `npm run sheets:audit-layout -- --fixture <arquivo.json>` — auditoria
+  **somente leitura**. Classifica os recursos de layout (`managed` /
+  `legacy_managed` / `unmanaged`), calcula o plano de reparo que *seria*
+  aplicado e imprime `REMOTE_MUTATIONS=0`. Não existe `--apply`.
+- `npm run sheets:audit-layout -- --headers` roda a mesma auditoria contra a
+  planilha remota configurada, lendo apenas metadados e a linha de cabeçalho
+  (nunca linhas de participantes). Continua sem nenhuma escrita.

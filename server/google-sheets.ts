@@ -6,6 +6,7 @@ import type { EmailDeliveryRecord } from './email-delivery-history.js';
 import {
   buildGoogleSheetLayoutRequests,
   googleSheetsDateSerial,
+  LayoutDriftError,
   type ActualGoogleSheetLayout,
 } from './google-sheets-layout.js';
 import {
@@ -66,6 +67,12 @@ export type GoogleSheetsConfig = {
   serviceAccountEmail: string;
   privateKey: string;
   configurationIssue: string | null;
+  /**
+   * RELEASE-04 Stage 1 activation boundary. When `false` (default in every
+   * environment) the layout sync keeps its released behaviour. When `true` the
+   * sync fails closed on unmanaged layout resources instead of replacing them.
+   */
+  strictLayoutGuard: boolean;
 };
 
 export type SheetCell = string | number | boolean;
@@ -125,6 +132,7 @@ export function getGoogleSheetsConfig(environment: NodeJS.ProcessEnv = process.e
     configurationIssue: enabled && missing.length > 0
       ? `Google Sheets habilitado, mas faltam variáveis: ${missing.join(', ')}.`
       : null,
+    strictLayoutGuard: environment.GOOGLE_SHEETS_STRICT_LAYOUT_GUARD === 'true',
   };
 }
 
@@ -368,6 +376,11 @@ export class GoogleSheetSyncFailure extends Error {
 
 export function classifyGoogleSheetSyncFailure(error: unknown) {
   if (error instanceof GoogleSheetSyncFailure) return error;
+  if (error instanceof LayoutDriftError) {
+    // Structural drift is deterministic: retrying an unchanged sheet cannot
+    // resolve it. Surface it as a non-retryable, operator-action failure.
+    return new GoogleSheetSyncFailure(error.message, false);
+  }
   if (error instanceof GoogleSheetsApiError) {
     const retryable = error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
     return new GoogleSheetSyncFailure(error.message, retryable);
@@ -543,7 +556,14 @@ export function createGoogleSheetsClient(options: GoogleSheetsClientOptions = {}
       const title = GOOGLE_SHEET_TABS[sheetKey];
       const firstColumnValues = (await getValues(`${quoteSheetTitle(title)}!A:A`)).values || [];
       const dataRowCount = Math.max(firstColumnValues.length - 1, 0);
-      requests.push(...buildGoogleSheetLayoutRequests(sheetKey, sheetId, sheet, config.serviceAccountEmail, dataRowCount));
+      requests.push(...buildGoogleSheetLayoutRequests(
+        sheetKey,
+        sheetId,
+        sheet,
+        config.serviceAccountEmail,
+        dataRowCount,
+        { strictLayoutGuard: config.strictLayoutGuard },
+      ));
     }
     await batchUpdate(requests);
     return { sheetCount: sheetKeys.length, requestCount: requests.length };
