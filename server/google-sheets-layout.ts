@@ -288,10 +288,14 @@ function canonicalRange(value: unknown) {
 
 function canonicalColor(value: unknown) {
   const color = ((value as { rgbColor?: Record<string, unknown> } | undefined)?.rgbColor || value || {}) as Record<string, unknown>;
+  // Google serializes colour channels as truncated floats (for example 0.8862745
+  // for 226/255). Round both sides to a stable precision so a managed rule is not
+  // seen as drifted and rewritten on every sync.
+  const channel = (entry: unknown) => Number(Number(entry || 0).toFixed(5));
   return {
-    red: Number(color.red || 0),
-    green: Number(color.green || 0),
-    blue: Number(color.blue || 0),
+    red: channel(color.red),
+    green: channel(color.green),
+    blue: channel(color.blue),
   };
 }
 
@@ -352,14 +356,34 @@ export function googleSheetsDateSerial(value: string, timeZone = 'America/Manaus
   return localWallClockUtc / 86_400_000 + 25_569;
 }
 
+export type BuildGoogleSheetLayoutOptions = {
+  /**
+   * DETECT boundary for the strict layout drift guard (RELEASE-04 Stage 1).
+   *
+   * `false` (default): behave exactly like the released sync — unmanaged
+   * conditional formats, bandings and basic filters are silently replaced.
+   *
+   * `true`: fail closed. If the sheet carries a conditional format, banding or
+   * basic filter that is not recognised as FUNPACE-managed (or a known legacy
+   * FUNPACE resource), throw {@link LayoutDriftError} and emit **no** requests.
+   * Activation lives behind `GOOGLE_SHEETS_STRICT_LAYOUT_GUARD` and is OFF in
+   * every environment until Stage 2.
+   */
+  strictLayoutGuard?: boolean;
+};
+
 export function buildGoogleSheetLayoutRequests(
   sheetKey: GoogleSheetLayoutKey,
   sheetId: number,
   actual: ActualGoogleSheetLayout,
   serviceAccountEmail: string,
   dataRowCount = Math.max((actual.properties?.gridProperties?.rowCount || 1) - 1, 0),
+  options: BuildGoogleSheetLayoutOptions = {},
 ) {
   const layout = GOOGLE_SHEET_LAYOUTS[sheetKey];
+  if (options.strictLayoutGuard) {
+    assertNoUnmanagedLayoutDrift(sheetKey, sheetId, actual, serviceAccountEmail);
+  }
   const requests: GoogleSheetsBatchRequest[] = [];
   const rowCount = Math.max(actual.properties?.gridProperties?.rowCount || 1000, 2);
 
@@ -472,15 +496,19 @@ export function buildGoogleSheetLayoutRequests(
   }
 
   const protectionDescription = `FUNPACE_MANAGED:${sheetKey}:synced-data`;
+  const actualProtected = actual.protectedRanges || [];
+  const managed = actualProtected.filter((item) => String(item.description || '').startsWith(`FUNPACE_MANAGED:${sheetKey}:`));
+  const current = managed.find((item) => item.description === protectionDescription);
+  // Preserve any humans that were granted edit access to the managed range; only
+  // guarantee the service account is present. Dropping existing editors would
+  // lock operators out of the protected data range during a range migration.
+  const currentEditors = ((current?.editors || {}) as { users?: string[] }).users || [];
   const desiredProtection: Record<string, unknown> = {
     range: gridRange(sheetId, 0, layout.columnCount),
     description: protectionDescription,
     warningOnly: false,
-    editors: { users: [serviceAccountEmail] },
+    editors: { users: [...new Set([serviceAccountEmail, ...currentEditors])] },
   };
-  const actualProtected = actual.protectedRanges || [];
-  const managed = actualProtected.filter((item) => String(item.description || '').startsWith(`FUNPACE_MANAGED:${sheetKey}:`));
-  const current = managed.find((item) => item.description === protectionDescription);
   for (const stale of managed.filter((item) => item !== current)) {
     if (typeof stale.protectedRangeId === 'number') requests.push({ deleteProtectedRange: { protectedRangeId: stale.protectedRangeId } });
   }
@@ -518,4 +546,380 @@ export function buildGoogleSheetLayoutRequests(
   }
 
   return requests;
+}
+
+// ---------------------------------------------------------------------------
+// RELEASE-04 Stage 1 — layout drift DETECT / PLAN primitives.
+//
+// These helpers never touch the network. `buildGoogleSheetLayoutRequests`
+// stays the only APPLY path and is unchanged with the default options.
+// ---------------------------------------------------------------------------
+
+export type LayoutResourceOwnership = 'managed' | 'legacy_managed' | 'unmanaged' | 'none';
+
+export type LayoutDriftDetail = {
+  kind: 'conditional_format' | 'banding' | 'basic_filter';
+  count: number;
+  note: string;
+};
+
+export class LayoutDriftError extends Error {
+  readonly code = 'LAYOUT_DRIFT_DETECTED';
+  readonly operatorActionRequired = true;
+  readonly retryable = false;
+
+  constructor(readonly sheetKey: string, readonly drift: LayoutDriftDetail[]) {
+    super(`LAYOUT_DRIFT_DETECTED:${sheetKey}:${drift.map((item) => item.kind).join(',') || 'unknown'}`);
+    this.name = 'LayoutDriftError';
+  }
+}
+
+function rangesOverlap(leftValue: unknown, rightValue: unknown) {
+  const left = canonicalRange(leftValue);
+  const right = canonicalRange(rightValue);
+  if (left.sheetId !== right.sheetId) return false;
+  const leftRowEnd = left.endRowIndex ?? Number.POSITIVE_INFINITY;
+  const rightRowEnd = right.endRowIndex ?? Number.POSITIVE_INFINITY;
+  const leftColumnEnd = left.endColumnIndex ?? Number.POSITIVE_INFINITY;
+  const rightColumnEnd = right.endColumnIndex ?? Number.POSITIVE_INFINITY;
+  return Number(left.startRowIndex) < Number(rightRowEnd)
+    && Number(right.startRowIndex) < Number(leftRowEnd)
+    && Number(left.startColumnIndex) < Number(rightColumnEnd)
+    && Number(right.startColumnIndex) < Number(leftColumnEnd);
+}
+
+function conditionalFormatIsManaged(actual: Record<string, unknown>, desired: Array<Record<string, unknown>>) {
+  const canonical = JSON.stringify(canonicalConditionalFormat(actual));
+  return desired.some((item) => JSON.stringify(canonicalConditionalFormat(item)) === canonical);
+}
+
+function bandingColorsMatch(actual: Record<string, unknown>, desired: Record<string, unknown>) {
+  const actualRows = (actual.rowProperties || {}) as Record<string, unknown>;
+  const desiredRows = (desired.rowProperties || {}) as Record<string, unknown>;
+  return JSON.stringify({
+    first: canonicalColor((actualRows.firstBandColorStyle || actualRows.firstBandColor) as unknown),
+    second: canonicalColor((actualRows.secondBandColorStyle || actualRows.secondBandColor) as unknown),
+  }) === JSON.stringify({
+    first: canonicalColor((desiredRows.firstBandColorStyle || desiredRows.firstBandColor) as unknown),
+    second: canonicalColor((desiredRows.secondBandColorStyle || desiredRows.secondBandColor) as unknown),
+  });
+}
+
+function desiredBandingFor(layout: GoogleSheetLayout, sheetId: number, rowCount: number): Record<string, unknown> {
+  return {
+    range: { ...gridRange(sheetId, 0, layout.columnCount, 1), endRowIndex: rowCount },
+    rowProperties: {
+      firstBandColorStyle: { rgbColor: rgb(BODY_ODD) },
+      secondBandColorStyle: { rgbColor: rgb(BODY_EVEN) },
+    },
+  };
+}
+
+function bandingOwnership(
+  sheetKey: GoogleSheetLayoutKey,
+  item: Record<string, unknown>,
+  desiredBanding: Record<string, unknown>,
+): LayoutResourceOwnership {
+  if (!rangesOverlap(item.range, desiredBanding.range)) return 'none';
+  if (!bandingColorsMatch(item, desiredBanding)) return 'unmanaged';
+  const endColumn = canonicalRange(item.range).endColumnIndex;
+  const desiredColumn = canonicalRange(desiredBanding.range).endColumnIndex;
+  if (Number(endColumn) === Number(desiredColumn)) return 'managed';
+  if (sheetKey === 'emails' && Number(endColumn) === 7) return 'legacy_managed';
+  return 'unmanaged';
+}
+
+function basicFilterOwnership(
+  sheetKey: GoogleSheetLayoutKey,
+  actual: Record<string, unknown> | undefined,
+  sheetId: number,
+  columnCount: number,
+): LayoutResourceOwnership {
+  if (!actual || Object.keys(actual).length === 0) return 'none';
+  const criteria = (actual.criteria || {}) as Record<string, unknown>;
+  const filterSpecs = (actual.filterSpecs || []) as unknown[];
+  const sortSpecs = (actual.sortSpecs || []) as unknown[];
+  if (Object.keys(criteria).length > 0 || filterSpecs.length > 0 || sortSpecs.length > 0) return 'unmanaged';
+  const range = canonicalRange(actual.range);
+  if (range.sheetId !== sheetId || range.startRowIndex !== 0 || range.startColumnIndex !== 0) return 'unmanaged';
+  if (Number(range.endColumnIndex) === columnCount) return 'managed';
+  if (sheetKey === 'emails' && Number(range.endColumnIndex) === 7) return 'legacy_managed';
+  return 'unmanaged';
+}
+
+export type LayoutResourceClassification = {
+  sheetKey: GoogleSheetLayoutKey;
+  sheetId: number;
+  conditionalFormats: { total: number; managed: number; unmanaged: number };
+  bandings: { total: number; managed: number; legacyManaged: number; unmanaged: number };
+  basicFilter: LayoutResourceOwnership;
+  protectedRanges: { managedCurrent: number; managedLegacy: number; external: number };
+};
+
+export function classifyLayoutResources(
+  sheetKey: GoogleSheetLayoutKey,
+  sheetId: number,
+  actual: ActualGoogleSheetLayout,
+  serviceAccountEmail: string,
+  dataRowCount = Math.max((actual.properties?.gridProperties?.rowCount || 1) - 1, 0),
+): LayoutResourceClassification {
+  const layout = GOOGLE_SHEET_LAYOUTS[sheetKey];
+  const rowCount = Math.max(actual.properties?.gridProperties?.rowCount || 1000, 2);
+  const desiredConditional = desiredConditionalFormats(layout, sheetId, rowCount);
+  const desiredBanding = desiredBandingFor(layout, sheetId, rowCount);
+
+  const actualConditional = actual.conditionalFormats || [];
+  const managedConditional = actualConditional.filter((item) => conditionalFormatIsManaged(item, desiredConditional)).length;
+
+  const overlapping = (actual.bandedRanges || []).filter((item) => rangesOverlap(item.range, desiredBanding.range));
+  const bandingKinds = overlapping.map((item) => bandingOwnership(sheetKey, item, desiredBanding));
+
+  const managedProtected = (actual.protectedRanges || [])
+    .filter((item) => String(item.description || '').startsWith(`FUNPACE_MANAGED:${sheetKey}:`));
+  const managedCurrent = managedProtected.filter((item) => item.description === `FUNPACE_MANAGED:${sheetKey}:synced-data`).length;
+
+  void dataRowCount;
+  void serviceAccountEmail;
+
+  return {
+    sheetKey,
+    sheetId,
+    conditionalFormats: {
+      total: actualConditional.length,
+      managed: managedConditional,
+      unmanaged: actualConditional.length - managedConditional,
+    },
+    bandings: {
+      total: overlapping.length,
+      managed: bandingKinds.filter((kind) => kind === 'managed').length,
+      legacyManaged: bandingKinds.filter((kind) => kind === 'legacy_managed').length,
+      unmanaged: bandingKinds.filter((kind) => kind === 'unmanaged').length,
+    },
+    basicFilter: basicFilterOwnership(sheetKey, actual.basicFilter, sheetId, layout.columnCount),
+    protectedRanges: {
+      managedCurrent,
+      managedLegacy: managedProtected.length - managedCurrent,
+      external: (actual.protectedRanges || []).length - managedProtected.length,
+    },
+  };
+}
+
+export function assertNoUnmanagedLayoutDrift(
+  sheetKey: GoogleSheetLayoutKey,
+  sheetId: number,
+  actual: ActualGoogleSheetLayout,
+  serviceAccountEmail: string,
+  dataRowCount?: number,
+) {
+  const classification = classifyLayoutResources(sheetKey, sheetId, actual, serviceAccountEmail, dataRowCount);
+  const drift: LayoutDriftDetail[] = [];
+  if (classification.conditionalFormats.unmanaged > 0) {
+    drift.push({
+      kind: 'conditional_format',
+      count: classification.conditionalFormats.unmanaged,
+      note: 'conditional format rule not created by FUNPACE',
+    });
+  }
+  if (classification.bandings.unmanaged > 0) {
+    drift.push({
+      kind: 'banding',
+      count: classification.bandings.unmanaged,
+      note: 'overlapping banded range not created by FUNPACE',
+    });
+  }
+  if (classification.basicFilter === 'unmanaged') {
+    drift.push({ kind: 'basic_filter', count: 1, note: 'basic filter has criteria or an unexpected range' });
+  }
+  if (drift.length > 0) throw new LayoutDriftError(sheetKey, drift);
+  return classification;
+}
+
+/**
+ * Minimal, strictly non-destructive repair plan: frozen panes plus column
+ * widths / hidden flags derived from the sheet's own grid metadata. Never emits
+ * a delete, a filter change, a banding change, a conditional-format change or a
+ * protected-range change. Used by the read-only audit tool.
+ */
+export function buildGoogleSheetVisualRepairRequests(
+  sheetKey: GoogleSheetLayoutKey,
+  sheetId: number,
+  actual: ActualGoogleSheetLayout,
+) {
+  const layout = GOOGLE_SHEET_LAYOUTS[sheetKey];
+  const requests: GoogleSheetsBatchRequest[] = [];
+  const gridProperties = actual.properties?.gridProperties || {};
+  const frozenProperties: Record<string, number> = {};
+  const frozenFields: string[] = [];
+
+  if (Number(gridProperties.frozenRowCount || 0) !== layout.freezeRows) {
+    frozenProperties.frozenRowCount = layout.freezeRows;
+    frozenFields.push('gridProperties.frozenRowCount');
+  }
+  if (Number(gridProperties.frozenColumnCount || 0) !== layout.freezeColumns) {
+    frozenProperties.frozenColumnCount = layout.freezeColumns;
+    frozenFields.push('gridProperties.frozenColumnCount');
+  }
+  if (frozenFields.length > 0) {
+    requests.push({
+      updateSheetProperties: {
+        properties: { sheetId, gridProperties: frozenProperties },
+        fields: frozenFields.join(','),
+      },
+    });
+  }
+
+  const columnMetadata = actual.data?.[0]?.columnMetadata;
+  if (!columnMetadata || columnMetadata.length < layout.columnCount) {
+    throw new Error(`LAYOUT_COLUMN_METADATA_INCOMPLETE:${sheetKey}`);
+  }
+  layout.widths.forEach((pixelSize, columnIndex) => {
+    const metadata = columnMetadata[columnIndex] || {};
+    const properties: Record<string, number | boolean> = {};
+    const fields: string[] = [];
+    if (Number(metadata.pixelSize || 0) !== pixelSize) {
+      properties.pixelSize = pixelSize;
+      fields.push('pixelSize');
+    }
+    const hiddenByUser = layout.hiddenColumns.includes(columnIndex);
+    if (Boolean(metadata.hiddenByUser) !== hiddenByUser) {
+      properties.hiddenByUser = hiddenByUser;
+      fields.push('hiddenByUser');
+    }
+    if (fields.length > 0) {
+      requests.push({
+        updateDimensionProperties: {
+          range: { sheetId, dimension: 'COLUMNS', startIndex: columnIndex, endIndex: columnIndex + 1 },
+          properties,
+          fields: fields.join(','),
+        },
+      });
+    }
+  });
+
+  return requests;
+}
+
+/**
+ * The convergence FUNPACE would run to migrate the legacy 7-column Emails
+ * banding / basic filter onto the current 8-column contract. Pure: it returns
+ * the request objects for review, it never sends them. Stage 2 authorises APPLY.
+ */
+export function buildLegacyEmailsConvergencePlan(
+  sheetId: number,
+  actual: ActualGoogleSheetLayout,
+): GoogleSheetsBatchRequest[] {
+  const layout = GOOGLE_SHEET_LAYOUTS.emails;
+  const rowCount = Math.max(actual.properties?.gridProperties?.rowCount || 1000, 2);
+  const desiredBanding = desiredBandingFor(layout, sheetId, rowCount);
+  const requests: GoogleSheetsBatchRequest[] = [];
+
+  for (const item of actual.bandedRanges || []) {
+    if (bandingOwnership('emails', item, desiredBanding) === 'legacy_managed' && typeof item.bandedRangeId === 'number') {
+      requests.push({ deleteBanding: { bandedRangeId: item.bandedRangeId } });
+      requests.push({ addBanding: { bandedRange: desiredBanding } });
+    }
+  }
+  if (basicFilterOwnership('emails', actual.basicFilter, sheetId, layout.columnCount) === 'legacy_managed') {
+    requests.push({ setBasicFilter: { filter: { range: gridRange(sheetId, 0, layout.columnCount) } } });
+  }
+  return requests;
+}
+
+export function summarizeRequestKinds(requests: GoogleSheetsBatchRequest[]): Record<string, number> {
+  const kinds: Record<string, number> = {};
+  for (const request of requests) {
+    for (const key of Object.keys(request)) {
+      kinds[key] = (kinds[key] || 0) + 1;
+    }
+  }
+  return kinds;
+}
+
+const STRUCTURAL_REQUEST_KEYS = new Set([
+  'addConditionalFormatRule', 'deleteConditionalFormatRule',
+  'addBanding', 'updateBanding', 'deleteBanding',
+  'addProtectedRange', 'updateProtectedRange', 'deleteProtectedRange',
+]);
+
+/**
+ * Count only the requests that add, replace or remove a managed layout resource.
+ * The width / format / freeze requests are declarative and idempotent, so
+ * `buildGoogleSheetLayoutRequests` always emits them; they are not "drift".
+ */
+export function countStructuralRequests(requests: GoogleSheetsBatchRequest[]): number {
+  return requests.filter((request) => Object.keys(request).some((key) => STRUCTURAL_REQUEST_KEYS.has(key))).length;
+}
+
+export type LayoutDriftStatus = 'converged' | 'managed_repair' | 'legacy_migration' | 'drift_detected';
+
+export type GoogleSheetLayoutPlan = {
+  sheetKey: GoogleSheetLayoutKey;
+  sheetId: number;
+  driftStatus: LayoutDriftStatus;
+  classification: LayoutResourceClassification;
+  plannedRequestCount: number;
+  structuralRequestCount: number;
+  plannedRequestKinds: Record<string, number>;
+  legacyConvergenceRequestCount: number;
+  remoteMutations: 0;
+  notes: string[];
+};
+
+/**
+ * Read-only planner: classify the sheet, compute what a repair *would* do, and
+ * report it. Never sends anything (`remoteMutations` is always 0) and never
+ * throws on drift — it reports `driftStatus: 'drift_detected'` instead.
+ */
+export function buildGoogleSheetLayoutPlan(
+  sheetKey: GoogleSheetLayoutKey,
+  sheetId: number,
+  actual: ActualGoogleSheetLayout,
+  serviceAccountEmail: string,
+  dataRowCount?: number,
+): GoogleSheetLayoutPlan {
+  const classification = classifyLayoutResources(sheetKey, sheetId, actual, serviceAccountEmail, dataRowCount);
+  const notes: string[] = [];
+  const legacyConvergence = sheetKey === 'emails'
+    ? buildLegacyEmailsConvergencePlan(sheetId, actual)
+    : [];
+
+  let driftStatus: LayoutDriftStatus;
+  let plannedRequests: GoogleSheetsBatchRequest[] = [];
+
+  const hasDrift = classification.conditionalFormats.unmanaged > 0
+    || classification.bandings.unmanaged > 0
+    || classification.basicFilter === 'unmanaged';
+
+  if (hasDrift) {
+    driftStatus = 'drift_detected';
+    try {
+      plannedRequests = buildGoogleSheetVisualRepairRequests(sheetKey, sheetId, actual);
+    } catch {
+      plannedRequests = [];
+      notes.push('visual_repair_unavailable: grid column metadata incomplete');
+    }
+  } else {
+    plannedRequests = buildGoogleSheetLayoutRequests(sheetKey, sheetId, actual, serviceAccountEmail, dataRowCount);
+    if (legacyConvergence.length > 0) {
+      driftStatus = 'legacy_migration';
+    } else if (countStructuralRequests(plannedRequests) === 0) {
+      // Only idempotent width / format / freeze requests remain.
+      driftStatus = 'converged';
+    } else {
+      driftStatus = 'managed_repair';
+    }
+  }
+
+  return {
+    sheetKey,
+    sheetId,
+    driftStatus,
+    classification,
+    plannedRequestCount: plannedRequests.length,
+    structuralRequestCount: countStructuralRequests(plannedRequests),
+    plannedRequestKinds: summarizeRequestKinds(plannedRequests),
+    legacyConvergenceRequestCount: legacyConvergence.length,
+    remoteMutations: 0,
+    notes,
+  };
 }

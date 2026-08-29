@@ -3,7 +3,7 @@ import { generateKeyPairSync, verify } from 'node:crypto';
 import test from 'node:test';
 import type { Database, GoogleSheetSyncRecord, PaymentRecord, RegistrationRecord } from '../server/database.js';
 import { buildRemarketingProjections } from '../server/remarketing.js';
-import { googleSheetsDateSerial } from '../server/google-sheets-layout.js';
+import { googleSheetsDateSerial, LayoutDriftError } from '../server/google-sheets-layout.js';
 import {
   buildPaymentSheetRow,
   buildRegistrationSheetRow,
@@ -422,6 +422,13 @@ test('classifies permanent, timeout, rate-limit and unavailable failures', () =>
   assert.equal(classifyGoogleSheetSyncFailure(new GoogleSheetsApiError('rate limited', 429, 'read')).retryable, true);
   assert.equal(classifyGoogleSheetSyncFailure(new GoogleSheetsApiError('temporarily unavailable', 503, 'read')).retryable, true);
   assert.equal(classifyGoogleSheetSyncFailure(new GoogleSheetsApiError('forbidden', 403, 'read')).retryable, false);
+  assert.equal(classifyGoogleSheetSyncFailure(new LayoutDriftError('emails', [{ kind: 'banding', count: 1, note: 'x' }])).retryable, false);
+});
+
+test('strict layout guard is off by default and reads from GOOGLE_SHEETS_STRICT_LAYOUT_GUARD', () => {
+  assert.equal(getGoogleSheetsConfig(configuredEnvironment).strictLayoutGuard, false);
+  assert.equal(getGoogleSheetsConfig({ ...configuredEnvironment, GOOGLE_SHEETS_STRICT_LAYOUT_GUARD: 'true' }).strictLayoutGuard, true);
+  assert.equal(getGoogleSheetsConfig({ ...configuredEnvironment, GOOGLE_SHEETS_STRICT_LAYOUT_GUARD: '1' }).strictLayoutGuard, false);
 });
 
 test('handles a successful Google response with an empty body', async () => {
