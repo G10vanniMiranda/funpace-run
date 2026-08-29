@@ -1,4 +1,4 @@
-import { AnimatePresence, motion, useScroll, useTransform } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion, useScroll, useTransform } from 'motion/react';
 import { useRef, useState } from 'react';
 import { CornerDownRight, Flag, MapPin } from 'lucide-react';
 import { RoutePath } from './percurso/RoutePath';
@@ -62,6 +62,7 @@ const courses: Record<CourseId, CourseDefinition> = {
 
 export function CourseMap() {
   const [activeCourseId, setActiveCourseId] = useState<CourseId>('5k');
+  const reducedMotion = useReducedMotion();
   const activeCourse = courses[activeCourseId];
 
   return (
@@ -105,10 +106,10 @@ export function CourseMap() {
           <AnimatePresence mode="wait">
             <motion.div
               key={activeCourse.id}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.22 }}
+              initial={reducedMotion ? false : { opacity: 0, y: 8 }}
+              animate={reducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+              exit={reducedMotion ? { opacity: 0 } : { opacity: 0, y: -8 }}
+              transition={{ duration: reducedMotion ? 0 : 0.22 }}
               className="order-3 w-full space-y-4 lg:order-0 lg:col-start-1 lg:row-start-2"
               aria-live="polite"
             >
@@ -162,6 +163,7 @@ export function CourseMap() {
 
 export function Gallery() {
   const containerRef = useRef(null);
+  const reducedMotion = useReducedMotion();
   const { scrollYProgress } = useScroll({
     target: containerRef,
     offset: ['start end', 'end start'],
@@ -186,14 +188,14 @@ export function Gallery() {
       </Reveal>
 
       <div className="flex h-105 w-full items-center justify-center gap-3 overflow-hidden px-4 sm:h-130 md:h-[70vh] md:gap-8 md:px-8 lg:h-[80vh]">
-        <motion.div className="flex h-[135%] w-1/2 flex-col gap-3 md:h-[150%] md:w-1/3 md:gap-4" style={{ y: y1 }}>
-          <img src={images[0]} alt="Runner" className="h-1/2 w-full object-cover object-center grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
-          <img src={images[1]} alt="Shoes" className="h-1/2 w-full object-cover grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
+        <motion.div className="flex h-[135%] w-1/2 flex-col gap-3 md:h-[150%] md:w-1/3 md:gap-4" style={reducedMotion ? undefined : { y: y1 }}>
+          <img src={images[0]} alt="Runner" className="gallery-image h-1/2 w-full object-cover object-center grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
+          <img src={images[1]} alt="Shoes" className="gallery-image h-1/2 w-full object-cover grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
         </motion.div>
 
-        <motion.div className="flex h-[135%] w-1/2 flex-col gap-3 md:h-[150%] md:w-1/3 md:gap-4" style={{ y: y2 }}>
-          <img src={images[2]} alt="Group running" className="h-[58%] w-full object-cover grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
-          <img src={images[3]} alt="City Runner" className="h-[42%] w-full object-cover object-top grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
+        <motion.div className="flex h-[135%] w-1/2 flex-col gap-3 md:h-[150%] md:w-1/3 md:gap-4" style={reducedMotion ? undefined : { y: y2 }}>
+          <img src={images[2]} alt="Group running" className="gallery-image h-[58%] w-full object-cover grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
+          <img src={images[3]} alt="City Runner" className="gallery-image h-[42%] w-full object-cover object-top grayscale transition-all duration-500 hover:scale-[1.02] hover:grayscale-0" loading="lazy" decoding="async" />
         </motion.div>
       </div>
     </section>

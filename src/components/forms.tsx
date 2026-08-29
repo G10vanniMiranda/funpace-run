@@ -1,5 +1,5 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
-import { AlertTriangle, ArrowRight, CheckCircle2, Info, Loader2, ShieldCheck, TicketPercent, Users, XCircle } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Loader2, ShieldCheck, TicketPercent, Users } from 'lucide-react';
 import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
@@ -12,6 +12,8 @@ import { formatCpf, formatPhone, validateRegistration } from '../lib/validation'
 import type { AvailabilityResponse, Gender, RaceDistance, RegistrationCouponPricing, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
 import { Reveal } from './premium';
+import { FormField } from './ui/FormField';
+import { StatusMessage } from './ui/StatusMessage';
 
 const initialRegistration: RegistrationFormData = {
   fullName: '',
@@ -32,9 +34,8 @@ const initialRegistration: RegistrationFormData = {
   privacyAccepted: false,
 };
 
-const inputClass = 'premium-input w-full min-w-0 bg-zinc-100 p-3.5 sm:p-4 border-b-2 border-black focus:outline-none focus:bg-zinc-200 transition-colors text-sm sm:text-base';
+const inputClass = 'premium-input w-full min-w-0 bg-zinc-100 p-3.5 sm:p-4 border-b-2 border-black focus:bg-zinc-200 transition-colors text-sm sm:text-base';
 const errorClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-wider text-red-700 leading-relaxed';
-const labelClass = 'text-[11px] sm:text-xs font-bold uppercase tracking-widest leading-relaxed';
 
 export function RegistrationSection() {
   const marketingAllowed = usePrivacyConsent().preferences.marketing;
@@ -339,7 +340,7 @@ export function RegistrationSection() {
             <div className="border border-black/15 bg-black/[0.03] p-4 sm:p-5">
               <div className="flex items-center gap-2">
                 <TicketPercent className="h-4 w-4" />
-                <p className="text-[11px] font-black uppercase tracking-widest">Cupom de desconto</p>
+                <label htmlFor="registration-coupon" className="text-[11px] font-black uppercase tracking-widest">Cupom de desconto</label>
               </div>
               {appliedCoupon ? (
                 <div className="mt-4">
@@ -364,14 +365,16 @@ export function RegistrationSection() {
                 <div className="mt-3">
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <input
+                      id="registration-coupon"
+                      name="coupon"
                       type="text"
+                      autoComplete="off"
                       value={couponInput}
                       onChange={(event) => { setCouponInput(event.target.value); setCouponMessage(''); setCouponStatus(null); }}
                       onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void applyCoupon(); } }}
                       disabled={Boolean(partnerContext) || couponStatus === 'applying'}
                       className={`${inputClass} sm:flex-1`}
                       placeholder="Digite seu cupom"
-                      aria-label="Cupom de desconto"
                     />
                     <button
                       type="button"
@@ -388,49 +391,49 @@ export function RegistrationSection() {
               )}
             </div>
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
-              <Field label="Nome Completo" error={errors.fullName}>
-                <input required type="text" value={formData.fullName} onChange={(event) => updateField('fullName', event.target.value)} className={inputClass} placeholder="Nome e sobrenome" aria-invalid={Boolean(errors.fullName)} />
-              </Field>
-              <Field label="E-mail" error={errors.email}>
-                <input required type="email" value={formData.email} onChange={(event) => updateField('email', event.target.value)} className={inputClass} placeholder="voce@email.com" aria-invalid={Boolean(errors.email)} />
-              </Field>
+              <FormField id="registration-full-name" name="fullName" label="Nome Completo" error={errors.fullName} required autoComplete="name">
+                <input type="text" value={formData.fullName} onChange={(event) => updateField('fullName', event.target.value)} className={inputClass} placeholder="Nome e sobrenome" />
+              </FormField>
+              <FormField id="registration-email" name="email" label="E-mail" error={errors.email} required autoComplete="email">
+                <input type="email" value={formData.email} onChange={(event) => updateField('email', event.target.value)} className={inputClass} placeholder="voce@email.com" />
+              </FormField>
             </div>
 
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
-              <Field label="CPF" error={errors.cpf}>
-                <input required type="text" inputMode="numeric" value={formData.cpf} onChange={(event) => updateField('cpf', formatCpf(event.target.value))} className={inputClass} placeholder="000.000.000-00" aria-invalid={Boolean(errors.cpf)} />
-              </Field>
-              <Field label="Telefone / WhatsApp" error={errors.phone}>
-                <input required type="tel" inputMode="tel" value={formData.phone} onChange={(event) => updateField('phone', formatPhone(event.target.value))} className={inputClass} placeholder="(69) 99999-9999" aria-invalid={Boolean(errors.phone)} />
-              </Field>
+              <FormField id="registration-cpf" name="cpf" label="CPF" error={errors.cpf} required autoComplete="off">
+                <input type="text" inputMode="numeric" value={formData.cpf} onChange={(event) => updateField('cpf', formatCpf(event.target.value))} className={inputClass} placeholder="000.000.000-00" />
+              </FormField>
+              <FormField id="registration-phone" name="phone" label="Telefone / WhatsApp" error={errors.phone} required autoComplete="tel">
+                <input type="tel" inputMode="tel" value={formData.phone} onChange={(event) => updateField('phone', formatPhone(event.target.value))} className={inputClass} placeholder="(69) 99999-9999" />
+              </FormField>
             </div>
 
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
-              <Field label="Sexo" error={errors.gender}>
-                <select required value={formData.gender} onChange={(event) => updateField('gender', event.target.value as Gender)} className={`${inputClass} cursor-pointer appearance-none`} aria-invalid={Boolean(errors.gender)}>
+              <FormField id="registration-gender" name="gender" label="Sexo" error={errors.gender} required autoComplete="sex">
+                <select value={formData.gender} onChange={(event) => updateField('gender', event.target.value as Gender)} className={`${inputClass} cursor-pointer appearance-none`}>
                   <option value="">Selecione</option>
                   {eventInfo.genderOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
-              </Field>
-              <Field label="Distancia" error={errors.distance}>
-                <select value={formData.distance} onChange={(event) => updateField('distance', event.target.value as RaceDistance)} className={`${inputClass} cursor-pointer appearance-none`} aria-invalid={Boolean(errors.distance)}>
+              </FormField>
+              <FormField id="registration-distance" name="distance" label="Distancia" error={errors.distance} autoComplete="off">
+                <select value={formData.distance} onChange={(event) => updateField('distance', event.target.value as RaceDistance)} className={`${inputClass} cursor-pointer appearance-none`}>
                   {eventInfo.distanceOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
-              </Field>
+              </FormField>
             </div>
 
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-6">
-              <Field label="Tamanho da Camisa" error={errors.shirtSize}>
-                <select value={formData.shirtSize} onChange={(event) => updateField('shirtSize', event.target.value as ShirtSize)} className={`${inputClass} cursor-pointer appearance-none`} aria-invalid={Boolean(errors.shirtSize)}>
+              <FormField id="registration-shirt-size" name="shirtSize" label="Tamanho da Camisa" error={errors.shirtSize} autoComplete="off">
+                <select value={formData.shirtSize} onChange={(event) => updateField('shirtSize', event.target.value as ShirtSize)} className={`${inputClass} cursor-pointer appearance-none`}>
                   {eventInfo.shirtSizes.map((size) => (
                     <option key={size}>{size}</option>
                   ))}
                 </select>
-              </Field>
+              </FormField>
             </div>
 
             <div className="space-y-2 border border-black/15 bg-black/5 p-3.5 sm:p-4">
@@ -478,34 +481,34 @@ export function RegistrationSection() {
             </button>
 
             {status === 'submitting' && showSlowCheckoutHint && (
-              <AlertMessage tone="info" title="Checkout em preparo">
+              <StatusMessage tone="info" title="Checkout em preparo">
                 Seu checkout está sendo preparado. Isso pode levar alguns instantes a mais. Não feche esta tela.
-              </AlertMessage>
+              </StatusMessage>
             )}
 
             {status === 'submitting' && (
-              <AlertMessage tone="info" title="Informação">
+              <StatusMessage tone="info" title="Informação">
                 Preparando checkout. Não feche esta tela.
-              </AlertMessage>
+              </StatusMessage>
             )}
 
             {status === 'checkout_pending' && (
-              <AlertMessage tone="success" title="Inscrição criada">
+              <StatusMessage tone="success" title="Inscrição criada">
                 {apiMessage} ID: {registrationId}. {eventInfo.offerNote}
-              </AlertMessage>
+              </StatusMessage>
             )}
             {status === 'api_error' && (
-              <AlertMessage tone="error" title="Erro">
+              <StatusMessage tone="error" title="Erro">
                 <span>{apiMessage}</span>
                 <a href={checkoutSupportUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex font-black uppercase tracking-widest underline underline-offset-4">
                   Falar com suporte
                 </a>
-              </AlertMessage>
+              </StatusMessage>
             )}
             {submitAttempted && Object.keys(errors).length > 0 && status !== 'api_error' && (
-              <AlertMessage tone="warning" title="Atenção">
+              <StatusMessage tone="warning" title="Atenção">
                 Existem campos inválidos. Corrija os dados destacados para continuar.
-              </AlertMessage>
+              </StatusMessage>
             )}
           </form>
         </Reveal>
@@ -516,16 +519,6 @@ export function RegistrationSection() {
 
 function PriceItem({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
   return <div><p className="text-[10px] font-black uppercase tracking-wider opacity-55">{label}</p><p className={`mt-1 font-mono ${strong ? 'text-lg font-black' : 'font-bold'}`}>{value}</p></div>;
-}
-
-function Field({ label, error, children }: { label: string; error?: string; children: ReactNode }) {
-  return (
-    <div className="min-w-0 space-y-2">
-      <label className={labelClass}>{label}</label>
-      {children}
-      {error && <p className={errorClass}>{error}</p>}
-    </div>
-  );
 }
 
 function Checkbox({
@@ -544,6 +537,8 @@ function Checkbox({
   return (
     <label className="flex items-start gap-3 text-sm font-bold leading-relaxed">
       <input
+        id="registration-regulation-accepted"
+        name="regulationAccepted"
         type="checkbox"
         checked={checked}
         onChange={(event) => onChange(event.target.checked)}
@@ -554,46 +549,6 @@ function Checkbox({
       />
       <span className="min-w-0">{children}</span>
     </label>
-  );
-}
-
-function AlertMessage({
-  tone,
-  title,
-  children,
-}: {
-  tone: 'success' | 'warning' | 'error' | 'info';
-  title: string;
-  children: ReactNode;
-}) {
-  const styles = {
-    success: {
-      className: 'border-emerald-800 bg-emerald-50 text-emerald-900',
-      icon: CheckCircle2,
-    },
-    warning: {
-      className: 'border-amber-700 bg-amber-50 text-amber-900',
-      icon: AlertTriangle,
-    },
-    error: {
-      className: 'border-red-800 bg-red-50 text-red-900',
-      icon: XCircle,
-    },
-    info: {
-      className: 'border-sky-800 bg-sky-50 text-sky-900',
-      icon: Info,
-    },
-  }[tone];
-  const Icon = styles.icon;
-
-  return (
-    <div className={`flex gap-3 border p-3 text-xs font-bold leading-relaxed shadow-sm transition-opacity duration-300 ${styles.className}`} role={tone === 'error' ? 'alert' : 'status'}>
-      <Icon className="mt-0.5 h-4 w-4 shrink-0" />
-      <div className="min-w-0 wrap-break-word">
-        <p className="mb-1 font-black uppercase tracking-wider">{title}</p>
-        <p className="normal-case tracking-normal">{children}</p>
-      </div>
-    </div>
   );
 }
 

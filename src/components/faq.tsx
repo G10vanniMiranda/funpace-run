@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ChevronDown } from 'lucide-react';
-import { AnimatePresence, motion } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Reveal } from './premium';
 
 const faqs = [
@@ -32,6 +32,7 @@ const faqs = [
 
 export function FAQSection() {
   const [openIndex, setOpenIndex] = useState<number | null>(0);
+  const reducedMotion = useReducedMotion();
 
   return (
     <section id="faq" className="mx-auto max-w-4xl scroll-mt-24 border-t border-zinc-900 px-4 py-16 sm:px-6 md:py-24">
@@ -47,23 +48,32 @@ export function FAQSection() {
       <Reveal className="premium-card flex flex-col border-white/10">
         {faqs.map((faq, index) => {
           const isOpen = openIndex === index;
+          const questionId = `faq-question-${index}`;
+          const answerId = `faq-answer-${index}`;
 
           return (
             <div key={faq.question} className="border-b border-white/10 last:border-b-0">
               <button
+                id={questionId}
                 type="button"
+                aria-expanded={isOpen}
+                aria-controls={answerId}
                 onClick={() => setOpenIndex(isOpen ? null : index)}
                 className="flex w-full items-center justify-between gap-4 px-4 py-5 text-left transition-colors hover:bg-white/3 hover:text-brand sm:px-6 sm:py-6"
               >
                 <span className="min-w-0 pr-2 text-base font-bold leading-snug sm:text-lg md:text-xl">{faq.question}</span>
-                <ChevronDown className={`h-6 w-6 shrink-0 transition-transform duration-300 ${isOpen ? 'rotate-180 text-brand' : 'text-zinc-500'}`} />
+                <ChevronDown aria-hidden="true" className={`h-6 w-6 shrink-0 transition-transform duration-300 ${isOpen ? 'rotate-180 text-brand' : 'text-zinc-500'}`} />
               </button>
               <AnimatePresence>
                 {isOpen && (
                   <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
+                    id={answerId}
+                    role="region"
+                    aria-labelledby={questionId}
+                    initial={reducedMotion ? false : { height: 0, opacity: 0 }}
+                    animate={reducedMotion ? { opacity: 1 } : { height: 'auto', opacity: 1 }}
+                    exit={reducedMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
+                    transition={reducedMotion ? { duration: 0 } : { duration: 0.26 }}
                     className="overflow-hidden"
                   >
                     <p className="px-4 pb-6 pr-2 font-mono text-sm leading-relaxed text-zinc-400 sm:px-6 sm:pr-12 md:pb-8">
