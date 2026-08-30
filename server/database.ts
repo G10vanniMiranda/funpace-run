@@ -394,6 +394,13 @@ type DatabaseReadScope =
   | 'registration-status'
   | 'checkout'
   | 'admin-registrations'
+  // ADMIN-002 Stage 5B: lean read for the executive dashboard + summary.
+  // Loads only events / distances / lots / registrations / payments /
+  // payment-events / check-ins / kit-deliveries, with minimal columns and NO
+  // raw jsonb (gateway_payload, payment-event payload, meta_context, full
+  // registration payload). Does NOT load audit-logs / email-deliveries /
+  // google-sheet-sync (proven unused by both endpoints in Stage 5A).
+  | 'admin-dashboard'
   | 'admin-auth'
   | 'audit'
   | 'partnerships'
@@ -1303,19 +1310,22 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
     };
   }
 
+  // ADMIN-002 Stage 5B: the executive dashboard / summary read a small, fixed
+  // set of tables with minimal columns.
+  const leanDashboard = scope === 'admin-dashboard';
   const include = {
     // ADMIN-002 Stage 4B: the executive dashboard needs run-events to resolve
     // which event a request is scoped to (run-events is a tiny table).
-    events: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
-    distances: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
-    lots: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
-    registrations: ['all', 'availability', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
-    payments: ['all', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
-    paymentEvents: ['all', 'checkout', 'admin-registrations'].includes(scope),
+    events: ['all', 'availability', 'checkout', 'admin-registrations', 'admin-dashboard'].includes(scope),
+    distances: ['all', 'availability', 'checkout', 'admin-registrations', 'admin-dashboard'].includes(scope),
+    lots: ['all', 'availability', 'checkout', 'admin-registrations', 'admin-dashboard'].includes(scope),
+    registrations: ['all', 'availability', 'registration-status', 'checkout', 'admin-registrations', 'admin-dashboard'].includes(scope),
+    payments: ['all', 'registration-status', 'checkout', 'admin-registrations', 'admin-dashboard'].includes(scope),
+    paymentEvents: ['all', 'checkout', 'admin-registrations', 'admin-dashboard'].includes(scope),
     emailDeliveries: ['all', 'checkout', 'admin-registrations'].includes(scope),
     googleSheetSyncs: ['all', 'admin-registrations'].includes(scope),
-    checkIns: ['all', 'admin-registrations'].includes(scope),
-    kitDeliveries: ['all', 'admin-registrations'].includes(scope),
+    checkIns: ['all', 'admin-registrations', 'admin-dashboard'].includes(scope),
+    kitDeliveries: ['all', 'admin-registrations', 'admin-dashboard'].includes(scope),
     auditLogs: ['all', 'audit', 'checkout', 'admin-registrations'].includes(scope),
     adminSessions: ['all', 'admin-auth'].includes(scope),
     adminUsers: ['all'].includes(scope),
@@ -1328,9 +1338,33 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
   const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
   const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`) : emptyRows;
-  const registrations = include.registrations ? await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price, coupon_code, coupon_applied_at, coupon_used_at from ${table.registrations}`) : emptyRows;
-  const payments = include.payments ? await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`) : emptyRows;
-  const paymentEvents = include.paymentEvents ? await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`) : emptyRows;
+  // ADMIN-002 Stage 5B: the 'admin-dashboard' scope selects only the columns the
+  // executive dashboard / summary actually read, and an allow-listed slice of the
+  // registration payload jsonb — never the full payload, gateway_payload,
+  // payment-event payload or meta_context (data minimisation + PII).
+  const registrations = include.registrations
+    ? await client.query(leanDashboard
+      ? `select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents,
+           jsonb_build_object(
+             'city', payload->>'city', 'state', payload->>'state', 'gender', payload->>'gender',
+             'shirtSize', payload->>'shirtSize', 'distance', payload->>'distance',
+             'birthDate', payload->>'birthDate', 'attribution', payload->'attribution'
+           ) as payload,
+           created_at, updated_at, expires_at, paid_at, confirmed_at,
+           confirmation_email_sent_at, confirmation_email_error
+         from ${table.registrations}`
+      : `select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price, coupon_code, coupon_applied_at, coupon_used_at from ${table.registrations}`)
+    : emptyRows;
+  const payments = include.payments
+    ? await client.query(leanDashboard
+      ? `select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status from ${table.payments}`
+      : `select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`)
+    : emptyRows;
+  const paymentEvents = include.paymentEvents
+    ? await client.query(leanDashboard
+      ? `select id, payment_id, provider_event_id, event_type, received_at from ${table.paymentEvents}`
+      : `select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`)
+    : emptyRows;
   const emailDeliveries = include.emailDeliveries ? await client.query(`select id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider, provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at from ${table.emailDeliveries}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
   const checkIns = include.checkIns ? await client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows;
