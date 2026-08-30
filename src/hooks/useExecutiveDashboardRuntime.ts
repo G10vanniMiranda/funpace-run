@@ -23,16 +23,18 @@ function writeEventSlug(slug: string) {
   window.history.replaceState(null, '', query ? `${window.location.pathname}?${query}` : window.location.pathname);
 }
 
-const INITIAL_STATE: ExecutiveDashboardRuntimeState = {
-  phase: 'initial-loading',
-  data: null,
-  selectedSlug: readEventSlug(),
-  events: [],
-  eventsError: '',
-  error: '',
-  errorCode: '',
-  lastGeneratedAt: null,
-};
+function initialState(): ExecutiveDashboardRuntimeState {
+  return {
+    phase: 'initial-loading',
+    data: null,
+    selectedSlug: readEventSlug(),
+    events: [],
+    eventsError: '',
+    error: '',
+    errorCode: '',
+    lastGeneratedAt: null,
+  };
+}
 
 export type UseExecutiveDashboardRuntime = {
   state: ExecutiveDashboardRuntimeState;
@@ -45,7 +47,7 @@ export function useExecutiveDashboardRuntime(
   adminKey: string,
   onSessionExpired: () => void,
 ): UseExecutiveDashboardRuntime {
-  const [state, setState] = useState<ExecutiveDashboardRuntimeState>(INITIAL_STATE);
+  const [state, setState] = useState<ExecutiveDashboardRuntimeState>(initialState);
   const runtimeRef = useRef<ExecutiveDashboardRuntime | null>(null);
   const onSessionExpiredRef = useRef(onSessionExpired);
   onSessionExpiredRef.current = onSessionExpired;
