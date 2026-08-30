@@ -228,6 +228,12 @@ export type AdminSummaryResponse = {
 
 export type AdminRegistration = {
   id: string;
+  /**
+   * ADMIN-003 Stage 2: on the person-centric Inscrições list this is the number
+   * of registration attempts the person has in the event (>= 1). Absent on
+   * payloads returned by mutation/detail endpoints, which are single-row.
+   */
+  attemptsCount?: number;
   fullName: string;
   email: string;
   cpfMasked: string;
@@ -286,9 +292,38 @@ export type AdminRegistration = {
   confirmationEmailError?: string | null;
 };
 
+/**
+ * ADMIN-003 Stage 2: the Inscrições tab is person-centric. Each row is a person
+ * within one event — the canonical registration (paid > active > newest) — plus
+ * the count of that person's attempts in the event. `attemptsCount === 1` for
+ * the common case; `> 1` means there is retry history behind the row.
+ */
+export type AdminParticipantRow = AdminRegistration & { attemptsCount: number };
+
+/** ADMIN-003 Stage 2: one attempt in a person's history, PII-free. */
+export type AdminRegistrationHistoryItem = {
+  id: string;
+  status: RegistrationStatus;
+  createdAt: string;
+  amountCents: number;
+  paidAt: string | null;
+  isCanonical: boolean;
+};
+
 export type AdminRegistrationsResponse = {
   registrations: AdminRegistration[];
-  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    /** ADMIN-003 Stage 2 (`view=people` only): consolidated people in the view. */
+    people?: number;
+    /** ADMIN-003 Stage 2 (`view=people` only): registration rows behind them. */
+    historicalRegistrations?: number;
+  };
+  /** ADMIN-003 Stage 2 (`view=people` only): the single event this response is scoped to. */
+  event?: AdminEventContext;
 };
 export type RemarketingCampaignMetrics = {
   campaign: 'whatsapp_remarketing_volta10';
@@ -382,6 +417,8 @@ export type AdminRegistrationDetailsResponse = {
   timeline: AdminTimelineEvent[];
   partnerAuditLogs: Array<{ id: string; partnerId: string | null; partnerName: string | null; action: string; userId: string | null; registrationId: string | null; eventId: string | null; oldData: unknown; newData: unknown; metadata: Record<string, unknown>; ipAddress: string | null; userAgent: string | null; createdAt: string }>;
   partnerHistory: { partnerId: string; partnerName: string; partnerType: import('./partner').PartnerType; partnerLink: string; discountPercentage: number; identifiedAt: string; paidAt: string | null; responsibleUser: string | null } | null;
+  /** ADMIN-003 Stage 2: this person's attempts within the same event, newest first. */
+  personHistory: AdminRegistrationHistoryItem[];
 };
 
 export type AdminOperationalAlert = {

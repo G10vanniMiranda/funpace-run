@@ -100,6 +100,7 @@ import {
 import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAlerts } from './operational-intelligence.js';
 import { buildExecutiveMetrics, financialVisibleForRole } from './executive-metrics.js';
 import { eventContext, resolveEventScope, scopeDatabaseToEvent, type EventScopeErrorCode } from './event-scope.js';
+import { consolidateParticipants, toRegistrationHistory } from './participant-read-model.js';
 import { businessDateKey, businessDateKeysEndingToday, businessTodayKey, businessWeekStart } from './business-time.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
@@ -2897,8 +2898,13 @@ async function handleHealth(req: IncomingMessage, res: ServerResponse) {
   }
 }
 
-async function getAdminRows(url: URL) {
-  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
+type AdminRow = ReturnType<typeof toAdminRow>;
+
+// ADMIN-003 Stage 2: the Inscricoes list, the tab CSV and the operational report
+// all read the same query string. Centralise the predicates so the row-centric
+// path (report export) and the person-centric path (the tab) can never drift,
+// and give the sort a deterministic id tie-breaker so pagination is stable.
+function buildAdminRowFilters(url: URL) {
   const lotId = url.searchParams.get('lotId') || '';
   const distanceId = url.searchParams.get('distanceId') || '';
   const status = url.searchParams.get('status') || '';
@@ -2916,56 +2922,104 @@ async function getAdminRows(url: URL) {
   const sortOrder = url.searchParams.get('sortOrder') === 'asc' ? 1 : -1;
   const query = (url.searchParams.get('q') || '').trim().toLowerCase();
 
-  return database.registrations
-    .filter((registration) => !lotId || registration.lotId === lotId)
-    .filter((registration) => !distanceId || registration.distanceId === distanceId)
-    .filter((registration) => !status || registration.status === status)
-    .filter((registration) => !gender || registration.payload.gender === gender)
-    .filter((registration) => !city || registration.payload.city?.toLowerCase().includes(city))
-    .filter((registration) => !team || registration.payload.team?.toLowerCase().includes(team))
-    .filter((registration) => !shirtSize || registration.payload.shirtSize === shirtSize)
-    .filter((registration) => !bibNumber || registration.bibNumber?.toLowerCase().includes(bibNumber))
-    .filter((registration) => {
-      if (!query) {
-        return true;
-      }
-
+  function matchesRegistration(registration: RegistrationRecord): boolean {
+    if (lotId && registration.lotId !== lotId) return false;
+    if (distanceId && registration.distanceId !== distanceId) return false;
+    if (status && registration.status !== status) return false;
+    if (gender && registration.payload.gender !== gender) return false;
+    if (city && !registration.payload.city?.toLowerCase().includes(city)) return false;
+    if (team && !registration.payload.team?.toLowerCase().includes(team)) return false;
+    if (shirtSize && registration.payload.shirtSize !== shirtSize) return false;
+    if (bibNumber && !registration.bibNumber?.toLowerCase().includes(bibNumber)) return false;
+    if (query) {
       const digitQuery = onlyDigits(query);
-      return (
-        registration.payload.fullName.toLowerCase().includes(query)
+      const hit = registration.payload.fullName.toLowerCase().includes(query)
         || registration.payload.email.toLowerCase().includes(query)
         || registration.payload.phone.includes(query)
         || registration.payload.cpf.includes(query)
         || registration.payload.city?.toLowerCase().includes(query)
         || registration.payload.team?.toLowerCase().includes(query)
         || registration.bibNumber?.toLowerCase().includes(query)
-        || (digitQuery.length > 0 && onlyDigits(registration.payload.cpf).includes(digitQuery))
-      );
-    })
-    .map((registration) => toAdminRow(database, registration))
-    .filter((row) => {
-      if (reportType === 'kits' && row.kitStatus !== 'delivered') return false;
-      if (reportType === 'checkins' && row.checkInStatus !== 'checked_in') return false;
-      if (reportType === 'paid' && row.status !== 'paid') return false;
-      if (reportType === 'pending' && row.status !== 'pending_payment') return false;
-      if (sheetStatus === 'unsynchronized' && !['pending', 'processing', 'failed', 'not_queued'].includes(row.googleSheetsStatus)) return false;
-      if (paymentFilter && row.paymentProvider !== paymentFilter && row.paymentMethod !== paymentFilter && row.paymentStatus !== paymentFilter) return false;
-      const referenceDate = reportType === 'kits'
-        ? (row.kitDeliveredAt || '')
-        : reportType === 'checkins'
-          ? (row.checkInAt || '')
-          : row.createdAt;
-      const day = referenceDate ? referenceDate.slice(0, 10) : '';
-      if (dateFrom && (!day || day < dateFrom)) return false;
-      if (dateTo && (!day || day > dateTo)) return false;
-      return true;
-    })
-    .sort((a, b) => {
-      const allowedSorts: Record<string, keyof typeof a> = { createdAt: 'createdAt', fullName: 'fullName', status: 'status', amountCents: 'amountCents', bibNumber: 'bibNumber' };
-      const field = allowedSorts[sortBy] || 'createdAt';
+        || (digitQuery.length > 0 && onlyDigits(registration.payload.cpf).includes(digitQuery));
+      if (!hit) return false;
+    }
+    return true;
+  }
+
+  function matchesRow(row: AdminRow): boolean {
+    if (reportType === 'kits' && row.kitStatus !== 'delivered') return false;
+    if (reportType === 'checkins' && row.checkInStatus !== 'checked_in') return false;
+    if (reportType === 'paid' && row.status !== 'paid') return false;
+    if (reportType === 'pending' && row.status !== 'pending_payment') return false;
+    if (sheetStatus === 'unsynchronized' && !['pending', 'processing', 'failed', 'not_queued'].includes(row.googleSheetsStatus)) return false;
+    if (paymentFilter && row.paymentProvider !== paymentFilter && row.paymentMethod !== paymentFilter && row.paymentStatus !== paymentFilter) return false;
+    const referenceDate = reportType === 'kits'
+      ? (row.kitDeliveredAt || '')
+      : reportType === 'checkins'
+        ? (row.checkInAt || '')
+        : row.createdAt;
+    const day = referenceDate ? referenceDate.slice(0, 10) : '';
+    if (dateFrom && (!day || day < dateFrom)) return false;
+    if (dateTo && (!day || day > dateTo)) return false;
+    return true;
+  }
+
+  function sortRows<T extends AdminRow>(rows: T[]): T[] {
+    const allowedSorts: Record<string, keyof AdminRow> = { createdAt: 'createdAt', fullName: 'fullName', status: 'status', amountCents: 'amountCents', bibNumber: 'bibNumber' };
+    const field = allowedSorts[sortBy] || 'createdAt';
+    return [...rows].sort((a, b) => {
       const left = a[field] ?? ''; const right = b[field] ?? '';
-      return (typeof left === 'number' && typeof right === 'number' ? left - right : String(left).localeCompare(String(right), 'pt-BR')) * sortOrder;
+      const primary = typeof left === 'number' && typeof right === 'number'
+        ? left - right
+        : String(left).localeCompare(String(right), 'pt-BR');
+      if (primary !== 0) return primary * sortOrder;
+      return String(a.id).localeCompare(String(b.id));
     });
+  }
+
+  return { matchesRegistration, matchesRow, sortRows };
+}
+
+// Row-centric view: one row per registration. Used by the operational report
+// export ("Relatorios"), which is intentionally per-attempt, not per-person.
+async function getAdminRows(url: URL, providedDatabase?: Database) {
+  const database = providedDatabase
+    ?? await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
+  const { matchesRegistration, matchesRow, sortRows } = buildAdminRowFilters(url);
+  const rows = database.registrations
+    .filter(matchesRegistration)
+    .map((registration) => toAdminRow(database, registration))
+    .filter(matchesRow);
+  return sortRows(rows);
+}
+
+export type AdminParticipantRow = AdminRow & { attemptsCount: number };
+
+// Person-centric view for the Inscricoes tab: one row per person within the
+// resolved event. `database` MUST already be scoped to a single event. The
+// canonical registration (paid > active > newest) is the row shown; every
+// attempt stays available as history. Filters/search/sort apply to the
+// canonical row exactly like the row-centric path.
+function getParticipantRows(url: URL, database: Database): {
+  rows: AdminParticipantRow[];
+  peopleTotal: number;
+  historicalRegistrations: number;
+} {
+  const { matchesRegistration, matchesRow, sortRows } = buildAdminRowFilters(url);
+  const rows: AdminParticipantRow[] = [];
+  for (const participant of consolidateParticipants(database.registrations)) {
+    if (!matchesRegistration(participant.canonical)) continue;
+    const row = toAdminRow(database, participant.canonical) as AdminParticipantRow;
+    if (!matchesRow(row)) continue;
+    row.attemptsCount = participant.history.length;
+    rows.push(row);
+  }
+  const sorted = sortRows(rows);
+  return {
+    rows: sorted,
+    peopleTotal: sorted.length,
+    historicalRegistrations: sorted.reduce((sum, row) => sum + row.attemptsCount, 0),
+  };
 }
 
 function toAdminRow(database: Database, registration: RegistrationRecord) {
@@ -3446,9 +3500,54 @@ async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerRespo
 
 const EVENT_SCOPE_ERROR_MESSAGE: Record<EventScopeErrorCode, string> = {
   EVENT_NOT_FOUND: 'Evento nao encontrado.',
-  NO_PUBLISHED_EVENT: 'Nenhum evento publicado para exibir no dashboard.',
-  EVENT_SCOPE_AMBIGUOUS: 'Ha mais de um evento publicado. Informe eventId para escolher.',
+  NO_PUBLISHED_EVENT: 'Nenhum evento publicado.',
+  EVENT_SCOPE_AMBIGUOUS: 'Ha mais de um evento publicado. Selecione um evento para continuar.',
 };
+
+// ADMIN-003 Stage 2: a resource-by-id reached through the Inscricoes tab (detail
+// view, drawer mutations) must belong to the event the request is scoped to.
+// No selector -> no-op (non-tab API callers keep working). Unknown/ambiguous
+// selector -> the same 400 the list uses. Real crossover -> controlled 409,
+// never a silent cross-event read or write.
+function assertRegistrationInRequestedEvent(
+  res: ServerResponse,
+  database: Database,
+  url: URL,
+  registration: RegistrationRecord | null | undefined,
+): boolean {
+  const selector = {
+    eventId: url.searchParams.get('eventId'),
+    eventSlug: url.searchParams.get('eventSlug') || url.searchParams.get('event'),
+  };
+  if (!selector.eventId?.trim() && !selector.eventSlug?.trim()) return true;
+  const resolution = resolveEventScope(database.events, selector);
+  if ('code' in resolution) {
+    json(res, 400, { code: resolution.code, message: EVENT_SCOPE_ERROR_MESSAGE[resolution.code] });
+    return false;
+  }
+  if (registration && registration.eventId !== resolution.event.id) {
+    json(res, 409, { code: 'EVENT_SCOPE_MISMATCH', message: 'A inscricao pertence a outro evento.' });
+    return false;
+  }
+  return true;
+}
+
+// Drawer-reachable mutations call this after their own auth check: when the tab
+// sends an explicit `?event=`, the target registration must live in that event,
+// else a controlled 400/409 (never a cross-event write). Selector absent =>
+// unchanged behaviour for non-tab API clients.
+async function ensureRegistrationEventScope(res: ServerResponse, url: URL, registrationId: string): Promise<boolean> {
+  const selector = (
+    url.searchParams.get('eventId')
+    || url.searchParams.get('eventSlug')
+    || url.searchParams.get('event')
+    || ''
+  ).trim();
+  if (!selector) return true;
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const registration = database.registrations.find((item) => item.id === registrationId);
+  return assertRegistrationInRequestedEvent(res, database, url, registration);
+}
 
 // ADMIN-002 Stage 4B: resolve which event a dashboard request is scoped to.
 // Returns the scoped database + public event context, or writes a 400 and
@@ -3831,7 +3930,7 @@ type AdminActionRequest = {
   notes?: string;
 };
 
-async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
   const adminSession = await requireAdmin(req, res, ['administrator', 'operation']);
   if (!adminSession) {
     return;
@@ -3844,6 +3943,8 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
   if (!requireJson(req, res)) {
     return;
   }
+
+  if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
 
   const rawBody = await readBody(req);
   const payload = parseJsonBody<AdminActionRequest>(rawBody) || {};
@@ -3901,7 +4002,7 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
-async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
   const adminSession = await requireAdmin(req, res, ['administrator', 'operation']);
   if (!adminSession) {
     return;
@@ -3914,6 +4015,8 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
   if (!requireJson(req, res)) {
     return;
   }
+
+  if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
 
   const rawBody = await readBody(req);
   const payload = parseJsonBody<AdminActionRequest>(rawBody) || {};
@@ -3971,10 +4074,11 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
-async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: ServerResponse, registrationId: string, action: string) {
+async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: ServerResponse, registrationId: string, action: string, url: URL) {
   const roles: AdminRole[] = action === 'send-email' ? ['administrator', 'finance'] : action === 'cancel' ? ['administrator'] : ['administrator', 'operation'];
   const adminSession = await requireAdmin(req, res, roles);
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
   const body = parseJsonBody<{ reason?: string }>(await readBody(req)) || {};
   const reason = body.reason?.trim() || '';
   if (['cancel', 'undo-check-in', 'undo-kit'].includes(action) && reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
@@ -4053,9 +4157,10 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
-async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
   const adminSession = await requireAdmin(req, res, ['administrator']);
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
   const body = parseJsonBody<{ reason?: string; changes?: Partial<RegistrationFormData> }>(await readBody(req));
   const reason = body?.reason?.trim() || '';
   if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
@@ -4090,12 +4195,21 @@ async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerRe
   json(res, result.statusCode, result.payload);
 }
 
-async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
   const session = await requireAdmin(req, res);
   if (!session || !requireAdminDatabase(res)) return;
   const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
   const registration = database.registrations.find((item) => item.id === registrationId);
   if (!registration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  // ADMIN-003 Stage 2: if the tab passes ?event=, the detail must be of that event.
+  if (!assertRegistrationInRequestedEvent(res, database, url, registration)) return;
+  // The person's attempt history within THIS event only (dedup by cpf_hash,
+  // never across events). PII-free projection; the technical id lives here, not
+  // as an independent main row.
+  const eventRegistrations = database.registrations.filter((item) => item.eventId === registration.eventId);
+  const personConsolidation = consolidateParticipants(eventRegistrations)
+    .find((participant) => participant.history.some((row) => row.id === registrationId));
+  const personHistory = personConsolidation ? toRegistrationHistory(personConsolidation) : [];
   const payment = database.payments.find((item) => item.registrationId === registrationId);
   const partnerAuditLogs = session.role === 'administrator' ? await getRegistrationPartnerAuditInPostgres(registrationId) : [];
   const partnerTimeline = partnerAuditLogs.map((log) => {
@@ -4110,12 +4224,14 @@ async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerR
     partnerAuditLogs,
     partnerHistory: session.role === 'administrator' && registration.partnerId ? { partnerId: registration.partnerId, partnerName: registration.partnerName || '', partnerType: registration.partnerType || 'sports_advisory', partnerLink: registration.partnerLink || '', discountPercentage: registration.discountPercentage || 0, identifiedAt: registration.partnerIdentifiedAt || registration.createdAt, paidAt: registration.paidAt || payment?.paidAt || null, responsibleUser: partnerAuditLogs.find((log) => log.userId)?.userId || null } : null,
     timeline: [...buildRegistrationTimeline(database, registrationId), ...partnerTimeline].sort((left, right) => left.occurredAt.localeCompare(right.occurredAt)),
+    personHistory,
   });
 }
 
-async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
   const adminSession = await requireAdmin(req, res, ['administrator', 'operation']);
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
   const body = parseJsonBody<{ bibNumber?: string; reason?: string }>(await readBody(req));
   const bibNumber = compactText(body?.bibNumber, 20).toUpperCase(); const reason = body?.reason?.trim() || '';
   if (!/^[A-Z0-9-]{1,20}$/.test(bibNumber) || reason.length < 5) { json(res, 400, { message: 'Numero de peito invalido ou motivo insuficiente.' }); return; }
@@ -4149,8 +4265,35 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
     return;
   }
 
-  const rows = await getAdminRows(url);
   const requestedPage = Math.max(Number.parseInt(url.searchParams.get('page') || '1', 10) || 1, 1);
+
+  // ADMIN-003 Stage 2: `view=people` is the person-centric Inscricoes tab -
+  // scoped to ONE explicit event (reusing the dashboard's event-scope
+  // authority: no "all events", no silent events[0]; a missing/ambiguous
+  // selector returns the same 400 the dashboard uses so the frontend can drive
+  // its selection recovery state) and consolidated to one row per person.
+  // Every other admin panel keeps the historical row-centric global behaviour.
+  if (url.searchParams.get('view') === 'people') {
+    const fullDatabase = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+    const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
+    if (!eventScope) return;
+
+    const { rows, peopleTotal, historicalRegistrations } = getParticipantRows(url, eventScope.scoped);
+    const pageSize = url.searchParams.has('pageSize')
+      ? Math.min(Math.max(Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25, 1), 200)
+      : Math.max(rows.length, 1);
+    const total = peopleTotal;
+    const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+    const page = Math.min(requestedPage, totalPages);
+    json(res, 200, {
+      registrations: rows.slice((page - 1) * pageSize, page * pageSize),
+      pagination: { page, pageSize, total, totalPages, people: peopleTotal, historicalRegistrations },
+      event: eventScope.context,
+    });
+    return;
+  }
+
+  const rows = await getAdminRows(url);
   const pageSize = url.searchParams.has('pageSize')
     ? Math.min(Math.max(Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25, 1), 200)
     : Math.max(rows.length, 1);
@@ -4277,11 +4420,12 @@ async function handleAdminGoogleSheetsCheck(req: IncomingMessage, res: ServerRes
   }
 }
 
-async function handleAdminRegistrationGoogleSheetsSync(req: IncomingMessage, res: ServerResponse, registrationId: string) {
+async function handleAdminRegistrationGoogleSheetsSync(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
   if (!await requireAdmin(req, res, ['administrator', 'operation']) || !requireAdminDatabase(res)) return;
   const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
   const registration = database.registrations.find((item) => item.id === registrationId);
   if (!registration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  if (!assertRegistrationInRequestedEvent(res, database, url, registration)) return;
   const payment = database.payments.find((item) => item.registrationId === registrationId);
   const tasks = payment?.status === 'paid'
     ? await queueConfirmedPaymentGoogleSheetSync(registrationId, payment.id)
@@ -4676,7 +4820,22 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     return;
   }
 
-  const rows = await getAdminRows(url);
+  // ADMIN-003 Stage 2: `view=people` makes the CSV follow the Inscricoes tab -
+  // event-scoped and person-centric (one row per person = the canonical
+  // registration). Small and safe at current scale (~1 event, ~380 people); a
+  // `tentativas` column carries the retry count without conflating it with
+  // participants. Without the flag the export stays row-centric and global for
+  // the Relatorios tab. Stage 1's `escapeCsv` formula guard is preserved below.
+  const peopleView = url.searchParams.get('view') === 'people';
+  let rows: Array<ReturnType<typeof toAdminRow> & { attemptsCount?: number }>;
+  if (peopleView) {
+    const fullDatabase = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+    const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
+    if (!eventScope) return;
+    rows = getParticipantRows(url, eventScope.scoped).rows;
+  } else {
+    rows = await getAdminRows(url);
+  }
   const headers = [
     'id',
     'nome',
@@ -4712,6 +4871,7 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     'email_confirmacao_erro',
     'valor',
     'criado_em',
+    ...(peopleView ? ['tentativas'] : []),
   ];
   const lines = rows.map((row) => [
     row.id,
@@ -4748,6 +4908,7 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
     row.confirmationEmailError,
     (row.amountCents / 100).toFixed(2),
     row.createdAt,
+    ...(peopleView ? [row.attemptsCount ?? 1] : []),
   ].map(escapeCsv).join(','));
 
   csv(res, 'funpace-run-inscritos.csv', [headers.join(','), ...lines].join('\n'));
@@ -4755,6 +4916,9 @@ async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResp
 
 async function handleAdminReportExport(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
+  // ADMIN-003 Stage 2: the "Relatorios" tab is a separate module and is left
+  // exactly as-is (row-centric, unscoped). Event scope for that surface is a
+  // later stage, not this one.
   const rows = await getAdminRows(url);
   const headers = ['ID', 'Nome', 'Status', 'Lote', 'Distância', 'Cidade', 'Estado', 'Sexo', 'Valor', 'Pagamento', 'Criada em', 'Paga em'];
   const values = rows.map((row) => [row.id, row.fullName, row.status, row.lot, row.distance, row.city || '', row.state || '', row.gender, row.amountCents / 100, row.paymentMethod || row.paymentProvider || '', row.createdAt, row.paidAt || '']);
@@ -4963,15 +5127,15 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     const adminRegistrationMaintenance = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/(cancel|send-email|undo-check-in|undo-kit)$/);
     if (req.method === 'POST' && adminRegistrationMaintenance) {
-      await handleAdminRegistrationMaintenance(req, res, decodeURIComponent(adminRegistrationMaintenance[1]), adminRegistrationMaintenance[2]); return;
+      await handleAdminRegistrationMaintenance(req, res, decodeURIComponent(adminRegistrationMaintenance[1]), adminRegistrationMaintenance[2], url); return;
     }
     const adminRegistrationSheetSync = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/sync-google-sheets$/);
-    if (req.method === 'POST' && adminRegistrationSheetSync) { await handleAdminRegistrationGoogleSheetsSync(req, res, decodeURIComponent(adminRegistrationSheetSync[1])); return; }
+    if (req.method === 'POST' && adminRegistrationSheetSync) { await handleAdminRegistrationGoogleSheetsSync(req, res, decodeURIComponent(adminRegistrationSheetSync[1]), url); return; }
     const adminRegistrationUpdate = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)$/);
-    if (req.method === 'PATCH' && adminRegistrationUpdate) { await handleAdminRegistrationUpdate(req, res, decodeURIComponent(adminRegistrationUpdate[1])); return; }
-    if (req.method === 'GET' && adminRegistrationUpdate) { await handleAdminRegistrationDetails(req, res, decodeURIComponent(adminRegistrationUpdate[1])); return; }
+    if (req.method === 'PATCH' && adminRegistrationUpdate) { await handleAdminRegistrationUpdate(req, res, decodeURIComponent(adminRegistrationUpdate[1]), url); return; }
+    if (req.method === 'GET' && adminRegistrationUpdate) { await handleAdminRegistrationDetails(req, res, decodeURIComponent(adminRegistrationUpdate[1]), url); return; }
     const adminBibNumber = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/bib-number$/);
-    if (req.method === 'POST' && adminBibNumber) { await handleAdminBibNumber(req, res, decodeURIComponent(adminBibNumber[1])); return; }
+    if (req.method === 'POST' && adminBibNumber) { await handleAdminBibNumber(req, res, decodeURIComponent(adminBibNumber[1]), url); return; }
 
     const adminPaymentAction = url.pathname.match(/^\/api\/admin\/payments\/([^/]+)(?:\/(reconcile))?$/);
     if (adminPaymentAction) {
@@ -4984,11 +5148,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       const registrationId = decodeURIComponent(adminRegistrationAction[1]);
 
       if (adminRegistrationAction[2] === 'check-in') {
-        await handleAdminCheckIn(req, res, registrationId);
+        await handleAdminCheckIn(req, res, registrationId, url);
         return;
       }
 
-      await handleAdminKitDelivery(req, res, registrationId);
+      await handleAdminKitDelivery(req, res, registrationId, url);
       return;
     }
 
