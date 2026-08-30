@@ -26,20 +26,27 @@ import type {
   RegistrationStatusResponse,
 } from '../types/registration';
 import type { AdminPartnerDashboardResponse, AdminPartnerDetailResponse, AdminPartnerResponse, AdminPartnersResponse, PartnerAuditResponse, PartnerDashboardFilters, PartnerInput, PartnerMonitoringResponse, PartnerSlugAvailabilityResponse, PartnerStatus, PublicPartnerSessionResponse } from '../types/partner';
+import { composeAbortSignals } from './abort-signal';
 
-const configuredApiUrl = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
-const configuredLocalApiUrl = (import.meta.env.VITE_API_URL_LOCAL || '').replace(/\/$/, '');
-const API_BASE_URL = import.meta.env.DEV
+// `import.meta.env` is injected by Vite at build time; guard it so this module
+// (and its importers, e.g. the Executive Dashboard runtime) load under node:test.
+const importMetaEnv = ((import.meta as unknown as { env?: Record<string, string | boolean | undefined> }).env) ?? {};
+
+const configuredApiUrl = (String(importMetaEnv.VITE_API_URL || '')).replace(/\/$/, '');
+const configuredLocalApiUrl = (String(importMetaEnv.VITE_API_URL_LOCAL || '')).replace(/\/$/, '');
+const API_BASE_URL = importMetaEnv.DEV
   ? configuredLocalApiUrl || 'http://localhost:3001'
   : configuredApiUrl;
-const REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || 15_000);
-const REGISTRATION_REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_REGISTRATION_TIMEOUT_MS || 120_000);
+const REQUEST_TIMEOUT_MS = Number(importMetaEnv.VITE_API_TIMEOUT_MS || 15_000);
+const REGISTRATION_REQUEST_TIMEOUT_MS = Number(importMetaEnv.VITE_REGISTRATION_TIMEOUT_MS || 120_000);
 const RETRY_DELAYS_MS = [500, 1000, 2000];
-const isDevelopment = import.meta.env.DEV;
+const isDevelopment = Boolean(importMetaEnv.DEV);
 
 type ApiErrorPayload = {
   message?: string;
   errors?: Record<string, string>;
+  /** ADMIN-002 Stage 6B: structured business code (e.g. EVENT_SCOPE_AMBIGUOUS). */
+  code?: string;
 };
 
 type ApiRequestOptions = RequestInit & {
@@ -68,12 +75,20 @@ export class ApiError extends Error {
   status?: number;
   errors?: Record<string, string>;
   code: string;
+  /**
+   * ADMIN-002 Stage 6B: the backend business code from the error payload
+   * (`EVENT_SCOPE_AMBIGUOUS`, `EVENT_NOT_FOUND`, `NO_PUBLISHED_EVENT`, …), when
+   * present. `code` keeps its transport meaning (`http_4xx`, `timeout`, …) so
+   * existing consumers are unaffected; control flow should read `businessCode`.
+   */
+  businessCode?: string;
   retryable: boolean;
 
   constructor(message: string, options: {
     status?: number;
     errors?: Record<string, string>;
     code?: string;
+    businessCode?: string;
     retryable?: boolean;
   } = {}) {
     super(message);
@@ -81,6 +96,7 @@ export class ApiError extends Error {
     this.status = options.status;
     this.errors = options.errors;
     this.code = options.code || 'api_error';
+    this.businessCode = options.businessCode;
     this.retryable = Boolean(options.retryable);
   }
 }
@@ -186,9 +202,12 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
   let lastError: ApiError | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const controller = new AbortController();
+    // ADMIN-002 Stage 6B: the internal 15s timeout AND any caller-provided
+    // signal both abort this fetch (composed, with listener cleanup below).
+    const timeoutController = new AbortController();
+    const composed = composeAbortSignals([options.signal, timeoutController.signal]);
     const startedAt = performance.now();
-    const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS);
+    const timeout = window.setTimeout(() => timeoutController.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS);
 
     logApiEvent('request', {
       requestId,
@@ -204,7 +223,7 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
         ...options,
         credentials: 'include',
         headers,
-        signal: controller.signal,
+        signal: composed.signal,
       });
       const durationMs = Math.round(performance.now() - startedAt);
       const payload = await parsePayload<ResponsePayload>(response);
@@ -230,6 +249,7 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
         code: response.status === 404 && !errorPayload?.message
           ? 'endpoint_not_found'
           : `http_${response.status}`,
+        businessCode: typeof errorPayload?.code === 'string' ? errorPayload.code : undefined,
         retryable: isRetryableStatus(response.status),
       });
 
@@ -242,6 +262,13 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
 
       if (error instanceof ApiError) {
         throw error;
+      }
+
+      // ADMIN-002 Stage 6B: the CALLER aborted (superseded request / unmount).
+      // Expected control flow — not a network failure: don't count it, don't
+      // retry, hand back a distinguishable error the caller can swallow.
+      if (aborted && options.signal?.aborted) {
+        throw new ApiError('Requisição cancelada.', { code: 'aborted', retryable: false });
       }
 
       updateMetrics(null, durationMs, true);
@@ -268,6 +295,7 @@ async function apiFetch<ResponsePayload>(path: string, options: ApiRequestOption
       }
     } finally {
       window.clearTimeout(timeout);
+      composed.cleanup();
     }
 
     await delay(RETRY_DELAYS_MS[attempt - 1]);
@@ -393,8 +421,8 @@ export function getAdminSummary(adminKey: string, eventSlug?: string) {
   return adminFetch<AdminSummaryResponse>(`/api/admin/summary${toQueryString({ event: eventSlug || '' })}`, adminKey);
 }
 
-export function getAdminEvents(adminKey: string) {
-  return adminFetch<import('../types/registration').AdminEventsResponse>('/api/admin/events', adminKey);
+export function getAdminEvents(adminKey: string, options: { signal?: AbortSignal } = {}) {
+  return adminFetch<import('../types/registration').AdminEventsResponse>('/api/admin/events', adminKey, { signal: options.signal });
 }
 
 export function getAdminReconciliation(adminKey: string) {
@@ -407,7 +435,7 @@ export function runAdminReconciliation(adminKey: string, mode: 'dry_run' | 'appl
   );
 }
 
-export function getAdminExecutiveDashboard(adminKey: string, eventSlug?: string) { return adminFetch<AdminExecutiveDashboard>(`/api/admin/executive-dashboard${toQueryString({ event: eventSlug || '' })}`, adminKey); }
+export function getAdminExecutiveDashboard(adminKey: string, eventSlug?: string, options: { signal?: AbortSignal } = {}) { return adminFetch<AdminExecutiveDashboard>(`/api/admin/executive-dashboard${toQueryString({ event: eventSlug || '' })}`, adminKey, { signal: options.signal }); }
 export function getAdminAlerts(adminKey: string, filters: Record<string, string> = {}) { return adminFetch<AdminAlertsResponse>(`/api/admin/alerts${toQueryString(filters)}`, adminKey); }
 export function updateAdminAlert(adminKey: string, alertId: string, status: 'acknowledged' | 'resolved', resolution: string) {
   return adminFetch<{ alert: import('../types/registration').AdminOperationalAlert }>(`/api/admin/alerts/${encodeURIComponent(alertId)}`, adminKey, { method: 'PATCH', body: JSON.stringify({ status, resolution }) });
