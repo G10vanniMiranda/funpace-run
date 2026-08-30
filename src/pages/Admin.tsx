@@ -1,5 +1,5 @@
 import { type FormEvent, type ReactNode } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QrScanner from 'qr-scanner';
 import {
   Activity,
@@ -63,8 +63,6 @@ import {
   updateAdminDistance,
   updateAdminLot,
   getAdminSummary,
-  getAdminExecutiveDashboard,
-  getAdminEvents,
   getAdminAlerts,
   updateAdminAlert,
   getAdminMonitoring,
@@ -80,7 +78,9 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventListItem, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
+import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
 type AdminFilters = {
   status: string;
@@ -196,6 +196,16 @@ export function AdminPage() {
   const csvUrl = useMemo(() => getAdminCsvUrl(filters), [filters]);
   const dashboard = useMemo(() => getDashboardModel(summary, registrations), [summary, registrations]);
 
+  // ADMIN-002 Stage 6B: the single canonical "administrative session expired"
+  // flow. Any 401 from the parent poll OR from a child runtime (executive
+  // dashboard, monitoring) routes here — no waiting up to 60s for L1, no
+  // repeated 401 polling, no Portuguese error-string comparison.
+  const handleSessionExpired = useCallback(() => {
+    setAdminKey(''); setAdminActor(''); setAdminRole(null);
+    setSummary(null); setRegistrations([]); setAuditLogs([]);
+    setSelectedRegistration(null); setRegistrationDetails(null);
+  }, []);
+
   const loadAdminData = async (key = adminKey) => {
     if (!key || adminLoadInFlight.current) {
       return;
@@ -206,27 +216,54 @@ export function AdminPage() {
     setError('');
 
     try {
-      const [summaryResponse, registrationsResponse, auditLogsResponse] = await Promise.all([
-        // ADMIN-002 Stage 4B: follow the event chosen in the executive dashboard
-        // URL when present; with a single published event the server resolves it.
-        getAdminSummary(key, new URLSearchParams(window.location.search).get('event') || undefined),
+      // ADMIN-002 Stage 6B: allSettled so one failing request no longer discards
+      // the others, and an unresolved event scope (>=2 published events, no
+      // ?event= yet) does not spam a blocking error while the Executive
+      // Dashboard shows its recoverable event selector (§29).
+      const eventParam = new URLSearchParams(window.location.search).get('event') || undefined;
+      const [summaryOutcome, registrationsOutcome, auditOutcome] = await Promise.allSettled([
+        getAdminSummary(key, eventParam),
         getAdminRegistrations(key, activeNav === 'registrations' ? filters : { status: '', distanceId: '', lotId: '', q: '' }),
-        getAdminAuditLogs(key).catch(() => ({ logs: [], pagination: { page: 1, pageSize: 50, total: 0, totalPages: 1 } })),
+        getAdminAuditLogs(key),
       ]);
 
-      setSummary(summaryResponse);
-      setRegistrations(registrationsResponse.registrations);
-      setRegistrationPagination(registrationsResponse.pagination);
-      setAuditLogs(auditLogsResponse.logs);
-      if (activeNav === 'registrations') setGoogleSheetsStatus(await getAdminGoogleSheetsStatus(key).catch(() => null));
-    } catch (requestError) {
-      if (requestError instanceof ApiError && requestError.status === 401 && key === 'session') {
-        setAdminKey(''); setAdminActor(''); setAdminRole(null);
+      const outcomes = [summaryOutcome, registrationsOutcome, auditOutcome];
+      if (key === 'session' && outcomes.some((outcome) => outcome.status === 'rejected'
+        && outcome.reason instanceof ApiError && outcome.reason.status === 401)) {
+        handleSessionExpired();
+        return;
       }
-      const message = requestError instanceof ApiError
-        ? requestError.message
-        : 'Não foi possível carregar o painel.';
-      setError(message);
+
+      let nextError = '';
+
+      if (summaryOutcome.status === 'fulfilled') {
+        setSummary(summaryOutcome.value);
+      } else {
+        const reason = summaryOutcome.reason;
+        const isEventSelection = reason instanceof ApiError
+          && EVENT_SELECTION_CODES.indexOf(reason.businessCode || '') !== -1;
+        if (!isEventSelection) {
+          nextError = reason instanceof ApiError ? reason.message : 'Não foi possível carregar o resumo.';
+        }
+      }
+
+      if (registrationsOutcome.status === 'fulfilled') {
+        setRegistrations(registrationsOutcome.value.registrations);
+        setRegistrationPagination(registrationsOutcome.value.pagination);
+      } else if (!nextError) {
+        nextError = registrationsOutcome.reason instanceof ApiError
+          ? registrationsOutcome.reason.message
+          : 'Não foi possível carregar as inscrições.';
+      }
+
+      if (auditOutcome.status === 'fulfilled') {
+        setAuditLogs(auditOutcome.value.logs);
+      }
+
+      setError(nextError);
+      if (activeNav === 'registrations') setGoogleSheetsStatus(await getAdminGoogleSheetsStatus(key).catch(() => null));
+    } catch {
+      setError('Não foi possível carregar o painel.');
     } finally {
       adminLoadInFlight.current = false;
       setLoading(false);
@@ -480,6 +517,7 @@ export function AdminPage() {
               onOpenRegistration={(registration) => void openRegistration(registration)}
               onExport={() => void downloadCsv()}
               onRegistrationUpdated={updateRegistration}
+              onSessionExpired={handleSessionExpired}
             />
           </div>
         </section>
@@ -561,6 +599,7 @@ function AdminSection({
   onOpenRegistration,
   onExport,
   onRegistrationUpdated,
+  onSessionExpired,
 }: {
   adminKey: string;
   activeNav: AdminNavKey;
@@ -580,6 +619,7 @@ function AdminSection({
   onOpenRegistration: (registration: AdminRegistration) => void;
   onExport: () => void;
   onRegistrationUpdated: (registration: AdminRegistration) => void;
+  onSessionExpired: () => void;
 }) {
   if (!canAccessNav(adminRole, activeNav)) {
     return (
@@ -589,9 +629,9 @@ function AdminSection({
     );
   }
 
-  if (activeNav === 'executive') return <ExecutiveDashboardPanel adminKey={adminKey} />;
+  if (activeNav === 'executive') return <ExecutiveDashboardPanel adminKey={adminKey} onSessionExpired={onSessionExpired} />;
   if (activeNav === 'alerts') return <AlertsCenterPanel adminKey={adminKey} registrations={registrations} onOpenRegistration={onOpenRegistration} />;
-  if (activeNav === 'monitoring') return <MonitoringPanel adminKey={adminKey} />;
+  if (activeNav === 'monitoring') return <MonitoringPanel adminKey={adminKey} onSessionExpired={onSessionExpired} />;
   if (activeNav === 'partners') return <PartnersPanel adminKey={adminKey} />;
 
   if (activeNav === 'payments') {
@@ -1568,43 +1608,119 @@ function ReportList({
   );
 }
 
-function ExecutiveDashboardPanel({ adminKey }: { adminKey: string }) {
-  const [data, setData] = useState<AdminExecutiveDashboard | null>(null);
-  const [events, setEvents] = useState<AdminEventListItem[]>([]);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
-  // ADMIN-002 Stage 4B: the selected event lives in the URL (?event=<slug>),
-  // never in session state — deep-linkable and refresh-safe.
-  const readEventSlug = () => new URLSearchParams(window.location.search).get('event') || '';
-  const [eventSlug, setEventSlug] = useState(readEventSlug);
-  const selectEvent = (slug: string) => {
-    const params = new URLSearchParams(window.location.search);
-    if (slug) params.set('event', slug); else params.delete('event');
-    const query = params.toString();
-    window.history.replaceState(null, '', query ? `${window.location.pathname}?${query}` : window.location.pathname);
-    setEventSlug(slug);
-  };
-  const load = async () => {
-    try {
-      const dashboard = await getAdminExecutiveDashboard(adminKey, eventSlug);
-      setData(dashboard);
-      if (dashboard.event.slug !== readEventSlug()) selectEvent(dashboard.event.slug);
-      setError('');
-    } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível carregar o dashboard executivo.');
-    } finally { setLoading(false); }
-  };
-  useEffect(() => { getAdminEvents(adminKey).then((response) => setEvents(response.events)).catch(() => undefined); }, [adminKey]);
-  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 60_000); return () => window.clearInterval(interval); }, [adminKey, eventSlug]);
-  if (error) return <StatusMessage tone="error" message={error} />;
+// ADMIN-002 Stage 6B — recoverable state when >=2 events are published and no
+// event is selected (EVENT_SCOPE_AMBIGUOUS), or the URL slug is unknown
+// (EVENT_NOT_FOUND). No auto-selection: the operator must choose (two events can
+// legitimately run at once). No dashboard polling happens in this state.
+function ExecutiveEventSelection({ events, eventsError, message, onSelect, onRetryEvents }: {
+  events: AdminEventListItem[];
+  eventsError: string;
+  message: string;
+  onSelect: (slug: string) => void;
+  onRetryEvents: () => void;
+}) {
+  const [choice, setChoice] = useState('');
+  return (
+    <section className="mt-4 space-y-4">
+      <div className="border border-white/10 bg-zinc-950/80 p-5">
+        <p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p>
+        <h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1>
+        <p className="mt-2 text-sm text-amber-200" role="status" aria-live="polite">
+          {message || 'Selecione o evento que o dashboard deve exibir.'}
+        </p>
+      </div>
+      <div className="border border-white/10 bg-zinc-950/80 p-5">
+        {events.length > 0 ? (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <label className="flex flex-1 flex-col gap-2 text-xs text-zinc-400">
+              <span className="font-black uppercase tracking-widest text-zinc-500">Evento</span>
+              <select
+                aria-label="Selecionar evento do dashboard"
+                value={choice}
+                onChange={(changeEvent) => setChoice(changeEvent.target.value)}
+                className="min-h-11 border border-white/10 bg-black px-2 py-1 text-white"
+              >
+                <option value="">Escolha um evento…</option>
+                {events.map((item) => (
+                  <option key={item.id} value={item.slug}>{item.name}{item.status === 'closed' ? ' (encerrado)' : ''}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={!choice}
+              onClick={() => onSelect(choice)}
+              className="min-h-11 border border-brand px-4 text-xs font-black uppercase tracking-widest text-brand disabled:opacity-40"
+            >
+              Carregar dashboard
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-zinc-400" role="status">
+              {eventsError || 'Carregando a lista de eventos…'}
+            </p>
+            {eventsError && (
+              <button type="button" onClick={onRetryEvents} className="min-h-11 self-start border border-white/10 px-4 text-xs font-black uppercase tracking-widest text-zinc-200">
+                Tentar novamente
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ExecutiveDashboardPanel({ adminKey, onSessionExpired }: { adminKey: string; onSessionExpired: () => void }) {
+  const runtime = useExecutiveDashboardRuntime(adminKey, onSessionExpired);
+  const { phase, data, events, error, eventsError, selectedSlug, lastGeneratedAt } = runtime.state;
+
+  if (phase === 'event-selection-required') {
+    return (
+      <ExecutiveEventSelection
+        events={events}
+        eventsError={eventsError}
+        message={error}
+        onSelect={runtime.selectEvent}
+        onRetryEvents={runtime.retryEvents}
+      />
+    );
+  }
+
+  if (phase === 'initial-error') {
+    return (
+      <section className="mt-4 space-y-3" aria-live="polite">
+        <StatusMessage tone="error" message={error || 'Não foi possível carregar o dashboard executivo.'} />
+        <button type="button" onClick={() => runtime.refreshNow()} className="min-h-10 border border-brand px-4 text-xs font-black uppercase tracking-widest text-brand">
+          Tentar novamente
+        </button>
+      </section>
+    );
+  }
+
+  // phase === 'initial-loading' | 'ready' | 'refreshing' | 'stale'
+  const loading = phase === 'initial-loading';
   const financial = data?.financial;
   const registrationsData = data?.registrations;
   const selectorEvents = data?.event && !events.some((item) => item.id === data.event.id)
     ? [{ id: data.event.id, slug: data.event.slug, name: data.event.name, status: data.event.status as 'published' | 'closed', date: data.event.date }, ...events]
     : events;
+  const showingPreviousEvent = phase === 'refreshing' && !!data?.event && !!selectedSlug && data.event.slug !== selectedSlug;
+  const staleSince = phase === 'stale' && lastGeneratedAt ? dateTimeFormatter.format(new Date(lastGeneratedAt)) : '';
   return (
     <section className="mt-4 space-y-4">
-      <div className="flex flex-col gap-3 border border-white/10 bg-zinc-950/80 p-5 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p><h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1><p className="mt-2 text-sm text-zinc-400">Visão financeira, comercial e operacional atualizada automaticamente.</p></div><div className="flex flex-col items-start gap-2 md:items-end">{data?.event && (selectorEvents.length > 1 ? (<label className="flex items-center gap-2 text-xs text-zinc-400"><span className="font-black uppercase tracking-widest text-zinc-500">Evento</span><select aria-label="Selecionar evento do dashboard" value={data.event.id} onChange={(changeEvent) => selectEvent(selectorEvents.find((item) => item.id === changeEvent.target.value)?.slug || '')} className="border border-white/10 bg-black px-2 py-1 text-white">{selectorEvents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.status === 'closed' ? ' (encerrado)' : ''}</option>)}</select></label>) : (<p className="text-xs font-bold text-zinc-300">{data.event.name}{data.event.status === 'closed' ? ' · encerrado' : ''}</p>))}<p className="font-mono text-xs text-zinc-500">{data ? `Atualizado ${dateTimeFormatter.format(new Date(data.generatedAt))}` : 'Carregando…'}</p></div></div>
+      {phase === 'stale' && (
+        <p role="status" className="border border-amber-400/30 bg-amber-400/10 p-3 text-xs font-bold text-amber-100">
+          Não foi possível atualizar agora. Mostrando os últimos dados{staleSince ? ` de ${staleSince}` : ''}. Nova tentativa automática em instantes.
+        </p>
+      )}
+      {showingPreviousEvent && (
+        <p role="status" className="border border-white/15 bg-white/5 p-3 text-xs font-bold text-zinc-200">
+          Carregando o evento selecionado… os números abaixo ainda são do evento anterior{data?.event ? ` (${data.event.name})` : ''}.
+        </p>
+      )}
+      <div className="flex flex-col gap-3 border border-white/10 bg-zinc-950/80 p-5 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p><h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1><p className="mt-2 text-sm text-zinc-400">Visão financeira, comercial e operacional atualizada automaticamente.</p></div><div className="flex flex-col items-start gap-2 md:items-end">{data?.event && (selectorEvents.length > 1 ? (<label className="flex items-center gap-2 text-xs text-zinc-400"><span className="font-black uppercase tracking-widest text-zinc-500">Evento</span><select aria-label="Selecionar evento do dashboard" value={data.event.id} onChange={(changeEvent) => runtime.selectEvent(selectorEvents.find((item) => item.id === changeEvent.target.value)?.slug || '')} className="border border-white/10 bg-black px-2 py-1 text-white">{selectorEvents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.status === 'closed' ? ' (encerrado)' : ''}</option>)}</select></label>) : (<p className="text-xs font-bold text-zinc-300">{data.event.name}{data.event.status === 'closed' ? ' · encerrado' : ''}</p>))}<p className="font-mono text-xs text-zinc-500" aria-live="polite">{data ? `Atualizado ${dateTimeFormatter.format(new Date(data.generatedAt))}${phase === 'refreshing' ? ' · atualizando…' : ''}` : 'Carregando…'}</p></div></div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="Receita bruta" value={currencyFormatter.format((financial?.grossRevenueCents || 0) / 100)} icon={WalletCards} detail="todas as inscrições pagas" trend="up" loading={loading} />
         <KpiCard label="Receita confirmada" value={currencyFormatter.format((financial?.confirmedRevenueCents || 0) / 100)} icon={BadgeCheck} detail="pagas com liquidação registrada" trend="up" loading={loading} />
@@ -1654,10 +1770,19 @@ function AlertsCenterPanel({ adminKey, registrations, onOpenRegistration }: { ad
   return <section className="mt-4 border border-white/10 bg-zinc-950/80"><div className="border-b border-white/10 p-5"><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle</p><h2 className="mt-2 text-2xl font-black">Alertas</h2><p className="mt-2 text-sm text-zinc-400">Detecção idempotente com responsável, reconhecimento e resolução auditada.</p></div>{error && <p className="m-4 border border-red-400/20 bg-red-400/10 p-3 text-red-100">{error}</p>}<div className="grid gap-3 border-b border-white/10 p-4 sm:grid-cols-4"><SelectFilter value={filters.status} onChange={(status) => setFilters({ ...filters, status })} options={[{ value: '', label: 'Todos status' }, { value: 'open', label: 'Abertos' }, { value: 'acknowledged', label: 'Reconhecidos' }, { value: 'resolved', label: 'Resolvidos' }]} /><SelectFilter value={filters.severity} onChange={(severity) => setFilters({ ...filters, severity })} options={[{ value: '', label: 'Todas gravidades' }, { value: 'critical', label: 'Crítico' }, { value: 'warning', label: 'Atenção' }, { value: 'info', label: 'Informativo' }]} /><KpiCard label="Abertos" value={data?.totals.open || 0} icon={Bell} detail="requerem acompanhamento" trend="neutral" loading={!data} /><KpiCard label="Críticos" value={data?.totals.critical || 0} icon={Activity} detail="prioridade máxima" trend="neutral" loading={!data} /></div><div className="divide-y divide-white/10">{(data?.alerts || []).map((alert) => <div key={alert.id} className="grid gap-3 p-4 lg:grid-cols-[1fr_150px_180px_auto] lg:items-center"><div><div className="flex flex-wrap items-center gap-2"><span className={`border px-2 py-1 text-[10px] font-black uppercase ${alert.severity === 'critical' ? 'border-red-400/30 text-red-300' : alert.severity === 'warning' ? 'border-amber-400/30 text-amber-300' : 'border-white/10 text-zinc-400'}`}>{alert.severity}</span><p className="font-bold">{alert.title}</p></div><p className="mt-2 text-sm text-zinc-400">{alert.message}</p><p className="mt-2 font-mono text-[10px] text-zinc-600">{alert.alertType} · {dateTimeFormatter.format(new Date(alert.detectedAt))}</p></div><p className="text-xs font-black uppercase text-zinc-400">{alert.status}</p><p className="text-xs text-zinc-500">{alert.acknowledgedBy || 'Sem responsável'}</p><div className="flex flex-wrap gap-2">{alert.entityType === 'registration' && <button onClick={() => openEntity(alert.entityId)} className="border border-white/10 px-2 py-1 text-xs">Abrir</button>}{alert.status === 'open' && <button onClick={() => setDraft({ id: alert.id, status: 'acknowledged', resolution: '' })} className="border border-amber-400/30 px-2 py-1 text-xs text-amber-300">Assumir</button>}{alert.status !== 'resolved' && <button onClick={() => setDraft({ id: alert.id, status: 'resolved', resolution: '' })} className="border border-brand/30 px-2 py-1 text-xs text-brand">Resolver</button>}</div></div>)}{data && data.alerts.length === 0 && <p className="p-6 text-sm text-zinc-500">Nenhum alerta encontrado.</p>}</div>{draft && <ActionModal title={draft.status === 'resolved' ? 'Resolver alerta' : 'Assumir alerta'} confirmLabel="Confirmar" loading={false} confirmDisabled={draft.resolution.trim().length < 5} onConfirm={() => void submit()} onClose={() => setDraft(null)}><label className="text-xs font-bold text-zinc-400">Resolução / observação<textarea value={draft.resolution} onChange={(event) => setDraft({ ...draft, resolution: event.target.value })} className="mt-2 min-h-28 w-full border border-white/10 bg-black p-3 text-white" /></label></ActionModal>}</section>;
 }
 
-function MonitoringPanel({ adminKey }: { adminKey: string }) {
+function MonitoringPanel({ adminKey, onSessionExpired }: { adminKey: string; onSessionExpired: () => void }) {
   const [data, setData] = useState<AdminMonitoringResponse | null>(null); const [error, setError] = useState('');
-  const load = async () => { try { setData(await getAdminMonitoring(adminKey)); setError(''); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Falha ao carregar monitoramento.'); } };
-  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 20_000); return () => window.clearInterval(interval); }, [adminKey]);
+  const load = async () => { try { setData(await getAdminMonitoring(adminKey)); setError(''); } catch (requestError) { if (requestError instanceof ApiError && requestError.status === 401) { onSessionExpired(); return; } setError(requestError instanceof ApiError ? requestError.message : 'Falha ao carregar monitoramento.'); } };
+  // ADMIN-002 Stage 6B: the 20s monitoring poll now respects tab visibility
+  // (no polling while hidden; one immediate refresh when it becomes visible).
+  useEffect(() => {
+    let stopped = false;
+    const tick = () => { if (!stopped && document.visibilityState === 'visible') void load(); };
+    void load();
+    const interval = window.setInterval(tick, 20_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { stopped = true; window.clearInterval(interval); document.removeEventListener('visibilitychange', tick); };
+  }, [adminKey]);
   return <section className="mt-4 space-y-4"><div className="border border-white/10 bg-zinc-950/80 p-5"><p className="text-xs font-black uppercase tracking-widest text-brand">Observabilidade</p><h2 className="mt-2 text-2xl font-black">Monitoramento</h2><p className="mt-2 text-sm text-zinc-400">Saúde dos serviços e telemetria da instância serverless atual.</p></div>{error && <StatusMessage tone="error" message={error} />}<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{(data?.services || []).map((service) => <div key={service.id} className="border border-white/10 bg-zinc-950/80 p-4"><div className="flex items-center justify-between"><p className="font-black">{service.label}</p><span className={`h-3 w-3 rounded-full ${service.status === 'operational' || service.status === 'configured' ? 'bg-brand' : service.status === 'degraded' ? 'bg-amber-400' : service.status === 'disabled' || service.status === 'local' ? 'bg-zinc-500' : 'bg-red-400'}`} /></div><p className="mt-3 text-xs font-black uppercase text-zinc-500">{service.status}</p><p className="mt-2 text-xs text-zinc-400">{service.detail}</p>{service.latencyMs !== null && <p className="mt-3 font-mono text-sm text-brand">{service.latencyMs} ms</p>}</div>)}</div><Panel title="Métricas da instância" eyebrow="Tempo real"><div className="grid grid-cols-2 gap-3 md:grid-cols-4">{data && Object.entries({ 'Resposta API': `${data.metrics.responseTimeMs} ms`, 'Consulta banco': `${data.metrics.databaseQueryMs} ms`, 'Heap': `${data.metrics.memoryUsedMb} MB`, 'RSS': `${data.metrics.memoryRssMb} MB`, 'CPU usuário': `${data.metrics.cpuUserMs} ms`, 'Erros críticos': data.metrics.errors, 'Webhooks': data.metrics.webhooks, 'E-mails': data.metrics.emailsSent }).map(([label, value]) => <div key={label} className="border border-white/10 bg-black/30 p-3"><p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">{label}</p><p className="mt-2 font-mono text-xl font-black">{value}</p></div>)}</div></Panel></section>;
 }
 

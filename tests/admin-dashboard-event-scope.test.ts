@@ -7,6 +7,8 @@ import test from 'node:test';
 const server = readFileSync('server/index.ts', 'utf8');
 const admin = readFileSync('src/pages/Admin.tsx', 'utf8');
 const api = readFileSync('src/lib/api.ts', 'utf8');
+// ADMIN-002 Stage 6B — the URL/selection plumbing moved into the runtime hook.
+const dashboardHook = readFileSync('src/hooks/useExecutiveDashboardRuntime.ts', 'utf8');
 
 function block(source: string, startNeedle: string, endNeedle: string): string {
   const start = source.indexOf(startNeedle);
@@ -75,16 +77,21 @@ test('RBAC unchanged — executive dashboard still administrator/finance only', 
 });
 
 test('frontend keeps the selected event in the URL (?event=slug), never in session state', () => {
+  // ADMIN-002 Stage 6B: the read/write lives in the runtime hook; the panel
+  // consumes it. Neither uses session/local storage for the selection.
+  assert.match(dashboardHook, /new URLSearchParams\(window\.location\.search\)\.get\('event'\)/);
+  assert.match(dashboardHook, /window\.history\.replaceState/);
+  assert.match(dashboardHook, /getAdminExecutiveDashboard\(adminKey, slug, \{ signal \}\)/);
+  assert.ok(!/sessionStorage|localStorage/.test(dashboardHook), 'hook: no session/local storage for event selection');
+
   const panel = block(admin, 'function ExecutiveDashboardPanel(', '\nfunction ExecutiveSeries(');
-  assert.match(panel, /new URLSearchParams\(window\.location\.search\)\.get\('event'\)/);
-  assert.match(panel, /window\.history\.replaceState/);
-  assert.match(panel, /getAdminExecutiveDashboard\(adminKey, eventSlug\)/);
+  assert.match(panel, /useExecutiveDashboardRuntime\(adminKey, onSessionExpired\)/);
   assert.match(panel, /aria-label="Selecionar evento do dashboard"/);
-  assert.ok(!/sessionStorage|localStorage/.test(panel), 'no session/local storage for event selection');
+  assert.ok(!/sessionStorage|localStorage/.test(panel), 'panel: no session/local storage for event selection');
 });
 
 test('api client forwards the event slug as a query param', () => {
-  assert.match(api, /getAdminExecutiveDashboard\(adminKey: string, eventSlug\?: string\)[\s\S]*?toQueryString\(\{ event: eventSlug \|\| '' \}\)/);
+  assert.match(api, /getAdminExecutiveDashboard\(adminKey: string, eventSlug\?: string, options: \{ signal\?: AbortSignal \} = \{\}\)[\s\S]*?toQueryString\(\{ event: eventSlug \|\| '' \}\)/);
   assert.match(api, /getAdminSummary\(adminKey: string, eventSlug\?: string\)/);
-  assert.match(api, /export function getAdminEvents\(adminKey: string\)/);
+  assert.match(api, /export function getAdminEvents\(adminKey: string, options: \{ signal\?: AbortSignal \} = \{\}\)/);
 });
