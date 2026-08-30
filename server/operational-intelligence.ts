@@ -1,4 +1,5 @@
 import type { Database, RegistrationRecord } from './database.js';
+import { buildExecutiveMetrics } from './executive-metrics.js';
 import { calculateLotCapacity } from './lot-capacity.js';
 
 export type OperationalAlertCandidate = {
@@ -43,21 +44,10 @@ function marketingSource(registration: RegistrationRecord) {
 
 export function buildExecutiveDashboard(database: Database, now = new Date()) {
   const paid = database.registrations.filter((registration) => registration.status === 'paid');
-  const refunded = database.registrations.filter((registration) => registration.status === 'refunded');
-  const grossRevenueCents = paid.reduce((sum, registration) => sum + registration.amountCents, 0);
-  const refundedCents = refunded.reduce((sum, registration) => sum + registration.amountCents, 0);
-  const feePercent = Math.max(0, Number(process.env.PAYMENT_FEE_PERCENT || 0));
-  const feeFixedCents = Math.max(0, Number(process.env.PAYMENT_FEE_FIXED_CENTS || 0));
-  const estimatedFeesCents = Math.round(grossRevenueCents * feePercent / 100) + paid.length * feeFixedCents;
-  const netRevenueCents = Math.max(grossRevenueCents - refundedCents - estimatedFeesCents, 0);
-  const today = now.toISOString().slice(0, 10);
-  const weekStart = new Date(now); weekStart.setUTCDate(weekStart.getUTCDate() - 6); weekStart.setUTCHours(0, 0, 0, 0);
-  const paidToday = paid.filter((registration) => dayKey(registration.paidAt || registration.confirmedAt || registration.createdAt) === today);
-  const paidWeek = paid.filter((registration) => new Date(registration.paidAt || registration.confirmedAt || registration.createdAt) >= weekStart);
-  const checkoutsCreated = database.payments.filter((payment) => Boolean(payment.checkoutUrl || payment.providerPaymentId)
-    || database.paymentEvents.some((event) => event.paymentId === payment.id && event.eventType.includes('checkout_created'))).length;
-  const checkoutsPaid = database.payments.filter((payment) => payment.status === 'paid').length;
-  const checkoutConversionRate = checkoutsCreated ? Number((checkoutsPaid / checkoutsCreated * 100).toFixed(1)) : 0;
+  // Single source of truth for every business number (revenue, participant
+  // conversion, checkout conversion, people-vs-rows). No parallel formulas here.
+  const metrics = buildExecutiveMetrics(database, now);
+  const { financial, checkouts } = metrics;
   const statusCounts = database.registrations.reduce<Record<string, number>>((summary, registration) => {
     summary[registration.status] = (summary[registration.status] || 0) + 1;
     return summary;
@@ -93,19 +83,39 @@ export function buildExecutiveDashboard(database: Database, now = new Date()) {
   return {
     generatedAt: now.toISOString(),
     financial: {
-      grossRevenueCents, netRevenueCents, refundedCents, estimatedFeesCents,
-      feeConfigurationAvailable: feePercent > 0 || feeFixedCents > 0,
-      todayRevenueCents: paidToday.reduce((sum, registration) => sum + registration.amountCents, 0),
-      weekRevenueCents: paidWeek.reduce((sum, registration) => sum + registration.amountCents, 0),
-      eventRevenueCents: grossRevenueCents,
-      averageTicketCents: paid.length ? Math.round(grossRevenueCents / paid.length) : 0,
+      grossRevenueCents: financial.grossRevenueCents,
+      confirmedRevenueCents: financial.confirmedRevenueCents,
+      todayRevenueCents: financial.todayRevenueCents,
+      weekRevenueCents: financial.weekRevenueCents,
+      averageTicketCents: financial.averageTicketCents,
+      eventRevenueCents: financial.grossRevenueCents,
+      /** @deprecated ADMIN-002 Stage 1: no fabricated net; alias of confirmedRevenueCents. */
+      netRevenueCents: financial.confirmedRevenueCents,
     },
     registrations: {
-      total: database.registrations.length, confirmed: paid.length, pending: statusCounts.pending_payment || 0,
-      expired: statusCounts.expired || 0, cancelled: statusCounts.cancelled || 0, refunded: statusCounts.refunded || 0,
-      conversionRate: database.registrations.length ? Number((paid.length / database.registrations.length * 100).toFixed(1)) : 0,
+      registrationRows: metrics.registrations.registrationRows,
+      uniquePeople: metrics.registrations.uniquePeople,
+      paidRegistrationRows: metrics.registrations.paidRegistrationRows,
+      uniquePaidPeople: metrics.registrations.uniquePaidPeople,
+      participantConversionRate: metrics.registrations.participantConversionRate,
+      // operational status counts (not business-truth conversion)
+      total: metrics.registrations.registrationRows,
+      confirmed: metrics.registrations.paidRegistrationRows,
+      pending: statusCounts.pending_payment || 0,
+      expired: statusCounts.expired || 0,
+      cancelled: statusCounts.cancelled || 0,
+      refunded: statusCounts.refunded || 0,
+      /** @deprecated ADMIN-002 Stage 1: use participantConversionRate. */
+      conversionRate: metrics.registrations.participantConversionRate,
     },
-    checkouts: { created: checkoutsCreated, paid: checkoutsPaid, conversionRate: checkoutConversionRate, abandonmentRate: Number((100 - checkoutConversionRate).toFixed(1)) },
+    checkouts: {
+      created: checkouts.created,
+      paid: checkouts.paid,
+      checkoutConversionRate: checkouts.checkoutConversionRate,
+      abandonmentRate: checkouts.abandonmentRate,
+      /** @deprecated ADMIN-002 Stage 1: use checkoutConversionRate. */
+      conversionRate: checkouts.checkoutConversionRate,
+    },
     lots,
     charts: {
       daily, hourly, cumulativeRevenue,
@@ -133,7 +143,19 @@ export function buildExecutiveDashboard(database: Database, now = new Date()) {
         paidAt: payment.paidAt, updatedAt: payment.updatedAt, gatewayStatus: payment.gatewayStatus,
       })),
       confirmations: paid.slice().sort((a, b) => (b.confirmedAt || b.updatedAt).localeCompare(a.confirmedAt || a.updatedAt)).slice(0, 10).map((registration) => ({ id: registration.id, confirmedAt: registration.confirmedAt, amountCents: registration.amountCents })),
-      webhooks: database.paymentEvents.filter((event) => event.eventType.includes('infinitepay')).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0, 10),
+      // Sanitised projection only: NO raw gateway payload reaches the browser
+      // (no customer name / email / document / phone). ADMIN-002 Stage 1.
+      webhooks: database.paymentEvents
+        .filter((event) => event.eventType.includes('infinitepay'))
+        .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+        .slice(0, 10)
+        .map((event) => ({
+          id: event.id,
+          paymentId: event.paymentId,
+          providerEventId: event.providerEventId,
+          eventType: event.eventType,
+          receivedAt: event.receivedAt,
+        })),
     },
   };
 }

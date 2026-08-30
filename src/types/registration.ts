@@ -169,7 +169,13 @@ export type AdminSummaryResponse = {
     registrations: number;
     paid: number;
     pending: number;
+    uniquePeople: number;
+    uniquePaidPeople: number;
+    participantConversionRate: number;
+    /** administrator/finance only; false => the financial fields below are zeroed. */
+    financialVisible: boolean;
     revenueCents: number;
+    averageTicketCents: number;
     checkIns: number;
     kitDeliveries: number;
     paidWithoutEmail: number;
@@ -374,16 +380,47 @@ export type AdminOperationalAlert = {
 export type AdminAlertsResponse = { alerts: AdminOperationalAlert[]; totals: { open: number; acknowledged: number; resolved: number; critical: number } };
 
 export type DashboardChartPoint = { label: string; count: number; amountCents: number };
+export type AdminExecutiveWebhookEvent = { id: string; paymentId: string; providerEventId: string; eventType: string; receivedAt: string };
 export type AdminExecutiveDashboard = {
   generatedAt: string;
-  financial: { grossRevenueCents: number; netRevenueCents: number; refundedCents: number; estimatedFeesCents: number; feeConfigurationAvailable: boolean; todayRevenueCents: number; weekRevenueCents: number; eventRevenueCents: number; averageTicketCents: number };
-  registrations: { total: number; confirmed: number; pending: number; expired: number; cancelled: number; refunded: number; conversionRate: number };
-  checkouts: { created: number; paid: number; conversionRate: number; abandonmentRate: number };
+  financial: {
+    grossRevenueCents: number;
+    confirmedRevenueCents: number;
+    todayRevenueCents: number;
+    weekRevenueCents: number;
+    averageTicketCents: number;
+    eventRevenueCents: number;
+    /** @deprecated ADMIN-002 Stage 1: alias of confirmedRevenueCents; no fabricated net model. */
+    netRevenueCents: number;
+  };
+  registrations: {
+    registrationRows: number;
+    uniquePeople: number;
+    paidRegistrationRows: number;
+    uniquePaidPeople: number;
+    participantConversionRate: number;
+    total: number;
+    confirmed: number;
+    pending: number;
+    expired: number;
+    cancelled: number;
+    refunded: number;
+    /** @deprecated ADMIN-002 Stage 1: use participantConversionRate. */
+    conversionRate: number;
+  };
+  checkouts: {
+    created: number;
+    paid: number;
+    checkoutConversionRate: number;
+    abandonmentRate: number;
+    /** @deprecated ADMIN-002 Stage 1: use checkoutConversionRate. */
+    conversionRate: number;
+  };
   lots: Array<{ id: string; name: string; priceCents: number; capacityTotal: number; confirmed: number; temporaryReservations: number; occupied: number; available: number; occupancyPercent: number; level: 'normal' | 'warning' | 'critical' | 'blocked' }>;
   charts: { daily: DashboardChartPoint[]; hourly: DashboardChartPoint[]; cumulativeRevenue: DashboardChartPoint[]; byLot: DashboardChartPoint[]; byDistance: DashboardChartPoint[]; byCity: DashboardChartPoint[]; byGender: DashboardChartPoint[] };
   marketing: { sources: Array<DashboardChartPoint & { total: number; paid: number; conversionRate: number; cpaCents: number | null }>; campaigns: DashboardChartPoint[]; topSource: string };
   athletes: { byCity: DashboardChartPoint[]; byState: DashboardChartPoint[]; byGender: DashboardChartPoint[]; byDistance: DashboardChartPoint[]; byShirt: DashboardChartPoint[]; byLot: DashboardChartPoint[]; byAge: DashboardChartPoint[] };
-  recent: { payments: Array<{ id: string; registrationId: string; amountCents: number; paidAt?: string | null; updatedAt: string; gatewayStatus?: string | null }>; confirmations: Array<{ id: string; confirmedAt?: string | null; amountCents: number }>; webhooks: AdminPaymentEvent[] };
+  recent: { payments: Array<{ id: string; registrationId: string; amountCents: number; paidAt?: string | null; updatedAt: string; gatewayStatus?: string | null }>; confirmations: Array<{ id: string; confirmedAt?: string | null; amountCents: number }>; webhooks: AdminExecutiveWebhookEvent[] };
   alerts: { active: number; critical: number; recent: AdminOperationalAlert[] };
   reconciliation: { manualReviewRequired: number; lastRun: AdminReconciliationDashboard['runs'][number] | null };
 };

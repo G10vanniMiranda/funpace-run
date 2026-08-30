@@ -26,9 +26,53 @@ test('executive dashboard calculates finance, conversion and four-state lot capa
   const reserved = registration('reserved', 'pending_payment', { expiresAt: '2026-07-13T12:30:00.000Z' });
   const result = buildExecutiveDashboard(database({ registrations: [paid, reserved], payments: [payment('paid-payment', paid.id, { status: 'paid', paidAt: paid.paidAt }), payment('reserved-payment', reserved.id)] }), now);
   assert.equal(result.financial.grossRevenueCents, 10_000);
+  assert.equal(result.financial.confirmedRevenueCents, 10_000);
   assert.equal(result.registrations.confirmed, 1);
   assert.deepEqual({ confirmed: result.lots[0].confirmed, temporaryReservations: result.lots[0].temporaryReservations, available: result.lots[0].available, level: result.lots[0].level }, { confirmed: 1, temporaryReservations: 1, available: 0, level: 'blocked' });
   assert.equal(result.marketing.topSource, 'Instagram');
+});
+
+test('executive dashboard delegates every business number to the canonical metric engine', () => {
+  const p1 = registration('p1', 'paid', { cpfHash: 'person-1', amountCents: 10_000 });
+  const p1Retry = registration('p1-retry', 'expired', { cpfHash: 'person-1' });
+  const p2 = registration('p2', 'paid', { cpfHash: 'person-2', amountCents: 20_000 });
+  const abandoned = registration('ab', 'expired', { cpfHash: 'person-3' });
+  const result = buildExecutiveDashboard(database({
+    registrations: [p1, p1Retry, p2, abandoned],
+    payments: [
+      payment('pay-1', 'p1', { status: 'paid', amountCents: 10_000 }),
+      payment('pay-2', 'p2', { status: 'paid', amountCents: 20_000 }),
+      payment('pay-ab', 'ab', { status: 'expired' }),
+    ],
+  }), now);
+  assert.equal(result.registrations.registrationRows, 4);
+  assert.equal(result.registrations.uniquePeople, 3);
+  assert.equal(result.registrations.uniquePaidPeople, 2);
+  assert.equal(result.registrations.participantConversionRate, 66.7);
+  // deprecated alias stays consistent with the new authority (never "paid rows / rows")
+  assert.equal(result.registrations.conversionRate, result.registrations.participantConversionRate);
+  assert.equal(result.checkouts.checkoutConversionRate, result.checkouts.conversionRate);
+  assert.ok(result.checkouts.abandonmentRate >= 0 && result.checkouts.abandonmentRate <= 100);
+  assert.equal(result.financial.netRevenueCents, result.financial.confirmedRevenueCents);
+});
+
+test('executive dashboard recent.webhooks carries no raw gateway payload or customer PII', () => {
+  const paid = registration('paid', 'paid');
+  const pay = payment('pay', paid.id, { status: 'paid' });
+  const result = buildExecutiveDashboard(database({
+    registrations: [paid],
+    payments: [pay],
+    paymentEvents: [{
+      id: 'evt-1', paymentId: pay.id, providerEventId: 'nsu-1', eventType: 'infinitepay.webhook',
+      payload: { customer: { name: 'Fulana Sintética', email: 'fulana@example.test', document: '00000000000', phone: '+550000000000' }, card: { holder: 'Fulana Sintética' } },
+      receivedAt: '2026-07-13T10:03:00.000Z',
+    }],
+  }), now);
+  const serialized = JSON.stringify(result.recent.webhooks);
+  for (const forbidden of ['payload', 'customer', 'email', 'document', 'phone', 'Fulana', 'example.test', '00000000000']) {
+    assert.ok(!serialized.includes(forbidden), `webhook projection must not leak "${forbidden}"`);
+  }
+  assert.deepEqual(Object.keys(result.recent.webhooks[0]).sort(), ['eventType', 'id', 'paymentId', 'providerEventId', 'receivedAt']);
 });
 
 test('alert detector identifies duplicate transactions and operational gaps', () => {

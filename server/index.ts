@@ -97,6 +97,7 @@ import {
   type RemarketingCampaignManualEvent,
 } from './remarketing-campaign.js';
 import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAlerts } from './operational-intelligence.js';
+import { buildExecutiveMetrics, financialVisibleForRole } from './executive-metrics.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { calculateCouponPricing, normalizeCouponCode } from './coupons.js';
@@ -3441,7 +3442,8 @@ async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerRespo
 }
 
 async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
-  if (!await requireAdmin(req, res)) {
+  const session = await requireAdmin(req, res);
+  if (!session) {
     return;
   }
 
@@ -3449,13 +3451,21 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  // ADMIN-002 Stage 1 RBAC: financial visibility is administrator/finance only.
+  // `operation` keeps the endpoint for operational counts but receives no
+  // revenue / ticket / manual financial counters / financial series.
+  const financialVisible = financialVisibleForRole(session.role);
+
   const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
+  const now = new Date();
+  // Business numbers come from the single canonical engine — no parallel formulas.
+  const metrics = buildExecutiveMetrics(database, now);
   const paid = database.registrations.filter((item) => item.status === 'paid');
   const pending = database.registrations.filter((item) => item.status === 'pending_payment');
-  const revenueCents = paid.reduce((total, item) => total + item.amountCents, 0);
+  const revenueCents = metrics.financial.grossRevenueCents;
+  const averageTicketCents = metrics.financial.averageTicketCents;
   const checkIns = database.checkIns.length;
   const kitDeliveries = database.kitDeliveries.length;
-  const now = new Date();
   const todayKey = now.toISOString().slice(0, 10);
   const weekStart = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0, 0, 0, 0);
   const paidWithoutEmail = paid.filter((item) => !item.confirmationEmailSentAt).length;
@@ -3465,7 +3475,7 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   const confirmationEmailsAttention = paid.filter((item) => !item.confirmationEmailSentAt || item.confirmationEmailError).length;
   const todayRegistrations = database.registrations.filter((item) => item.createdAt.slice(0, 10) === todayKey).length;
   const weekRegistrations = database.registrations.filter((item) => new Date(item.createdAt) >= weekStart).length;
-  const todayRevenueCents = paid.filter((item) => (item.paidAt || item.createdAt).slice(0, 10) === todayKey).reduce((total, item) => total + item.amountCents, 0);
+  const todayRevenueCents = metrics.financial.todayRevenueCents;
   const daily = Array.from({ length: 7 }, (_, offset) => {
     const date = new Date(now); date.setDate(now.getDate() - (6 - offset));
     const key = date.toISOString().slice(0, 10);
@@ -3513,23 +3523,28 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
       registrations: database.registrations.length,
       paid: paid.length,
       pending: pending.length,
-      revenueCents,
+      uniquePeople: metrics.registrations.uniquePeople,
+      uniquePaidPeople: metrics.registrations.uniquePaidPeople,
+      participantConversionRate: metrics.registrations.participantConversionRate,
+      financialVisible,
+      revenueCents: financialVisible ? revenueCents : 0,
+      averageTicketCents: financialVisible ? averageTicketCents : 0,
+      todayRevenueCents: financialVisible ? todayRevenueCents : 0,
+      manualReconciledPayments: financialVisible ? manualReconciledPayments : 0,
       checkIns,
       kitDeliveries,
       paidWithoutEmail,
-      manualReconciledPayments,
       confirmationEmailsSent,
       confirmationEmailsFailed,
       confirmationEmailsAttention,
       todayRegistrations,
       weekRegistrations,
-      todayRevenueCents,
     },
     byStatus,
     byDistance,
     lots,
     shirtSizes,
-    daily,
+    daily: financialVisible ? daily : daily.map((point) => ({ ...point, amountCents: 0 })),
   });
 }
 
