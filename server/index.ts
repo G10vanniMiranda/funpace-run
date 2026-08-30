@@ -4523,9 +4523,9 @@ async function handleAdminPartnerDashboardDetail(req: IncomingMessage, res: Serv
   json(res, 200, detail);
 }
 
-function csvCell(value: unknown) {
-  return `"${String(value ?? '').replace(/"/g, '""')}"`;
-}
+// ADMIN-003 Stage 1: `csvCell` was a byte-for-byte duplicate of `escapeCsv`.
+// Unified onto the single hardened primitive so every CSV cell gets both
+// structural quoting AND spreadsheet-formula neutralisation.
 
 async function handleAdminPartnerDashboardExport(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!await requireAdmin(req, res, ['administrator']) || !requireAdminDatabase(res)) return;
@@ -4537,7 +4537,7 @@ async function handleAdminPartnerDashboardExport(req: IncomingMessage, res: Serv
   const headers = ['Inscricao', 'Atleta', 'Evento', 'Parceiro', 'Cidade', 'Data', 'Valor original', 'Desconto', 'Percentual', 'Valor pago', 'Status do pagamento', 'Tipo do parceiro'];
   const values = rows.map((row) => [row.id, row.athleteName, row.eventName, row.partnerName, row.city, row.createdAt, row.originalPriceCents / 100, row.discountAmountCents / 100, row.discountPercentage, row.finalPriceCents / 100, row.paymentStatus, row.partnerType]);
   if (format === 'excel') { binary(res, 'funpace-parceiros.xls', 'application/vnd.ms-excel; charset=utf-8', createExcelXml('Parceiros', headers, values)); return; }
-  csv(res, 'funpace-parceiros.csv', `\uFEFF${[headers, ...values].map((row) => row.map(csvCell).join(';')).join('\n')}`);
+  csv(res, 'funpace-parceiros.csv', `\uFEFF${[headers, ...values].map((row) => row.map(escapeCsv).join(';')).join('\n')}`);
 }
 
 async function handleAdminPartnerAudit(req: IncomingMessage, res: ServerResponse, url: URL) {
@@ -4645,8 +4645,25 @@ async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerRes
   }
 }
 
-function escapeCsv(value: unknown) {
+// ADMIN-003 Stage 1 - CSV Formula Injection hardening.
+//
+// Excel / LibreOffice Calc / Google Sheets evaluate a cell as a formula when its
+// first non-whitespace character is `=`, `+`, `-` or `@` (a leading TAB or CR
+// counts as whitespace there, and on its own is suspicious control data). This
+// holds even inside a CSV-quoted field. `sanitizeSpreadsheetCell` neutralises
+// that by class of input: it prefixes a single quote, which the spreadsheet
+// hides while the visible text is preserved. Normal values pass through
+// untouched. Structural CSV quoting still runs afterwards in `escapeCsv` - the
+// two protections are independent and compose.
+export function sanitizeSpreadsheetCell(value: unknown): string {
   const text = String(value ?? '');
+  const startsWithFormula = /^\s*[=+\-@]/.test(text);
+  const startsWithControl = /^[\t\r]/.test(text);
+  return startsWithFormula || startsWithControl ? `'${text}` : text;
+}
+
+export function escapeCsv(value: unknown) {
+  const text = sanitizeSpreadsheetCell(value);
   return `"${text.replace(/"/g, '""')}"`;
 }
 
