@@ -98,6 +98,7 @@ import {
 } from './remarketing-campaign.js';
 import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAlerts } from './operational-intelligence.js';
 import { buildExecutiveMetrics, financialVisibleForRole } from './executive-metrics.js';
+import { businessDateKey, businessDateKeysEndingToday, businessTodayKey, businessWeekStart } from './business-time.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { calculateCouponPricing, normalizeCouponCode } from './coupons.js';
@@ -3466,21 +3467,22 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   const averageTicketCents = metrics.financial.averageTicketCents;
   const checkIns = database.checkIns.length;
   const kitDeliveries = database.kitDeliveries.length;
-  const todayKey = now.toISOString().slice(0, 10);
-  const weekStart = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0, 0, 0, 0);
+  // Calendar windows are business-local (America/Porto_Velho), same authority
+  // as the executive engine — no second UTC calculation.
+  const todayKey = businessTodayKey(now);
+  const weekStart = businessWeekStart(now); // Monday 00:00 business-local, as an instant
   const paidWithoutEmail = paid.filter((item) => !item.confirmationEmailSentAt).length;
   const manualReconciledPayments = database.payments.filter((item) => item.gatewayStatus === 'manual_reconciled_paid').length;
   const confirmationEmailsSent = paid.filter((item) => item.confirmationEmailSentAt).length;
   const confirmationEmailsFailed = paid.filter((item) => item.confirmationEmailError).length;
   const confirmationEmailsAttention = paid.filter((item) => !item.confirmationEmailSentAt || item.confirmationEmailError).length;
-  const todayRegistrations = database.registrations.filter((item) => item.createdAt.slice(0, 10) === todayKey).length;
+  const todayRegistrations = database.registrations.filter((item) => businessDateKey(item.createdAt) === todayKey).length;
   const weekRegistrations = database.registrations.filter((item) => new Date(item.createdAt) >= weekStart).length;
   const todayRevenueCents = metrics.financial.todayRevenueCents;
-  const daily = Array.from({ length: 7 }, (_, offset) => {
-    const date = new Date(now); date.setDate(now.getDate() - (6 - offset));
-    const key = date.toISOString().slice(0, 10);
-    const items = database.registrations.filter((item) => item.createdAt.slice(0, 10) === key);
-    const paidItems = paid.filter((item) => (item.paidAt || item.createdAt).slice(0, 10) === key);
+  const revenueInstant = (item: (typeof paid)[number]) => item.paidAt || item.confirmedAt || item.createdAt;
+  const daily = businessDateKeysEndingToday(now, 7).map((key) => {
+    const items = database.registrations.filter((item) => businessDateKey(item.createdAt) === key);
+    const paidItems = paid.filter((item) => businessDateKey(revenueInstant(item)) === key);
     return { label: key.slice(5), count: items.length, amountCents: paidItems.reduce((total, item) => total + item.amountCents, 0) };
   });
   const byStatus = database.registrations.reduce<Record<string, number>>((acc, item) => {

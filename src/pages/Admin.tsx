@@ -1580,8 +1580,8 @@ function ExecutiveDashboardPanel({ adminKey }: { adminKey: string }) {
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="Receita bruta" value={currencyFormatter.format((financial?.grossRevenueCents || 0) / 100)} icon={WalletCards} detail="todas as inscrições pagas" trend="up" loading={loading} />
         <KpiCard label="Receita confirmada" value={currencyFormatter.format((financial?.confirmedRevenueCents || 0) / 100)} icon={BadgeCheck} detail="pagas com liquidação registrada" trend="up" loading={loading} />
-        <KpiCard label="Receita hoje" value={currencyFormatter.format((financial?.todayRevenueCents || 0) / 100)} icon={Activity} detail="confirmações de hoje" trend="neutral" loading={loading} />
-        <KpiCard label="Receita da semana" value={currencyFormatter.format((financial?.weekRevenueCents || 0) / 100)} icon={BarChart3} detail="últimos sete dias" trend="up" loading={loading} />
+        <KpiCard label="Receita hoje" value={currencyFormatter.format((financial?.todayRevenueCents || 0) / 100)} icon={Activity} detail="hoje · Porto Velho" trend="neutral" loading={loading} />
+        <KpiCard label="Receita da semana" value={currencyFormatter.format((financial?.weekRevenueCents || 0) / 100)} icon={BarChart3} detail="semana atual · seg → hoje" trend="up" loading={loading} />
         <KpiCard label="Ticket médio" value={currencyFormatter.format((financial?.averageTicketCents || 0) / 100)} icon={Ticket} detail="por inscrição paga" trend="neutral" loading={loading} />
         <KpiCard label="Pessoas inscritas" value={registrationsData?.uniquePeople || 0} icon={Users} detail={`${registrationsData?.registrationRows || 0} registros · ${registrationsData?.uniquePaidPeople || 0} pagantes`} trend="up" loading={loading} />
         <KpiCard label="Conversão de participantes" value={`${registrationsData?.participantConversionRate || 0}%`} icon={ArrowUpRight} detail="pessoas pagantes / pessoas inscritas" trend="up" loading={loading} />
