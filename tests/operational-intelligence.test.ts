@@ -75,6 +75,46 @@ test('executive dashboard recent.webhooks carries no raw gateway payload or cust
   assert.deepEqual(Object.keys(result.recent.webhooks[0]).sort(), ['eventType', 'id', 'paymentId', 'providerEventId', 'receivedAt']);
 });
 
+test('executive dashboard daily / hourly / cumulative buckets are America/Porto_Velho local', () => {
+  // now = Sunday 2026-08-30 06:00 local (10:00Z)
+  const nowLocal = new Date('2026-08-30T10:00:00.000Z');
+  const db = database({
+    registrations: [
+      // 2026-08-29 22:00 local (2026-08-30T02:00Z): local day 08-29, local hour 22 (UTC day 08-30, UTC hour 02)
+      registration('late-evening', 'paid', { amountCents: 3_000, paidAt: '2026-08-30T02:00:00.000Z' }),
+      // 2026-08-30 01:00 local (05:00Z): local day 08-30, local hour 1 (UTC hour 5)
+      registration('after-midnight', 'paid', { amountCents: 4_000, paidAt: '2026-08-30T05:00:00.000Z' }),
+      // 2026-08-30 05:00 local (09:00Z): local day 08-30, local hour 5
+      registration('morning', 'paid', { amountCents: 5_000, paidAt: '2026-08-30T09:00:00.000Z' }),
+    ],
+    payments: [
+      payment('p1', 'late-evening', { status: 'paid' }),
+      payment('p2', 'after-midnight', { status: 'paid' }),
+      payment('p3', 'morning', { status: 'paid' }),
+    ],
+  });
+  const result = buildExecutiveDashboard(db, nowLocal);
+
+  const daily = new Map(result.charts.daily.map((point) => [point.label, point]));
+  assert.equal(daily.get('2026-08-29')?.amountCents, 3_000); // late-evening stays on local 08-29
+  assert.equal(daily.get('2026-08-30')?.amountCents, 9_000); // after-midnight + morning
+  assert.equal(result.charts.daily[result.charts.daily.length - 1].label, '2026-08-30'); // ends today (local)
+
+  const hourly = result.charts.hourly;
+  assert.equal(hourly[22].count, 1); // 22:00 local, not 02:00
+  assert.equal(hourly[1].count, 1); // 01:00 local, not 05:00
+  assert.equal(hourly[5].count, 1); // 05:00 local, not 09:00
+  assert.equal(hourly.reduce((sum, b) => sum + b.count, 0), 3);
+
+  // cumulative is a running sum over the corrected daily buckets, nothing else
+  const cum = result.charts.cumulativeRevenue;
+  assert.equal(cum[cum.length - 1].amountCents, 12_000);
+  const cumByLabel = new Map(cum.map((p) => [p.label, p.amountCents]));
+  assert.equal(cumByLabel.get('2026-08-30'), 12_000);
+  const idx29 = cum.findIndex((p) => p.label === '2026-08-29');
+  assert.equal(cum[idx29].amountCents + 9_000, cum[idx29 + 1].amountCents);
+});
+
 test('alert detector identifies duplicate transactions and operational gaps', () => {
   const paid = registration('paid', 'paid', { confirmationEmailError: 'resend unavailable' });
   const db = database({ registrations: [paid, registration('orphan-registration', 'pending_payment')], payments: [payment('one', paid.id, { gatewayTransactionId: 'tx-1' }), payment('two', paid.id, { gatewayTransactionId: 'tx-1' })] });

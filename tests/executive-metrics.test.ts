@@ -195,3 +195,48 @@ test('personIdentityKey never returns a raw email / name and falls back per regi
   const key = personIdentityKey(registration('z', 'paid', { cpfHash: '' }));
   assert.equal(key, 'registration:z');
 });
+
+// -- §21 today revenue in America/Porto_Velho -------------------------------
+test('todayRevenueCents uses the business-local calendar day, not UTC', () => {
+  // now = 2026-08-30 06:00 local (10:00Z) -> business "today" = 2026-08-30
+  const now = new Date('2026-08-30T10:00:00.000Z');
+  const db = database({
+    registrations: [
+      // paid 2026-08-30 01:00 local (05:00Z) -> today
+      registration('a', 'paid', { amountCents: 5_000, paidAt: '2026-08-30T05:00:00.000Z' }),
+      // paid 2026-08-29 22:00 local (2026-08-30T02:00Z) -> YESTERDAY local, but "today" in UTC
+      registration('b', 'paid', { amountCents: 7_000, paidAt: '2026-08-30T02:00:00.000Z' }),
+      // paid 2026-08-28 -> outside
+      registration('c', 'paid', { amountCents: 9_000, paidAt: '2026-08-28T15:00:00.000Z' }),
+    ],
+    payments: [
+      payment('pa', 'a', { status: 'paid' }), payment('pb', 'b', { status: 'paid' }), payment('pc', 'c', { status: 'paid' }),
+    ],
+  });
+  const metrics = buildExecutiveMetrics(db, now);
+  assert.equal(metrics.financial.todayRevenueCents, 5_000); // only 'a'; 'b' is local-yesterday
+});
+
+// -- §22 week revenue: current calendar week to date, Monday start ----------
+test('weekRevenueCents runs from Monday 00:00 local, not rolling 7 days', () => {
+  // now = Wednesday 2026-08-26 11:00 local (15:00Z)
+  const now = new Date('2026-08-26T15:00:00.000Z');
+  const db = database({
+    registrations: [
+      // Sunday 2026-08-23 23:59 local (2026-08-24T03:59Z) -> BEFORE this week
+      registration('sun', 'paid', { amountCents: 4_000, paidAt: '2026-08-24T03:59:00.000Z' }),
+      // Monday 2026-08-24 00:05 local (04:05Z) -> in week-to-date
+      registration('mon', 'paid', { amountCents: 6_000, paidAt: '2026-08-24T04:05:00.000Z' }),
+      // Wednesday today -> in
+      registration('wed', 'paid', { amountCents: 8_000, paidAt: '2026-08-26T14:00:00.000Z' }),
+      // 6 days ago (would be inside a rolling-7d-UTC window) but last week -> out
+      registration('lastweek', 'paid', { amountCents: 50_000, paidAt: '2026-08-20T12:00:00.000Z' }),
+    ],
+    payments: [
+      payment('psun', 'sun', { status: 'paid' }), payment('pmon', 'mon', { status: 'paid' }),
+      payment('pwed', 'wed', { status: 'paid' }), payment('plw', 'lastweek', { status: 'paid' }),
+    ],
+  });
+  const metrics = buildExecutiveMetrics(db, now);
+  assert.equal(metrics.financial.weekRevenueCents, 14_000); // mon + wed only
+});

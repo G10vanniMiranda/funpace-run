@@ -1,4 +1,5 @@
 import type { Database, RegistrationRecord } from './database.js';
+import { businessDateKey, businessDateKeysEndingToday, businessHour } from './business-time.js';
 import { buildExecutiveMetrics } from './executive-metrics.js';
 import { calculateLotCapacity } from './lot-capacity.js';
 
@@ -12,8 +13,6 @@ export type OperationalAlertCandidate = {
   entityId?: string | null;
   payload?: Record<string, unknown>;
 };
-
-const dayKey = (value: string | null | undefined) => (value || '').slice(0, 10);
 
 function groupPaid(
   paid: RegistrationRecord[],
@@ -60,16 +59,25 @@ export function buildExecutiveDashboard(database: Database, now = new Date()) {
       level: occupancyPercent >= 100 ? 'blocked' : occupancyPercent >= 95 ? 'critical' : occupancyPercent >= 80 ? 'warning' : 'normal' };
   });
 
-  const daily = Array.from({ length: 30 }, (_, index) => {
-    const date = new Date(now); date.setUTCDate(now.getUTCDate() - (29 - index));
-    const key = date.toISOString().slice(0, 10);
-    const items = paid.filter((registration) => dayKey(registration.paidAt || registration.confirmedAt || registration.createdAt) === key);
-    return { label: key, count: items.length, amountCents: items.reduce((sum, registration) => sum + registration.amountCents, 0) };
+  // Daily / hourly / cumulative buckets are business-local (America/Porto_Velho).
+  const revenueInstant = (registration: RegistrationRecord) =>
+    registration.paidAt || registration.confirmedAt || registration.createdAt;
+  const dailyByKey = new Map<string, { count: number; amountCents: number }>();
+  for (const registration of paid) {
+    const key = businessDateKey(revenueInstant(registration));
+    const bucket = dailyByKey.get(key) || { count: 0, amountCents: 0 };
+    bucket.count += 1;
+    bucket.amountCents += registration.amountCents;
+    dailyByKey.set(key, bucket);
+  }
+  const daily = businessDateKeysEndingToday(now, 30).map((key) => {
+    const bucket = dailyByKey.get(key) || { count: 0, amountCents: 0 };
+    return { label: key, count: bucket.count, amountCents: bucket.amountCents };
   });
   let cumulative = 0;
   const cumulativeRevenue = daily.map((item) => ({ ...item, amountCents: (cumulative += item.amountCents) }));
   const hourly = Array.from({ length: 24 }, (_, hour) => {
-    const items = paid.filter((registration) => new Date(registration.paidAt || registration.confirmedAt || registration.createdAt).getUTCHours() === hour);
+    const items = paid.filter((registration) => businessHour(revenueInstant(registration)) === hour);
     return { label: `${String(hour).padStart(2, '0')}:00`, count: items.length, amountCents: items.reduce((sum, registration) => sum + registration.amountCents, 0) };
   });
 

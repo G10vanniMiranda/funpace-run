@@ -1,7 +1,8 @@
 import type { Database, PaymentEventRecord, PaymentRecord, RegistrationRecord } from './database.js';
+import { BUSINESS_TIMEZONE, businessDateKey, businessTodayKey, businessWeekStart } from './business-time.js';
 
 /**
- * ADMIN-002 Stage 1 — SINGLE EXECUTIVE METRIC ENGINE.
+ * ADMIN-002 — SINGLE EXECUTIVE METRIC ENGINE.
  *
  * This module is the ONLY authority for the executive dashboard business
  * numbers: revenue, participant conversion, checkout conversion and the
@@ -15,16 +16,13 @@ import type { Database, PaymentEventRecord, PaymentRecord, RegistrationRecord } 
  *    and confirmedRevenueCents, never a fabricated net.
  *  - People (deduplicated) and registration rows are distinct numbers.
  *  - Percentages use one rule: one decimal place.
- *
- * STAGE 2 (NOT DONE HERE): today/week/hour/day/cumulative buckets must be
- * computed in America/Porto_Velho. This module already centralises the day
- * derivation in ONE place (`businessDayKey` / `businessWeekStart`) so Stage 2
- * changes a single implementation, not three. The behaviour below is still the
- * pre-existing UTC calendar-day behaviour — intentionally unchanged.
+ *  - Stage 2: "today" and "this week" are read in America/Porto_Velho
+ *    (calendar day; calendar week starting Monday, week-to-date) via the
+ *    shared `business-time` authority. UTC is never reinterpreted for buckets.
  */
 
-/** Official business timezone (ratified). Wired into buckets in ADMIN-002 Stage 2. */
-export const BUSINESS_TIMEZONE = 'America/Porto_Velho';
+/** Re-exported for convenience; the canonical home is ./business-time.ts. */
+export { BUSINESS_TIMEZONE };
 
 /** Single rounding rule for every percentage the dashboard shows. */
 export const PERCENT_DECIMALS = 1;
@@ -57,26 +55,6 @@ function distinctPeople(registrations: RegistrationRecord[]): number {
   const seen = new Set<string>();
   for (const registration of registrations) seen.add(personIdentityKey(registration));
   return seen.size;
-}
-
-// --- day / week derivation: the ONE seam Stage 2 will move to BUSINESS_TIMEZONE ---
-function businessDayKey(value: string | null | undefined): string {
-  // STAGE 2: convert to BUSINESS_TIMEZONE before slicing. Today: UTC calendar day.
-  return (value || '').slice(0, 10);
-}
-
-function businessTodayKey(now: Date): string {
-  // STAGE 2: BUSINESS_TIMEZONE calendar day. Today: UTC calendar day.
-  return now.toISOString().slice(0, 10);
-}
-
-function businessWeekStart(now: Date): Date {
-  // STAGE 2: start of current calendar week to date in BUSINESS_TIMEZONE.
-  // Today: rolling 7 UTC days (pre-existing behaviour, unchanged).
-  const start = new Date(now);
-  start.setUTCDate(start.getUTCDate() - 6);
-  start.setUTCHours(0, 0, 0, 0);
-  return start;
 }
 
 function revenueTimestamp(registration: RegistrationRecord): string {
@@ -135,10 +113,11 @@ export function buildExecutiveMetrics(database: Database, now: Date = new Date()
     0,
   );
 
+  // "today" and "this week" are business-local (America/Porto_Velho), not UTC.
   const todayKey = businessTodayKey(now);
-  const weekStart = businessWeekStart(now);
+  const weekStart = businessWeekStart(now); // Monday 00:00 business-local, as an instant
   const todayRevenueCents = paid
-    .filter((registration) => businessDayKey(revenueTimestamp(registration)) === todayKey)
+    .filter((registration) => businessDateKey(revenueTimestamp(registration)) === todayKey)
     .reduce((sum, registration) => sum + registration.amountCents, 0);
   const weekRevenueCents = paid
     .filter((registration) => new Date(revenueTimestamp(registration)) >= weekStart)
