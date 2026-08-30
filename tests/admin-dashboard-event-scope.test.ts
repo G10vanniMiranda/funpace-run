@@ -39,10 +39,23 @@ test('event scope resolver answers a controlled 400 — never 500 / fallback / l
   assert.ok(!/funpace-run-2026/.test(resolver));
 });
 
-test('alerts and reconciliation are declared all-events, not event-scoped', () => {
+test('ADMIN-002 Stage 5B: executive dashboard no longer reads or emits alerts / reconciliation', () => {
   const dashboard = block(server, 'async function handleAdminExecutiveDashboard', '\nasync function ');
-  assert.match(dashboard, /alerts: \{\s*scope: 'all-events' as const,/);
-  assert.match(dashboard, /reconciliation: \{\s*scope: 'all-events' as const,/);
+  assert.ok(!/listOperationalAlertsInPostgres\(\)/.test(dashboard), 'no alerts read in executive-dashboard');
+  assert.ok(!/getReconciliationDashboardInPostgres\(\)/.test(dashboard), 'no reconciliation read in executive-dashboard');
+  assert.ok(!/\balerts:\s*\{/.test(dashboard), 'no alerts field in executive-dashboard response');
+  assert.ok(!/\breconciliation:\s*\{/.test(dashboard), 'no reconciliation field in executive-dashboard response');
+  assert.match(dashboard, /scope: 'admin-dashboard'/);
+  // the alert / reconciliation DOMAINS stay untouched (dedicated endpoints)
+  assert.match(server, /url\.pathname === '\/api\/admin\/alerts'\) \{ await handleAdminAlerts/);
+  assert.match(server, /url\.pathname === '\/api\/admin\/reconciliation'\) \{ await handleAdminReconciliation/);
+});
+
+test('ADMIN-002 Stage 5B: dashboard type contract dropped alerts / reconciliation', () => {
+  const types = readFileSync('src/types/registration.ts', 'utf8');
+  const dash = block(types, 'export type AdminExecutiveDashboard = {', '\n};');
+  assert.ok(!/^\s*alerts:/m.test(dash), 'AdminExecutiveDashboard has no alerts field');
+  assert.ok(!/^\s*reconciliation:/m.test(dash), 'AdminExecutiveDashboard has no reconciliation field');
 });
 
 test('GET /api/admin/events endpoint exists with dashboard RBAC and non-sensitive fields only', () => {

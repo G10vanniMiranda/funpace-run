@@ -3484,7 +3484,9 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse, url
   // revenue / ticket / manual financial counters / financial series.
   const financialVisible = financialVisibleForRole(session.role);
 
-  const fullDatabase = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
+  // ADMIN-002 Stage 5B: same lean read as the executive dashboard, plus
+  // check-ins / kit-deliveries which the summary counts.
+  const fullDatabase = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-dashboard' });
   const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
   if (!eventScope) return;
   const database = eventScope.scoped;
@@ -3602,34 +3604,18 @@ async function refreshOperationalAlerts(database: Database) {
 
 async function handleAdminExecutiveDashboard(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
-  const fullDatabase = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  // ADMIN-002 Stage 5B: lean read (no audit-logs / email-deliveries /
+  // google-sheet-sync, minimal columns, no raw jsonb). Alerts and reconciliation
+  // were removed from this response by the ADMIN-002 Stage 5B Human Gate — they
+  // have dedicated Admin modules; their engines / endpoints / all-events
+  // semantics are unchanged.
+  const fullDatabase = await transaction((current) => current, { persist: false, scope: 'admin-dashboard' });
   // ADMIN-002 Stage 4B: every panel is scoped to one event (resolved explicitly).
   const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
   if (!eventScope) return;
-  // Dashboard GETs are polled. Persisting the same alerts on every poll made
-  // concurrent requests contend on identical rows and hold DB connections
-  // until the statement timeout. Alert detection/persistence stays in the
-  // dedicated alerts endpoint and operational flows.
-  const alerts = await listOperationalAlertsInPostgres();
-  const reconciliation = await getReconciliationDashboardInPostgres();
   json(res, 200, {
     event: eventScope.context,
     ...buildExecutiveDashboard(fullDatabase, new Date(), { eventId: eventScope.event.id }),
-    // ADMIN-002 Stage 4B: alerts and reconciliation are NOT event-scoped yet
-    // (no event_id on run-operational-alerts / run-payment-reconciliations, no
-    // migration in this stage). Declared explicitly so the client never reads
-    // them as belonging to the selected event.
-    alerts: {
-      scope: 'all-events' as const,
-      active: alerts.filter((alert) => alert.status !== 'resolved').length,
-      critical: alerts.filter((alert) => alert.status !== 'resolved' && alert.severity === 'critical').length,
-      recent: alerts.slice(0, 10),
-    },
-    reconciliation: {
-      scope: 'all-events' as const,
-      manualReviewRequired: reconciliation.issues.filter((issue) => issue.resolutionStatus === 'manual_review_required').length,
-      lastRun: reconciliation.runs[0] || null,
-    },
   });
 }
 

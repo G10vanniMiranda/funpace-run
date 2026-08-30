@@ -436,9 +436,8 @@ export type AdminExecutiveDashboard = {
   marketing: { sources: Array<DashboardChartPoint & { total: number; paid: number; conversionRate: number; cpaCents: number | null }>; campaigns: DashboardChartPoint[]; topSource: string };
   athletes: { byCity: DashboardChartPoint[]; byState: DashboardChartPoint[]; byGender: DashboardChartPoint[]; byDistance: DashboardChartPoint[]; byShirt: DashboardChartPoint[]; byLot: DashboardChartPoint[]; byAge: DashboardChartPoint[] };
   recent: { payments: Array<{ id: string; registrationId: string; amountCents: number; paidAt?: string | null; updatedAt: string; gatewayStatus?: string | null }>; confirmations: Array<{ id: string; confirmedAt?: string | null; amountCents: number }>; webhooks: AdminExecutiveWebhookEvent[] };
-  /** ADMIN-002 Stage 4B: alerts/reconciliation are NOT event-scoped yet — declared explicitly. */
-  alerts: { scope: 'all-events'; active: number; critical: number; recent: AdminOperationalAlert[] };
-  reconciliation: { scope: 'all-events'; manualReviewRequired: number; lastRun: AdminReconciliationDashboard['runs'][number] | null };
+  // ADMIN-002 Stage 5B: alerts and reconciliation were removed from this
+  // contract (dead dashboard data — they have dedicated Admin modules).
 };
 
 export type AdminMonitoringResponse = {
