@@ -84,7 +84,7 @@ test('frontend keeps the selected event in the URL (?event=slug), never in sessi
   assert.match(dashboardHook, /getAdminExecutiveDashboard\(adminKey, slug, \{ signal \}\)/);
   assert.ok(!/sessionStorage|localStorage/.test(dashboardHook), 'hook: no session/local storage for event selection');
 
-  const panel = block(admin, 'function ExecutiveDashboardPanel(', '\nfunction ExecutiveSeries(');
+  const panel = block(admin, 'function ExecutiveDashboardPanel(', '\nexport function LotOccupancy(');
   assert.match(panel, /useExecutiveDashboardRuntime\(adminKey, onSessionExpired\)/);
   assert.match(panel, /aria-label="Selecionar evento do dashboard"/);
   assert.ok(!/sessionStorage|localStorage/.test(panel), 'panel: no session/local storage for event selection');

@@ -78,7 +78,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventListItem, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -110,6 +110,30 @@ const dateTimeFormatter = new Intl.DateTimeFormat('pt-BR', {
   dateStyle: 'short',
   timeStyle: 'short',
 });
+
+// ADMIN-002 Stage 7B — the Executive Dashboard presents business figures, so its
+// visible timestamps are pinned to the event's operating timezone (matches the
+// "hoje · Porto Velho" metric labels). Stored timestamps are untouched.
+export const BUSINESS_TIMEZONE = 'America/Porto_Velho';
+export const businessDateTimeFormatter = new Intl.DateTimeFormat('pt-BR', {
+  dateStyle: 'short',
+  timeStyle: 'short',
+  timeZone: BUSINESS_TIMEZONE,
+});
+// pt-BR: "61,3%" not "61.3%".
+export const percentFormatter = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 1 });
+// pt-BR: "1.234" not "1234".
+export const integerFormatter = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 0 });
+const formatPercent = (value: number | undefined) => `${percentFormatter.format(Number(value) || 0)}%`;
+const formatCount = (value: number | undefined) => integerFormatter.format(Number(value) || 0);
+
+// ADMIN-002 Stage 7B §13 — lot capacity status carries text, never colour alone.
+export const LOT_LEVEL_LABEL: Record<string, string> = {
+  normal: 'Normal',
+  warning: 'Atenção',
+  critical: 'Crítico',
+  blocked: 'Bloqueado',
+};
 
 const statusOptions = [
   { value: '', label: 'Todos os status' },
@@ -448,7 +472,7 @@ export function AdminPage() {
       <div className="fixed inset-0 pointer-events-none bg-[radial-gradient(circle_at_top_left,rgba(215,255,0,0.12),transparent_32rem),linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-size-[auto,36px_36px,36px_36px]" />
 
       <div className="relative flex min-h-screen">
-        <aside className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 w-70 border-r border-white/10 bg-zinc-950/95 px-3 py-4 backdrop-blur-sm transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
+        <aside id="admin-sidebar" className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 w-70 border-r border-white/10 bg-zinc-950/95 px-3 py-4 backdrop-blur-sm transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0`}>
           <Sidebar
             activeNav={activeNav}
             adminRole={adminRole}
@@ -472,6 +496,7 @@ export function AdminPage() {
           <Topbar
             activeNav={activeNav}
             loading={loading}
+            sidebarOpen={sidebarOpen}
             onOpenSidebar={() => setSidebarOpen(true)}
             onRefresh={() => void loadAdminData()}
             onExport={() => void downloadCsv()}
@@ -759,7 +784,7 @@ function Sidebar({ activeNav, adminRole, onSelect }: { activeNav: AdminNavKey; a
         <p className="mt-1 text-xs font-bold uppercase tracking-widest text-zinc-500">Run Operations</p>
       </div>
 
-      <nav className="min-h-0 flex-1 overflow-y-auto pr-1">
+      <nav aria-label="Navegação administrativa" className="min-h-0 flex-1 overflow-y-auto pr-1">
         <div className="space-y-1">
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
@@ -770,13 +795,14 @@ function Sidebar({ activeNav, adminRole, onSelect }: { activeNav: AdminNavKey; a
                 type="button"
                 key={item.key}
                 onClick={() => onSelect(item.key)}
+                aria-current={active ? 'page' : undefined}
                 className={`flex w-full items-center gap-3 rounded px-3 py-2.5 text-left text-sm font-bold transition-colors ${active ? 'bg-brand text-black' : 'text-zinc-300 hover:bg-white/5 hover:text-white'
                   }`}
               >
-                <Icon className="h-4 w-4 shrink-0" />
+                <Icon aria-hidden="true" className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 flex-1">{item.label}</span>
                 {item.status === 'soon' && (
-                  <span className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${active ? 'bg-black/10 text-black' : 'bg-white/5 text-zinc-500'}`}>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${active ? 'bg-black/10 text-black' : 'bg-white/5 text-zinc-400'}`}>
                     soon
                   </span>
                 )}
@@ -800,6 +826,7 @@ function Sidebar({ activeNav, adminRole, onSelect }: { activeNav: AdminNavKey; a
 function Topbar({
   activeNav,
   loading,
+  sidebarOpen,
   onOpenSidebar,
   onRefresh,
   onExport,
@@ -808,6 +835,7 @@ function Topbar({
 }: {
   activeNav: AdminNavKey;
   loading: boolean;
+  sidebarOpen: boolean;
   onOpenSidebar: () => void;
   onRefresh: () => void;
   onExport: () => void;
@@ -821,14 +849,18 @@ function Topbar({
           <button
             type="button"
             aria-label="Abrir menu"
+            aria-expanded={sidebarOpen}
+            aria-controls="admin-sidebar"
             onClick={onOpenSidebar}
             className="flex h-10 w-10 items-center justify-center border border-white/10 bg-white/3 lg:hidden"
           >
-            <Menu className="h-5 w-5" />
+            <Menu aria-hidden="true" className="h-5 w-5" />
           </button>
+          {/* ADMIN-002 Stage 7B §20: the page-level heading is the panel's own
+              <h1>; this line is a contextual label, not a competing heading. */}
           <div className="min-w-0">
             <p className="text-xs font-black uppercase tracking-widest text-brand">{getNavLabel(activeNav)}</p>
-            <h1 className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operações FunPace Run</h1>
+            <p className="truncate text-sm font-bold text-zinc-300 sm:text-base">Centro de operações FunPace Run</p>
           </div>
         </div>
 
@@ -857,7 +889,7 @@ function Topbar({
   );
 }
 
-function KpiCard({
+export function KpiCard({
   label,
   value,
   icon: Icon,
@@ -869,28 +901,31 @@ function KpiCard({
   value: string | number;
   icon: LucideIcon;
   detail: string;
-  trend: 'up' | 'neutral';
+  // ADMIN-002 Stage 7B: no fake/hardcoded trend indicator. When a real
+  // period-over-period comparison exists it can be passed; otherwise omit it and
+  // no arrow renders. The Executive Dashboard omits it.
+  trend?: 'up' | 'neutral';
   loading: boolean;
 }) {
   return (
     <div className="border border-white/10 bg-zinc-950/80 p-4 shadow-lg">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-xs font-black uppercase tracking-widest text-zinc-500">{label}</p>
+        <dl className="min-w-0 flex-1">
+          <dt className="text-xs font-black uppercase tracking-widest text-zinc-400">{label}</dt>
           {loading ? (
-            <div className="mt-4 h-8 w-24 animate-pulse bg-white/10" />
+            <dd className="mt-4 h-8 w-24 animate-pulse bg-white/10" aria-hidden="true" />
           ) : (
-            <p className="mt-3 truncate font-mono text-2xl font-black text-white">{value}</p>
+            <dd className="mt-3 font-mono text-2xl font-black break-words text-white">{value}</dd>
           )}
-        </div>
+        </dl>
         <div className="flex h-10 w-10 shrink-0 items-center justify-center border border-white/10 bg-white/3">
-          <Icon className="h-5 w-5 text-brand" />
+          <Icon aria-hidden="true" className="h-5 w-5 text-brand" />
         </div>
       </div>
-      <div className="mt-5 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-500">
-        {trend === 'up' ? <ArrowUpRight className="h-3.5 w-3.5 text-brand" /> : <ArrowDownRight className="h-3.5 w-3.5 text-zinc-600" />}
+      <p className="mt-5 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
+        {trend === 'up' ? <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5 text-brand" /> : trend === 'neutral' ? <ArrowDownRight aria-hidden="true" className="h-3.5 w-3.5 text-zinc-500" /> : null}
         <span>{detail}</span>
-      </div>
+      </p>
     </div>
   );
 }
@@ -1612,7 +1647,7 @@ function ReportList({
 // event is selected (EVENT_SCOPE_AMBIGUOUS), or the URL slug is unknown
 // (EVENT_NOT_FOUND). No auto-selection: the operator must choose (two events can
 // legitimately run at once). No dashboard polling happens in this state.
-function ExecutiveEventSelection({ events, eventsError, message, onSelect, onRetryEvents }: {
+export function ExecutiveEventSelection({ events, eventsError, message, onSelect, onRetryEvents }: {
   events: AdminEventListItem[];
   eventsError: string;
   message: string;
@@ -1621,11 +1656,11 @@ function ExecutiveEventSelection({ events, eventsError, message, onSelect, onRet
 }) {
   const [choice, setChoice] = useState('');
   return (
-    <section className="mt-4 space-y-4">
+    <section className="mt-4 space-y-4" aria-labelledby="exec-dashboard-heading">
       <div className="border border-white/10 bg-zinc-950/80 p-5">
         <p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p>
-        <h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1>
-        <p className="mt-2 text-sm text-amber-200" role="status" aria-live="polite">
+        <h1 id="exec-dashboard-heading" className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1>
+        <p id="exec-event-message" className="mt-2 text-sm text-amber-200" role="status">
           {message || 'Selecione o evento que o dashboard deve exibir.'}
         </p>
       </div>
@@ -1633,12 +1668,13 @@ function ExecutiveEventSelection({ events, eventsError, message, onSelect, onRet
         {events.length > 0 ? (
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
             <label className="flex flex-1 flex-col gap-2 text-xs text-zinc-400">
-              <span className="font-black uppercase tracking-widest text-zinc-500">Evento</span>
+              <span className="font-black uppercase tracking-widest text-zinc-400">Evento</span>
               <select
                 aria-label="Selecionar evento do dashboard"
+                aria-describedby="exec-event-message"
                 value={choice}
                 onChange={(changeEvent) => setChoice(changeEvent.target.value)}
-                className="min-h-11 border border-white/10 bg-black px-2 py-1 text-white"
+                className="min-h-11 border border-white/15 bg-black px-2 py-1 text-white"
               >
                 <option value="">Escolha um evento…</option>
                 {events.map((item) => (
@@ -1661,7 +1697,7 @@ function ExecutiveEventSelection({ events, eventsError, message, onSelect, onRet
               {eventsError || 'Carregando a lista de eventos…'}
             </p>
             {eventsError && (
-              <button type="button" onClick={onRetryEvents} className="min-h-11 self-start border border-white/10 px-4 text-xs font-black uppercase tracking-widest text-zinc-200">
+              <button type="button" onClick={onRetryEvents} className="min-h-11 self-start border border-white/15 px-4 text-xs font-black uppercase tracking-widest text-zinc-200">
                 Tentar novamente
               </button>
             )}
@@ -1676,6 +1712,19 @@ function ExecutiveDashboardPanel({ adminKey, onSessionExpired }: { adminKey: str
   const runtime = useExecutiveDashboardRuntime(adminKey, onSessionExpired);
   const { phase, data, events, error, eventsError, selectedSlug, lastGeneratedAt } = runtime.state;
 
+  // ADMIN-002 Stage 7B §29 — after recovering from a blocking state, move focus
+  // to the dashboard heading so keyboard / screen-reader users are not dropped
+  // on <body>.
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const previousPhaseRef = useRef(phase);
+  useEffect(() => {
+    const previous = previousPhaseRef.current;
+    previousPhaseRef.current = phase;
+    const wasBlocking = previous === 'event-selection-required' || previous === 'initial-error';
+    const isBlocking = phase === 'event-selection-required' || phase === 'initial-error';
+    if (previous !== phase && wasBlocking && !isBlocking) headingRef.current?.focus();
+  }, [phase]);
+
   if (phase === 'event-selection-required') {
     return (
       <ExecutiveEventSelection
@@ -1689,10 +1738,11 @@ function ExecutiveDashboardPanel({ adminKey, onSessionExpired }: { adminKey: str
   }
 
   if (phase === 'initial-error') {
+    // StatusMessage already carries role="alert" (assertive); no extra live region.
     return (
-      <section className="mt-4 space-y-3" aria-live="polite">
+      <section className="mt-4 space-y-3">
         <StatusMessage tone="error" message={error || 'Não foi possível carregar o dashboard executivo.'} />
-        <button type="button" onClick={() => runtime.refreshNow()} className="min-h-10 border border-brand px-4 text-xs font-black uppercase tracking-widest text-brand">
+        <button type="button" onClick={() => runtime.refreshNow()} className="min-h-11 border border-brand px-4 text-xs font-black uppercase tracking-widest text-brand">
           Tentar novamente
         </button>
       </section>
@@ -1703,63 +1753,274 @@ function ExecutiveDashboardPanel({ adminKey, onSessionExpired }: { adminKey: str
   const loading = phase === 'initial-loading';
   const financial = data?.financial;
   const registrationsData = data?.registrations;
+  const checkouts = data?.checkouts;
+  const charts = data?.charts;
+  const marketing = data?.marketing;
+  const athletes = data?.athletes;
   const selectorEvents = data?.event && !events.some((item) => item.id === data.event.id)
     ? [{ id: data.event.id, slug: data.event.slug, name: data.event.name, status: data.event.status as 'published' | 'closed', date: data.event.date }, ...events]
     : events;
   const showingPreviousEvent = phase === 'refreshing' && !!data?.event && !!selectedSlug && data.event.slug !== selectedSlug;
-  const staleSince = phase === 'stale' && lastGeneratedAt ? dateTimeFormatter.format(new Date(lastGeneratedAt)) : '';
+  // §27 — during a transition the control shows the event the operator picked,
+  // not the one still on screen.
+  const pendingEventId = showingPreviousEvent ? selectorEvents.find((item) => item.slug === selectedSlug)?.id : undefined;
+  const selectedEventId = pendingEventId || data?.event.id || '';
+  const staleSince = phase === 'stale' && lastGeneratedAt ? businessDateTimeFormatter.format(new Date(lastGeneratedAt)) : '';
   return (
-    <section className="mt-4 space-y-4">
+    <section className="mt-4 space-y-4" aria-labelledby="exec-dashboard-heading">
       {phase === 'stale' && (
-        <p role="status" className="border border-amber-400/30 bg-amber-400/10 p-3 text-xs font-bold text-amber-100">
-          Não foi possível atualizar agora. Mostrando os últimos dados{staleSince ? ` de ${staleSince}` : ''}. Nova tentativa automática em instantes.
-        </p>
+        <div role="status" className="flex flex-wrap items-center justify-between gap-3 border border-amber-400/30 bg-amber-400/10 p-3 text-xs font-bold text-amber-100">
+          <span>Não foi possível atualizar agora. Mostrando os últimos dados{staleSince ? ` de ${staleSince}` : ''}.</span>
+          <button type="button" onClick={() => runtime.refreshNow()} className="min-h-9 border border-amber-300/50 px-3 py-1 uppercase tracking-widest text-amber-100">
+            Atualizar agora
+          </button>
+        </div>
       )}
       {showingPreviousEvent && (
         <p role="status" className="border border-white/15 bg-white/5 p-3 text-xs font-bold text-zinc-200">
           Carregando o evento selecionado… os números abaixo ainda são do evento anterior{data?.event ? ` (${data.event.name})` : ''}.
         </p>
       )}
-      <div className="flex flex-col gap-3 border border-white/10 bg-zinc-950/80 p-5 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p><h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1><p className="mt-2 text-sm text-zinc-400">Visão financeira, comercial e operacional atualizada automaticamente.</p></div><div className="flex flex-col items-start gap-2 md:items-end">{data?.event && (selectorEvents.length > 1 ? (<label className="flex items-center gap-2 text-xs text-zinc-400"><span className="font-black uppercase tracking-widest text-zinc-500">Evento</span><select aria-label="Selecionar evento do dashboard" value={data.event.id} onChange={(changeEvent) => runtime.selectEvent(selectorEvents.find((item) => item.id === changeEvent.target.value)?.slug || '')} className="border border-white/10 bg-black px-2 py-1 text-white">{selectorEvents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.status === 'closed' ? ' (encerrado)' : ''}</option>)}</select></label>) : (<p className="text-xs font-bold text-zinc-300">{data.event.name}{data.event.status === 'closed' ? ' · encerrado' : ''}</p>))}<p className="font-mono text-xs text-zinc-500" aria-live="polite">{data ? `Atualizado ${dateTimeFormatter.format(new Date(data.generatedAt))}${phase === 'refreshing' ? ' · atualizando…' : ''}` : 'Carregando…'}</p></div></div>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Receita bruta" value={currencyFormatter.format((financial?.grossRevenueCents || 0) / 100)} icon={WalletCards} detail="todas as inscrições pagas" trend="up" loading={loading} />
-        <KpiCard label="Receita confirmada" value={currencyFormatter.format((financial?.confirmedRevenueCents || 0) / 100)} icon={BadgeCheck} detail="pagas com liquidação registrada" trend="up" loading={loading} />
-        <KpiCard label="Receita hoje" value={currencyFormatter.format((financial?.todayRevenueCents || 0) / 100)} icon={Activity} detail="hoje · Porto Velho" trend="neutral" loading={loading} />
-        <KpiCard label="Receita da semana" value={currencyFormatter.format((financial?.weekRevenueCents || 0) / 100)} icon={BarChart3} detail="semana atual · seg → hoje" trend="up" loading={loading} />
-        <KpiCard label="Ticket médio" value={currencyFormatter.format((financial?.averageTicketCents || 0) / 100)} icon={Ticket} detail="por inscrição paga" trend="neutral" loading={loading} />
-        <KpiCard label="Pessoas inscritas" value={registrationsData?.uniquePeople || 0} icon={Users} detail={`${registrationsData?.registrationRows || 0} registros · ${registrationsData?.uniquePaidPeople || 0} pagantes`} trend="up" loading={loading} />
-        <KpiCard label="Conversão de participantes" value={`${registrationsData?.participantConversionRate || 0}%`} icon={ArrowUpRight} detail="pessoas pagantes / pessoas inscritas" trend="up" loading={loading} />
-        <KpiCard label="Abandono checkout" value={`${data?.checkouts.abandonmentRate || 0}%`} icon={TimerReset} detail={`${data?.checkouts.created || 0} criados · ${data?.checkouts.paid || 0} pagos`} trend="neutral" loading={loading} />
+      <div className="flex flex-col gap-3 border border-white/10 bg-zinc-950/80 p-5 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p>
+          <h1 id="exec-dashboard-heading" ref={headingRef} tabIndex={-1} className="mt-2 text-3xl font-black tracking-tight outline-none">Dashboard Executivo</h1>
+          <p className="mt-2 text-sm text-zinc-400">Visão financeira, comercial e operacional atualizada automaticamente.</p>
+        </div>
+        <div className="flex flex-col items-start gap-2 md:items-end">
+          {data?.event && (selectorEvents.length > 1 ? (
+            <label className="flex items-center gap-2 text-xs text-zinc-400">
+              <span className="font-black uppercase tracking-widest text-zinc-400">Evento</span>
+              <select
+                aria-label="Selecionar evento do dashboard"
+                value={selectedEventId}
+                onChange={(changeEvent) => runtime.selectEvent(selectorEvents.find((item) => item.id === changeEvent.target.value)?.slug || '')}
+                className="min-h-11 border border-white/15 bg-black px-2 py-1 text-white"
+              >
+                {selectorEvents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.status === 'closed' ? ' (encerrado)' : ''}</option>)}
+              </select>
+            </label>
+          ) : (
+            <p className="text-xs font-bold text-zinc-300">{data.event.name}{data.event.status === 'closed' ? ' · encerrado' : ''}</p>
+          ))}
+          <p className="font-mono text-xs text-zinc-400" aria-live="polite">{data ? `Atualizado ${businessDateTimeFormatter.format(new Date(data.generatedAt))}${phase === 'refreshing' ? ' · atualizando…' : ''}` : 'Carregando…'}</p>
+        </div>
       </div>
+
+      <section aria-labelledby="exec-kpis-heading" aria-busy={loading || undefined}>
+        <h2 id="exec-kpis-heading" className="mb-3 text-xs font-black uppercase tracking-widest text-zinc-400">Visão executiva</h2>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <KpiCard label="Receita bruta" value={currencyFormatter.format((financial?.grossRevenueCents || 0) / 100)} icon={WalletCards} detail="todas as inscrições pagas" loading={loading} />
+          <KpiCard label="Receita confirmada" value={currencyFormatter.format((financial?.confirmedRevenueCents || 0) / 100)} icon={BadgeCheck} detail="pagas com liquidação registrada" loading={loading} />
+          <KpiCard label="Receita hoje" value={currencyFormatter.format((financial?.todayRevenueCents || 0) / 100)} icon={Activity} detail="hoje · Porto Velho" loading={loading} />
+          <KpiCard label="Receita da semana" value={currencyFormatter.format((financial?.weekRevenueCents || 0) / 100)} icon={BarChart3} detail="semana atual · seg → hoje" loading={loading} />
+          <KpiCard label="Ticket médio" value={currencyFormatter.format((financial?.averageTicketCents || 0) / 100)} icon={Ticket} detail="por inscrição paga" loading={loading} />
+          <KpiCard label="Pessoas inscritas" value={formatCount(registrationsData?.uniquePeople)} icon={Users} detail={`${formatCount(registrationsData?.registrationRows)} registros · ${formatCount(registrationsData?.uniquePaidPeople)} pagantes`} loading={loading} />
+          <KpiCard label="Conversão de participantes" value={formatPercent(registrationsData?.participantConversionRate)} icon={ArrowUpRight} detail="pessoas pagantes / pessoas inscritas" loading={loading} />
+          <KpiCard label="Abandono no checkout" value={formatPercent(checkouts?.abandonmentRate)} icon={TimerReset} detail={`${formatCount(checkouts?.created)} criados · ${formatCount(checkouts?.paid)} pagos`} loading={loading} />
+        </div>
+      </section>
+
       {/* ADMIN-002 Stage 3B: "Reembolsadas" removed — refund is not an operational
           capability (0 refunds ever; registration.status='refunded' is unreachable).
           Do not reintroduce it as a status tile; refund needs its own financial track. */}
-      <Panel title="Inscrições por status" eyebrow="Funil operacional"><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">{[
-        ['Confirmadas', registrationsData?.confirmed || 0, 'text-brand'], ['Pendentes', registrationsData?.pending || 0, 'text-amber-300'], ['Expiradas', registrationsData?.expired || 0, 'text-zinc-300'], ['Canceladas', registrationsData?.cancelled || 0, 'text-red-300'], ['Conversão participantes', `${registrationsData?.participantConversionRate || 0}%`, 'text-white'],
-      ].map(([label, value, tone]) => <div key={String(label)} className="border border-white/10 bg-black/30 p-4"><p className="text-xs font-black uppercase tracking-widest text-zinc-500">{label}</p><p className={`mt-3 font-mono text-2xl font-black ${tone}`}>{value}</p></div>)}</div></Panel>
-      <div className="grid gap-4 xl:grid-cols-3"><Panel title="Receita por dia" eyebrow="Financeiro"><ExecutiveSeries data={data?.charts.daily || []} /></Panel><Panel title="Receita por hora" eyebrow="Comportamento"><ExecutiveSeries data={data?.charts.hourly || []} /></Panel><Panel title="Receita acumulada" eyebrow="Tendência"><ExecutiveSeries data={data?.charts.cumulativeRevenue || []} /></Panel></div>
-      <div className="grid gap-4 xl:grid-cols-2"><Panel title="Receita por lote" eyebrow="Financeiro"><DistributionBars data={data?.charts.byLot || []} value="amount" /></Panel><Panel title="Receita por distância" eyebrow="Financeiro"><DistributionBars data={data?.charts.byDistance || []} value="amount" /></Panel><Panel title="Receita por cidade" eyebrow="Geografia"><DistributionBars data={data?.charts.byCity || []} value="amount" /></Panel><Panel title="Receita por sexo" eyebrow="Atletas"><DistributionBars data={data?.charts.byGender || []} value="amount" /></Panel></div>
-      <Panel title="Ocupação dos lotes" eyebrow="Capacidade em tempo real"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{(data?.lots || []).map((lot) => <div key={lot.id} className={`border p-4 ${lot.level === 'blocked' || lot.level === 'critical' ? 'border-red-400/40 bg-red-400/5' : lot.level === 'warning' ? 'border-amber-400/40 bg-amber-400/5' : 'border-white/10 bg-black/30'}`}><div className="flex items-start justify-between"><div><p className="font-black">{lot.name}</p><p className="mt-1 text-xs text-zinc-500">{currencyFormatter.format(lot.priceCents / 100)}</p></div><span className="font-mono text-lg font-black">{lot.occupancyPercent}%</span></div><div className="mt-4 h-2 bg-white/10"><div className={`h-full ${lot.level === 'blocked' || lot.level === 'critical' ? 'bg-red-400' : lot.level === 'warning' ? 'bg-amber-400' : 'bg-brand'}`} style={{ width: `${Math.min(lot.occupancyPercent, 100)}%` }} /></div><div className="mt-4 grid grid-cols-2 gap-2 text-xs"><span>Capacidade <b className="float-right">{lot.capacityTotal}</b></span><span>Pagas <b className="float-right">{lot.confirmed}</b></span><span>Reservadas <b className="float-right">{lot.temporaryReservations}</b></span><span>Disponíveis <b className="float-right">{lot.available}</b></span></div>{lot.level === 'blocked' && <p className="mt-3 text-xs font-black uppercase text-red-300">Bloqueado</p>}</div>)}</div></Panel>
-      <div className="grid gap-4 xl:grid-cols-3"><Panel title="Origem das inscrições" eyebrow="Marketing"><DistributionBars data={(data?.marketing.sources || []).map((item) => ({ label: item.label, count: item.paid, amountCents: item.amountCents }))} /></Panel><Panel title="Conversão por campanha" eyebrow="Marketing"><DistributionBars data={data?.marketing.campaigns || []} /></Panel><Panel title="Faixa etária" eyebrow="Atletas"><DistributionBars data={data?.athletes.byAge || []} /></Panel></div>
-      <div className="grid gap-4 xl:grid-cols-3"><Panel title="Mapa de calor por cidade" eyebrow="Atletas"><HeatTiles data={data?.athletes.byCity || []} /></Panel><Panel title="Tamanhos de camisa" eyebrow="Produção"><DistributionBars data={data?.athletes.byShirt || []} /></Panel><Panel title="Distâncias" eyebrow="Modalidades"><DistributionBars data={data?.athletes.byDistance || []} /></Panel></div>
-      <div className="grid gap-4 xl:grid-cols-3"><RecentList title="Últimos pagamentos" rows={(data?.recent.payments || []).map((item) => ({ label: item.registrationId, detail: currencyFormatter.format(item.amountCents / 100), at: item.paidAt || item.updatedAt }))} /><RecentList title="Últimas confirmações" rows={(data?.recent.confirmations || []).map((item) => ({ label: item.id, detail: currencyFormatter.format(item.amountCents / 100), at: item.confirmedAt || '' }))} /><RecentList title="Últimos webhooks" rows={(data?.recent.webhooks || []).map((item) => ({ label: item.eventType, detail: item.providerEventId, at: item.receivedAt }))} /></div>
+      <Panel title="Inscrições por status" eyebrow="Funil operacional">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          {([
+            ['Confirmadas', formatCount(registrationsData?.confirmed), 'text-brand'],
+            ['Pendentes', formatCount(registrationsData?.pending), 'text-amber-300'],
+            ['Expiradas', formatCount(registrationsData?.expired), 'text-zinc-300'],
+            ['Canceladas', formatCount(registrationsData?.cancelled), 'text-red-300'],
+            ['Conversão participantes', formatPercent(registrationsData?.participantConversionRate), 'text-white'],
+          ] as const).map(([label, value, tone]) => (
+            <div key={label} className="border border-white/10 bg-black/30 p-4">
+              <p className="text-xs font-black uppercase tracking-widest text-zinc-400">{label}</p>
+              <p className={`mt-3 font-mono text-2xl font-black ${tone}`}>{value}</p>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <section aria-label="Receita" className="space-y-4">
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Panel title="Receita por dia" eyebrow="Financeiro"><ExecutiveSeries data={charts?.daily || []} caption="Receita por dia (últimos 14 pontos)" /></Panel>
+          <Panel title="Receita acumulada" eyebrow="Tendência"><ExecutiveSeries data={charts?.cumulativeRevenue || []} caption="Receita acumulada (últimos 14 pontos)" /></Panel>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <Panel title="Receita por lote" eyebrow="Financeiro"><DistributionBars data={charts?.byLot || []} value="amount" caption="Receita por lote" /></Panel>
+          <Panel title="Receita por distância" eyebrow="Financeiro"><DistributionBars data={charts?.byDistance || []} value="amount" caption="Receita por distância" /></Panel>
+        </div>
+      </section>
+
+      <section aria-label="Marketing e análise">
+        <div className="grid gap-4 md:grid-cols-2">
+          <Panel title="Origem das inscrições" eyebrow="Marketing"><DistributionBars data={(marketing?.sources || []).map((item) => ({ label: item.label, count: item.paid, amountCents: item.amountCents }))} value="amount" caption="Origem das inscrições" /></Panel>
+          <Panel title="Conversão por campanha" eyebrow="Marketing"><DistributionBars data={marketing?.campaigns || []} caption="Conversão por campanha" /></Panel>
+        </div>
+      </section>
+
+      <details className="border border-white/10 bg-zinc-950/80">
+        <summary className="cursor-pointer p-4 text-xs font-black uppercase tracking-widest text-brand">Análise detalhada</summary>
+        <div className="space-y-4 border-t border-white/10 p-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <Panel title="Receita por hora" eyebrow="Comportamento"><ExecutiveSeries data={charts?.hourly || []} caption="Receita por hora (últimos 14 pontos)" /></Panel>
+            <Panel title="Receita por cidade" eyebrow="Geografia"><DistributionBars data={charts?.byCity || []} value="amount" caption="Receita por cidade" /></Panel>
+            <Panel title="Receita por sexo" eyebrow="Atletas"><DistributionBars data={charts?.byGender || []} value="amount" caption="Receita por sexo" /></Panel>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <Panel title="Faixa etária" eyebrow="Atletas"><DistributionBars data={athletes?.byAge || []} caption="Faixa etária" /></Panel>
+            <Panel title="Mapa de calor por cidade" eyebrow="Atletas"><HeatTiles data={athletes?.byCity || []} /></Panel>
+            <Panel title="Tamanhos de camisa" eyebrow="Produção"><DistributionBars data={athletes?.byShirt || []} caption="Tamanhos de camisa" /></Panel>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <Panel title="Distâncias" eyebrow="Modalidades"><DistributionBars data={athletes?.byDistance || []} caption="Distâncias" /></Panel>
+          </div>
+          <Panel title="Ocupação dos lotes" eyebrow="Capacidade em tempo real"><LotOccupancy lots={data?.lots || []} /></Panel>
+        </div>
+      </details>
+
+      <section aria-label="Operacional recente">
+        <div className="grid gap-4 md:grid-cols-2">
+          <RecentList title="Últimos pagamentos" rows={(data?.recent.payments || []).map((item) => ({ primary: currencyFormatter.format(item.amountCents / 100), secondary: (item.paidAt || item.updatedAt) ? businessDateTimeFormatter.format(new Date(item.paidAt || item.updatedAt)) : '—' }))} />
+          <RecentList title="Últimas confirmações" rows={(data?.recent.confirmations || []).map((item) => ({ primary: currencyFormatter.format(item.amountCents / 100), secondary: item.confirmedAt ? businessDateTimeFormatter.format(new Date(item.confirmedAt)) : '—' }))} />
+        </div>
+      </section>
     </section>
   );
 }
 
-function ExecutiveSeries({ data }: { data: DashboardChartPoint[] }) {
-  const visible = data.slice(-14); const max = Math.max(...visible.map((item) => item.amountCents), 1);
-  return <div className="flex h-52 items-end gap-1">{visible.map((item) => <div key={item.label} className="group flex min-w-0 flex-1 flex-col items-center justify-end"><span className="mb-2 hidden text-[10px] text-zinc-400 group-hover:block">{currencyFormatter.format(item.amountCents / 100)}</span><div className="w-full bg-brand transition-[height]" style={{ height: `${Math.max(item.amountCents / max * 100, item.amountCents ? 4 : 1)}%` }} /><span className="mt-2 max-w-full truncate text-[9px] text-zinc-600">{item.label.includes('-') ? item.label.slice(5) : item.label}</span></div>)}</div>;
+// ADMIN-002 Stage 7B §13 — lot capacity status is announced with text, not colour alone.
+export function LotOccupancy({ lots }: { lots: AdminExecutiveDashboard['lots'] }) {
+  if (lots.length === 0) return <p className="text-sm text-zinc-400">Nenhum lote disponível.</p>;
+  return (
+    <ul className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      {lots.map((lot) => {
+        const alarm = lot.level === 'blocked' || lot.level === 'critical';
+        return (
+          <li key={lot.id} className={`border p-4 ${alarm ? 'border-red-400/40 bg-red-400/5' : lot.level === 'warning' ? 'border-amber-400/40 bg-amber-400/5' : 'border-white/10 bg-black/30'}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate font-black" title={lot.name}>{lot.name}</p>
+                <p className="mt-1 text-xs text-zinc-400">{currencyFormatter.format(lot.priceCents / 100)}</p>
+              </div>
+              <span className="shrink-0 font-mono text-lg font-black">{lot.occupancyPercent}%</span>
+            </div>
+            <div className="mt-3 h-2 bg-white/15" aria-hidden="true">
+              <div className={`h-full ${alarm ? 'bg-red-400' : lot.level === 'warning' ? 'bg-amber-400' : 'bg-brand'}`} style={{ width: `${Math.min(lot.occupancyPercent, 100)}%` }} />
+            </div>
+            <p className={`mt-3 inline-block border px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${alarm ? 'border-red-400/40 text-red-200' : lot.level === 'warning' ? 'border-amber-400/40 text-amber-200' : 'border-white/15 text-zinc-300'}`}>
+              {LOT_LEVEL_LABEL[lot.level] ?? lot.level}
+            </p>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-zinc-300">
+              <span>Capacidade <b className="float-right text-white">{formatCount(lot.capacityTotal)}</b></span>
+              <span>Pagas <b className="float-right text-white">{formatCount(lot.confirmed)}</b></span>
+              <span>Reservadas <b className="float-right text-white">{formatCount(lot.temporaryReservations)}</b></span>
+              <span>Disponíveis <b className="float-right text-white">{formatCount(lot.available)}</b></span>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
-function DistributionBars({ data, value = 'count' }: { data: DashboardChartPoint[]; value?: 'count' | 'amount' }) {
-  const rows = data.slice(0, 8); const max = Math.max(...rows.map((item) => value === 'amount' ? item.amountCents : item.count), 1);
-  return <div className="space-y-3">{rows.map((item) => { const current = value === 'amount' ? item.amountCents : item.count; return <div key={item.label}><div className="mb-1 flex justify-between gap-3 text-xs"><span className="truncate font-bold text-zinc-300">{item.label}</span><span className="font-mono text-zinc-500">{value === 'amount' ? currencyFormatter.format(current / 100) : current}</span></div><div className="h-2 bg-white/10"><div className="h-full bg-brand" style={{ width: `${current / max * 100}%` }} /></div></div>; })}{rows.length === 0 && <p className="text-sm text-zinc-500">Sem dados disponíveis.</p>}</div>;
+// ADMIN-002 Stage 7B §6-9 — the visual bars are decorative (aria-hidden); the
+// figcaption names the chart and the <details> table is the equivalent,
+// keyboard/touch/screen-reader accessible data source. Hover stays as a pure
+// enhancement, never the only source of a value.
+export function ExecutiveSeries({ data, caption }: { data: DashboardChartPoint[]; caption: string }) {
+  if (data.length === 0) return <p className="text-sm text-zinc-400">Sem dados neste período.</p>;
+  const visible = data.slice(-14);
+  const max = Math.max(...visible.map((item) => item.amountCents), 1);
+  const shortLabel = (label: string) => (label.includes('-') ? label.slice(5) : label);
+  return (
+    <figure className="m-0">
+      <figcaption className="sr-only">{caption}</figcaption>
+      <div className="flex h-52 items-end gap-1" aria-hidden="true">
+        {visible.map((item) => (
+          <div key={item.label} className="group flex min-w-0 flex-1 flex-col items-center justify-end">
+            <span className="mb-2 hidden text-[10px] text-zinc-200 group-hover:block">{currencyFormatter.format(item.amountCents / 100)}</span>
+            <div className="w-full bg-brand transition-[height]" style={{ height: `${Math.max((item.amountCents / max) * 100, item.amountCents ? 4 : 1)}%` }} />
+            <span className="mt-2 max-w-full truncate text-[10px] text-zinc-400" title={item.label}>{shortLabel(item.label)}</span>
+          </div>
+        ))}
+      </div>
+      <details className="mt-3 border-t border-white/10 pt-2 text-xs">
+        <summary className="cursor-pointer font-bold uppercase tracking-wider text-zinc-300">Ver dados</summary>
+        <table className="mt-2 w-full text-left">
+          <caption className="sr-only">{caption}</caption>
+          <thead>
+            <tr><th scope="col" className="pb-1 font-bold text-zinc-400">Período</th><th scope="col" className="pb-1 text-right font-bold text-zinc-400">Receita</th></tr>
+          </thead>
+          <tbody>
+            {visible.map((item) => (
+              <tr key={item.label} className="border-t border-white/10">
+                <td className="py-1 text-zinc-300">{item.label}</td>
+                <td className="py-1 text-right font-mono text-zinc-200">{currencyFormatter.format(item.amountCents / 100)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
+    </figure>
+  );
 }
 
-function HeatTiles({ data }: { data: DashboardChartPoint[] }) { const rows = data.slice(0, 12); const max = Math.max(...rows.map((item) => item.count), 1); return <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{rows.map((item) => <div key={item.label} className="border border-brand/20 p-3" style={{ backgroundColor: `rgb(163 230 53 / ${Math.max(item.count / max * .45, .06)})` }}><MapPin className="h-4 w-4 text-brand" /><p className="mt-2 truncate text-xs font-black">{item.label}</p><p className="mt-1 font-mono text-lg">{item.count}</p></div>)}</div>; }
+export function DistributionBars({ data, value = 'count', caption }: { data: DashboardChartPoint[]; value?: 'count' | 'amount'; caption?: string }) {
+  const rows = data.slice(0, 8);
+  if (rows.length === 0) return <p className="text-sm text-zinc-400">Sem dados disponíveis.</p>;
+  const max = Math.max(...rows.map((item) => (value === 'amount' ? item.amountCents : item.count)), 1);
+  return (
+    <ul className="space-y-3" aria-label={caption}>
+      {rows.map((item) => {
+        const current = value === 'amount' ? item.amountCents : item.count;
+        const formatted = value === 'amount' ? currencyFormatter.format(current / 100) : integerFormatter.format(current);
+        return (
+          <li key={item.label}>
+            <div className="mb-1 flex justify-between gap-3 text-xs">
+              <span className="truncate font-bold text-zinc-200" title={item.label}>{item.label}</span>
+              <span className="shrink-0 font-mono text-zinc-300">{formatted}</span>
+            </div>
+            <div className="h-2 bg-white/15" aria-hidden="true"><div className="h-full bg-brand" style={{ width: `${(current / max) * 100}%` }} /></div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
-function RecentList({ title, rows }: { title: string; rows: Array<{ label: string; detail: string; at: string }> }) { return <Panel title={title} eyebrow="Tempo real"><div className="space-y-2">{rows.slice(0, 6).map((row, index) => <div key={`${row.label}-${index}`} className="border border-white/10 bg-black/30 p-3"><p className="truncate text-xs font-bold">{row.label}</p><div className="mt-2 flex justify-between gap-2 font-mono text-[10px] text-zinc-500"><span>{row.detail}</span><span>{row.at ? dateTimeFormatter.format(new Date(row.at)) : '—'}</span></div></div>)}{rows.length === 0 && <p className="text-sm text-zinc-500">Nenhum registro.</p>}</div></Panel>; }
+export function HeatTiles({ data }: { data: DashboardChartPoint[] }) {
+  const rows = data.slice(0, 12);
+  if (rows.length === 0) return <p className="text-sm text-zinc-400">Nenhuma cidade registrada.</p>;
+  const max = Math.max(...rows.map((item) => item.count), 1);
+  return (
+    <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {rows.map((item) => (
+        <li key={item.label} className="border border-brand/20 p-3" style={{ backgroundColor: `rgb(163 230 53 / ${Math.max((item.count / max) * 0.45, 0.06)})` }}>
+          <MapPin aria-hidden="true" className="h-4 w-4 text-brand" />
+          <p className="mt-2 truncate text-xs font-black" title={item.label}>{item.label}</p>
+          <p className="mt-1 font-mono text-lg">{integerFormatter.format(item.count)}</p>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function RecentList({ title, rows }: { title: string; rows: Array<{ primary: string; secondary: string }> }) {
+  return (
+    <Panel title={title} eyebrow="Tempo real">
+      <ul className="space-y-2">
+        {rows.slice(0, 6).map((row, index) => (
+          <li key={index} className="flex items-baseline justify-between gap-2 border border-white/10 bg-black/30 p-3 font-mono text-xs">
+            <span className="font-bold text-zinc-200">{row.primary}</span>
+            <span className="shrink-0 text-zinc-400">{row.secondary}</span>
+          </li>
+        ))}
+        {rows.length === 0 && <li className="text-sm text-zinc-400">Nenhum registro.</li>}
+      </ul>
+    </Panel>
+  );
+}
 
 function AlertsCenterPanel({ adminKey, registrations, onOpenRegistration }: { adminKey: string; registrations: AdminRegistration[]; onOpenRegistration: (registration: AdminRegistration) => void }) {
   const [data, setData] = useState<AdminAlertsResponse | null>(null); const [filters, setFilters] = useState({ status: '', severity: '', type: '' }); const [error, setError] = useState(''); const [draft, setDraft] = useState<{ id: string; status: 'acknowledged' | 'resolved'; resolution: string } | null>(null);
