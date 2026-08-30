@@ -240,3 +240,70 @@ test('weekRevenueCents runs from Monday 00:00 local, not rolling 7 days', () => 
   const metrics = buildExecutiveMetrics(db, now);
   assert.equal(metrics.financial.weekRevenueCents, 14_000); // mon + wed only
 });
+
+// -- ADMIN-002 Stage 4B: event scope ---------------------------------------
+const lot = (id: string, eventId: string) => ({
+  id, eventId, name: id, priceCents: 10_000, capacity: 100, soldCount: 0, status: 'active' as const,
+  startsAt: '', endsAt: '', orderIndex: 1, continuesAfterCapacity: false,
+});
+
+test('§41/§43 buildExecutiveMetrics(eventId) isolates one event from another', () => {
+  const db = database({
+    events: [
+      { id: 'A', name: 'A', slug: 'a', status: 'published', date: '2026-09-20', startTime: '06:00', locationName: 'x', city: 'x', state: 'RO' },
+      { id: 'B', name: 'B', slug: 'b', status: 'published', date: '2026-10-20', startTime: '06:00', locationName: 'x', city: 'x', state: 'RO' },
+    ],
+    lots: [lot('lA', 'A'), lot('lB', 'B')],
+    registrations: [
+      registration('a1', 'paid', { eventId: 'A', cpfHash: 'p1', amountCents: 10_000, lotId: 'lA' }),
+      registration('a2', 'paid', { eventId: 'A', cpfHash: 'p2', amountCents: 10_000, lotId: 'lA' }),
+      registration('b1', 'paid', { eventId: 'B', cpfHash: 'p3', amountCents: 30_000, lotId: 'lB' }),
+      registration('bX', 'expired', { eventId: 'B', cpfHash: 'p4', lotId: 'lB' }),
+    ],
+    payments: [
+      payment('pa1', 'a1', { status: 'paid' }), payment('pa2', 'a2', { status: 'paid' }),
+      payment('pb1', 'b1', { status: 'paid' }), payment('pbX', 'bX', { status: 'expired' }),
+    ],
+  });
+
+  const a = buildExecutiveMetrics(db, NOW, { eventId: 'A' });
+  assert.equal(a.financial.grossRevenueCents, 20_000);
+  assert.equal(a.financial.confirmedRevenueCents, 20_000);
+  assert.equal(a.registrations.registrationRows, 2);
+  assert.equal(a.registrations.paidRegistrationRows, 2);
+  assert.equal(a.checkouts.paid, 2);
+
+  const b = buildExecutiveMetrics(db, NOW, { eventId: 'B' });
+  assert.equal(b.financial.grossRevenueCents, 30_000);
+  assert.equal(b.registrations.registrationRows, 2); // b1 + bX
+  assert.equal(b.registrations.paidRegistrationRows, 1);
+  assert.equal(b.checkouts.created, 2); // pb1 + pbX had checkout urls
+  assert.equal(b.checkouts.paid, 1);
+
+  // no eventId -> ambiguous is the resolver's job; the engine simply aggregates all
+  const all = buildExecutiveMetrics(db, NOW);
+  assert.equal(all.financial.grossRevenueCents, 50_000);
+});
+
+test('§42 same person in Event A and Event B counts once per event, not cross-contaminated', () => {
+  const db = database({
+    events: [
+      { id: 'A', name: 'A', slug: 'a', status: 'published', date: '2026-09-20', startTime: '06:00', locationName: 'x', city: 'x', state: 'RO' },
+      { id: 'B', name: 'B', slug: 'b', status: 'published', date: '2026-10-20', startTime: '06:00', locationName: 'x', city: 'x', state: 'RO' },
+    ],
+    registrations: [
+      registration('a-x', 'paid', { eventId: 'A', cpfHash: 'same-person' }),
+      registration('a-y', 'paid', { eventId: 'A', cpfHash: 'other-a' }),
+      registration('b-x', 'paid', { eventId: 'B', cpfHash: 'same-person' }),
+    ],
+    payments: [payment('pa', 'a-x', { status: 'paid' }), payment('pay', 'a-y', { status: 'paid' }), payment('pb', 'b-x', { status: 'paid' })],
+  });
+  assert.equal(buildExecutiveMetrics(db, NOW, { eventId: 'A' }).registrations.uniquePeople, 2);
+  assert.equal(buildExecutiveMetrics(db, NOW, { eventId: 'A' }).registrations.uniquePaidPeople, 2);
+  assert.equal(buildExecutiveMetrics(db, NOW, { eventId: 'B' }).registrations.uniquePeople, 1);
+  // per-event sum is 2 + 1 = 3, but the shared person makes the GLOBAL distinct
+  // count 2 — the exact divergence Stage 4A flagged; scoping is what fixes it.
+  assert.equal(buildExecutiveMetrics(db, NOW, { eventId: 'A' }).registrations.uniquePeople
+    + buildExecutiveMetrics(db, NOW, { eventId: 'B' }).registrations.uniquePeople, 3);
+  assert.equal(buildExecutiveMetrics(db, NOW).registrations.uniquePeople, 2);
+});

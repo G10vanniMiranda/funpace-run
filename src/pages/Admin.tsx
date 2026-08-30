@@ -64,6 +64,7 @@ import {
   updateAdminLot,
   getAdminSummary,
   getAdminExecutiveDashboard,
+  getAdminEvents,
   getAdminAlerts,
   updateAdminAlert,
   getAdminMonitoring,
@@ -79,7 +80,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 
 type AdminFilters = {
   status: string;
@@ -206,7 +207,9 @@ export function AdminPage() {
 
     try {
       const [summaryResponse, registrationsResponse, auditLogsResponse] = await Promise.all([
-        getAdminSummary(key),
+        // ADMIN-002 Stage 4B: follow the event chosen in the executive dashboard
+        // URL when present; with a single published event the server resolves it.
+        getAdminSummary(key, new URLSearchParams(window.location.search).get('event') || undefined),
         getAdminRegistrations(key, activeNav === 'registrations' ? filters : { status: '', distanceId: '', lotId: '', q: '' }),
         getAdminAuditLogs(key).catch(() => ({ logs: [], pagination: { page: 1, pageSize: 50, total: 0, totalPages: 1 } })),
       ]);
@@ -1567,16 +1570,41 @@ function ReportList({
 
 function ExecutiveDashboardPanel({ adminKey }: { adminKey: string }) {
   const [data, setData] = useState<AdminExecutiveDashboard | null>(null);
+  const [events, setEvents] = useState<AdminEventListItem[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const load = async () => { try { setData(await getAdminExecutiveDashboard(adminKey)); setError(''); } catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível carregar o dashboard executivo.'); } finally { setLoading(false); } };
-  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 60_000); return () => window.clearInterval(interval); }, [adminKey]);
+  // ADMIN-002 Stage 4B: the selected event lives in the URL (?event=<slug>),
+  // never in session state — deep-linkable and refresh-safe.
+  const readEventSlug = () => new URLSearchParams(window.location.search).get('event') || '';
+  const [eventSlug, setEventSlug] = useState(readEventSlug);
+  const selectEvent = (slug: string) => {
+    const params = new URLSearchParams(window.location.search);
+    if (slug) params.set('event', slug); else params.delete('event');
+    const query = params.toString();
+    window.history.replaceState(null, '', query ? `${window.location.pathname}?${query}` : window.location.pathname);
+    setEventSlug(slug);
+  };
+  const load = async () => {
+    try {
+      const dashboard = await getAdminExecutiveDashboard(adminKey, eventSlug);
+      setData(dashboard);
+      if (dashboard.event.slug !== readEventSlug()) selectEvent(dashboard.event.slug);
+      setError('');
+    } catch (requestError) {
+      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível carregar o dashboard executivo.');
+    } finally { setLoading(false); }
+  };
+  useEffect(() => { getAdminEvents(adminKey).then((response) => setEvents(response.events)).catch(() => undefined); }, [adminKey]);
+  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 60_000); return () => window.clearInterval(interval); }, [adminKey, eventSlug]);
   if (error) return <StatusMessage tone="error" message={error} />;
   const financial = data?.financial;
   const registrationsData = data?.registrations;
+  const selectorEvents = data?.event && !events.some((item) => item.id === data.event.id)
+    ? [{ id: data.event.id, slug: data.event.slug, name: data.event.name, status: data.event.status as 'published' | 'closed', date: data.event.date }, ...events]
+    : events;
   return (
     <section className="mt-4 space-y-4">
-      <div className="flex flex-col gap-3 border border-white/10 bg-zinc-950/80 p-5 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p><h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1><p className="mt-2 text-sm text-zinc-400">Visão financeira, comercial e operacional atualizada automaticamente.</p></div><p className="font-mono text-xs text-zinc-500">{data ? `Atualizado ${dateTimeFormatter.format(new Date(data.generatedAt))}` : 'Carregando…'}</p></div>
+      <div className="flex flex-col gap-3 border border-white/10 bg-zinc-950/80 p-5 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p><h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1><p className="mt-2 text-sm text-zinc-400">Visão financeira, comercial e operacional atualizada automaticamente.</p></div><div className="flex flex-col items-start gap-2 md:items-end">{data?.event && (selectorEvents.length > 1 ? (<label className="flex items-center gap-2 text-xs text-zinc-400"><span className="font-black uppercase tracking-widest text-zinc-500">Evento</span><select aria-label="Selecionar evento do dashboard" value={data.event.id} onChange={(changeEvent) => selectEvent(selectorEvents.find((item) => item.id === changeEvent.target.value)?.slug || '')} className="border border-white/10 bg-black px-2 py-1 text-white">{selectorEvents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.status === 'closed' ? ' (encerrado)' : ''}</option>)}</select></label>) : (<p className="text-xs font-bold text-zinc-300">{data.event.name}{data.event.status === 'closed' ? ' · encerrado' : ''}</p>))}<p className="font-mono text-xs text-zinc-500">{data ? `Atualizado ${dateTimeFormatter.format(new Date(data.generatedAt))}` : 'Carregando…'}</p></div></div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="Receita bruta" value={currencyFormatter.format((financial?.grossRevenueCents || 0) / 100)} icon={WalletCards} detail="todas as inscrições pagas" trend="up" loading={loading} />
         <KpiCard label="Receita confirmada" value={currencyFormatter.format((financial?.confirmedRevenueCents || 0) / 100)} icon={BadgeCheck} detail="pagas com liquidação registrada" trend="up" loading={loading} />

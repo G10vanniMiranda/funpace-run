@@ -33,6 +33,7 @@ import {
   getRegistrationPartnerAuditInPostgres,
   getPartnerMonitoringInPostgres,
   runPartnerConsistencyCheckInPostgres,
+  listAdminEventsInPostgres,
   listOperationalAlertsInPostgres,
   synchronizeOperationalAlertsInPostgres,
   updateOperationalAlertInPostgres,
@@ -98,6 +99,7 @@ import {
 } from './remarketing-campaign.js';
 import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAlerts } from './operational-intelligence.js';
 import { buildExecutiveMetrics, financialVisibleForRole } from './executive-metrics.js';
+import { eventContext, resolveEventScope, scopeDatabaseToEvent, type EventScopeErrorCode } from './event-scope.js';
 import { businessDateKey, businessDateKeysEndingToday, businessTodayKey, businessWeekStart } from './business-time.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
@@ -3442,7 +3444,32 @@ async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerRespo
   });
 }
 
-async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
+const EVENT_SCOPE_ERROR_MESSAGE: Record<EventScopeErrorCode, string> = {
+  EVENT_NOT_FOUND: 'Evento nao encontrado.',
+  NO_PUBLISHED_EVENT: 'Nenhum evento publicado para exibir no dashboard.',
+  EVENT_SCOPE_AMBIGUOUS: 'Ha mais de um evento publicado. Informe eventId para escolher.',
+};
+
+// ADMIN-002 Stage 4B: resolve which event a dashboard request is scoped to.
+// Returns the scoped database + public event context, or writes a 400 and
+// returns null (never a silent fallback, never a 500, never a leak).
+function resolveDashboardEventScope(res: ServerResponse, database: Database, url: URL) {
+  const resolution = resolveEventScope(database.events, {
+    eventId: url.searchParams.get('eventId'),
+    eventSlug: url.searchParams.get('eventSlug') || url.searchParams.get('event'),
+  });
+  if ('code' in resolution) {
+    json(res, 400, { code: resolution.code, message: EVENT_SCOPE_ERROR_MESSAGE[resolution.code] });
+    return null;
+  }
+  return {
+    event: resolution.event,
+    scoped: scopeDatabaseToEvent(database, resolution.event.id),
+    context: eventContext(resolution.event),
+  };
+}
+
+async function handleAdminSummary(req: IncomingMessage, res: ServerResponse, url: URL) {
   const session = await requireAdmin(req, res);
   if (!session) {
     return;
@@ -3457,7 +3484,10 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
   // revenue / ticket / manual financial counters / financial series.
   const financialVisible = financialVisibleForRole(session.role);
 
-  const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
+  const fullDatabase = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
+  const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
+  if (!eventScope) return;
+  const database = eventScope.scoped;
   const now = new Date();
   // Business numbers come from the single canonical engine — no parallel formulas.
   const metrics = buildExecutiveMetrics(database, now);
@@ -3521,6 +3551,7 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse) {
     }); });
 
   json(res, 200, {
+    event: eventScope.context,
     totals: {
       registrations: database.registrations.length,
       paid: paid.length,
@@ -3556,15 +3587,25 @@ async function handleAdminMetaIntegrationStatus(req: IncomingMessage, res: Serve
   json(res, 200, await getMetaIntegrationStatus());
 }
 
+// ADMIN-002 Stage 4B: event list for the executive dashboard selector.
+// Same RBAC as the dashboard itself; non-sensitive metadata only.
+async function handleAdminEvents(req: IncomingMessage, res: ServerResponse) {
+  if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
+  json(res, 200, { events: await listAdminEventsInPostgres() });
+}
+
 async function refreshOperationalAlerts(database: Database) {
   const detected = detectOperationalAlerts(database);
   if (usesPostgresDatabase() && detected.length) await synchronizeOperationalAlertsInPostgres(detected);
   return usesPostgresDatabase() ? listOperationalAlertsInPostgres() : [];
 }
 
-async function handleAdminExecutiveDashboard(req: IncomingMessage, res: ServerResponse) {
+async function handleAdminExecutiveDashboard(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
-  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const fullDatabase = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  // ADMIN-002 Stage 4B: every panel is scoped to one event (resolved explicitly).
+  const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
+  if (!eventScope) return;
   // Dashboard GETs are polled. Persisting the same alerts on every poll made
   // concurrent requests contend on identical rows and hold DB connections
   // until the statement timeout. Alert detection/persistence stays in the
@@ -3572,13 +3613,20 @@ async function handleAdminExecutiveDashboard(req: IncomingMessage, res: ServerRe
   const alerts = await listOperationalAlertsInPostgres();
   const reconciliation = await getReconciliationDashboardInPostgres();
   json(res, 200, {
-    ...buildExecutiveDashboard(database),
+    event: eventScope.context,
+    ...buildExecutiveDashboard(fullDatabase, new Date(), { eventId: eventScope.event.id }),
+    // ADMIN-002 Stage 4B: alerts and reconciliation are NOT event-scoped yet
+    // (no event_id on run-operational-alerts / run-payment-reconciliations, no
+    // migration in this stage). Declared explicitly so the client never reads
+    // them as belonging to the selected event.
     alerts: {
+      scope: 'all-events' as const,
       active: alerts.filter((alert) => alert.status !== 'resolved').length,
       critical: alerts.filter((alert) => alert.status !== 'resolved' && alert.severity === 'critical').length,
       recent: alerts.slice(0, 10),
     },
     reconciliation: {
+      scope: 'all-events' as const,
       manualReviewRequired: reconciliation.issues.filter((issue) => issue.resolutionStatus === 'manual_review_required').length,
       lastRun: reconciliation.runs[0] || null,
     },
@@ -4806,10 +4854,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/summary') {
-      await handleAdminSummary(req, res);
+      await handleAdminSummary(req, res, url);
       return;
     }
-    if (req.method === 'GET' && url.pathname === '/api/admin/executive-dashboard') { await handleAdminExecutiveDashboard(req, res); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/events') { await handleAdminEvents(req, res); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/executive-dashboard') { await handleAdminExecutiveDashboard(req, res, url); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/monitoring') { await handleAdminMonitoring(req, res); return; }
     if (req.method === 'GET' && url.pathname === '/api/admin/integrations/meta/status') {
       await handleAdminMetaIntegrationStatus(req, res);
