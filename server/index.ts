@@ -3484,9 +3484,14 @@ async function handleAdminSummary(req: IncomingMessage, res: ServerResponse, url
   // revenue / ticket / manual financial counters / financial series.
   const financialVisible = financialVisibleForRole(session.role);
 
-  // ADMIN-002 Stage 5B: same lean read as the executive dashboard, plus
-  // check-ins / kit-deliveries which the summary counts.
-  const fullDatabase = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-dashboard' });
+  // ADMIN-002 Stage 5B/5C: same lean, event-pushed-down read as the executive
+  // dashboard, plus check-ins / kit-deliveries which the summary counts.
+  const fullDatabase = await transaction((currentDatabase) => currentDatabase, {
+    persist: false,
+    scope: 'admin-dashboard',
+    eventId: url.searchParams.get('eventId') || undefined,
+    eventSlug: url.searchParams.get('eventSlug') || url.searchParams.get('event') || undefined,
+  });
   const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
   if (!eventScope) return;
   const database = eventScope.scoped;
@@ -3604,18 +3609,25 @@ async function refreshOperationalAlerts(database: Database) {
 
 async function handleAdminExecutiveDashboard(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
-  // ADMIN-002 Stage 5B: lean read (no audit-logs / email-deliveries /
-  // google-sheet-sync, minimal columns, no raw jsonb). Alerts and reconciliation
-  // were removed from this response by the ADMIN-002 Stage 5B Human Gate — they
-  // have dedicated Admin modules; their engines / endpoints / all-events
-  // semantics are unchanged.
-  const fullDatabase = await transaction((current) => current, { persist: false, scope: 'admin-dashboard' });
-  // ADMIN-002 Stage 4B: every panel is scoped to one event (resolved explicitly).
+  // ADMIN-002 Stage 5B/5C: lean read (no audit-logs / email-deliveries /
+  // google-sheet-sync, minimal columns, no raw jsonb) with the event filter
+  // pushed into SQL — the read no longer loads a global dataset. Alerts and
+  // reconciliation were removed from this response by the Stage 5B Human Gate;
+  // their engines / endpoints / all-events semantics are unchanged.
+  const fullDatabase = await transaction((current) => current, {
+    persist: false,
+    scope: 'admin-dashboard',
+    eventId: url.searchParams.get('eventId') || undefined,
+    eventSlug: url.searchParams.get('eventSlug') || url.searchParams.get('event') || undefined,
+  });
+  // ADMIN-002 Stage 4B: resolve + validate the event (controlled 400 on
+  // invalid / ambiguous). scopeDatabaseToEvent below is defence-in-depth over
+  // the already SQL-scoped rows — Event A can never include Event B.
   const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
   if (!eventScope) return;
   json(res, 200, {
     event: eventScope.context,
-    ...buildExecutiveDashboard(fullDatabase, new Date(), { eventId: eventScope.event.id }),
+    ...buildExecutiveDashboard(eventScope.scoped, new Date(), { eventId: eventScope.event.id }),
   });
 }
 

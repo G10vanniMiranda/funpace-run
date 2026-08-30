@@ -31,9 +31,10 @@ test('the admin-dashboard scope does NOT load audit-logs / email-deliveries / go
 });
 
 test('the lean dashboard read selects no raw jsonb (payload / gateway_payload / meta_context / payment-event payload)', () => {
-  // registrations lean branch
-  const regLean = block(db, 'const registrations = include.registrations', ': emptyRows;');
-  const leanReg = regLean.slice(regLean.indexOf('leanDashboard'), regLean.indexOf('from ${table.registrations}`') + 40);
+  // ADMIN-002 Stage 5C moved the lean projections into named LEAN_*_SELECT
+  // constants (reused by the event-scoped queries). Assert on those.
+  const read = block(db, 'export async function readPostgresDatabase', '\n  return {');
+  const leanReg = read.slice(read.indexOf('const LEAN_REGISTRATION_SELECT'), read.indexOf('const LEAN_PAYMENT_SELECT'));
   assert.match(leanReg, /jsonb_build_object\(/);
   assert.ok(!/\bmeta_context\b/.test(leanReg), 'lean registrations: no meta_context');
   assert.ok(!/,\s*payload\s*,/.test(leanReg), 'lean registrations: no bare payload column');
@@ -41,13 +42,9 @@ test('the lean dashboard read selects no raw jsonb (payload / gateway_payload / 
   for (const f of ["'city'", "'state'", "'gender'", "'shirtSize'", "'distance'", "'birthDate'", "'attribution'"]) {
     assert.ok(leanReg.includes(f), `payload allow-list keeps ${f}`);
   }
-  // payments lean branch
-  const payLean = block(db, 'const payments = include.payments', ': emptyRows;');
-  const leanPay = payLean.slice(payLean.indexOf('leanDashboard'), payLean.indexOf('from ${table.payments}`') + 30);
+  const leanPay = read.slice(read.indexOf('const LEAN_PAYMENT_SELECT'), read.indexOf('const LEAN_PAYMENT_EVENT_SELECT'));
   assert.ok(!/gateway_payload/.test(leanPay), 'lean payments: no gateway_payload');
-  // payment-events lean branch
-  const peLean = block(db, 'const paymentEvents = include.paymentEvents', ': emptyRows;');
-  const leanPe = peLean.slice(peLean.indexOf('leanDashboard'), peLean.indexOf('from ${table.paymentEvents}`') + 30);
+  const leanPe = read.slice(read.indexOf('const LEAN_PAYMENT_EVENT_SELECT'), read.indexOf('const registrations ='));
   assert.ok(!/\bpayload\b/.test(leanPe), 'lean payment-events: no payload');
 });
 
@@ -61,9 +58,21 @@ test('both dashboard endpoints use scope: admin-dashboard', () => {
   assert.ok(!/scope: 'admin-registrations'/.test(summary));
 });
 
-test('SQL stays parameterized — the lean read has no request-controlled interpolation', () => {
-  const regLean = block(db, 'const registrations = include.registrations', ': emptyRows;');
-  // only ${table.*} template refs are allowed; no ${eventId} / ${url...} etc.
-  const templates = regLean.match(/\$\{[^}]+\}/g) || [];
-  for (const t of templates) assert.ok(/^\$\{table\./.test(t), `only table templates in lean SQL, found ${t}`);
+test('SQL stays parameterized — the event-scoped lean read binds the event id, never interpolates it', () => {
+  const read = block(db, 'export async function readPostgresDatabase', '\n  return {');
+  // the LEAN_* SELECT constants interpolate only ${table.*}
+  const selects = read.slice(read.indexOf('const LEAN_REGISTRATION_SELECT'), read.indexOf('const registrations ='));
+  for (const t of selects.match(/\$\{[^}]+\}/g) || []) {
+    assert.ok(/^\$\{table\./.test(t), `LEAN_* SELECTs interpolate only table names, found ${t}`);
+  }
+  // every event-scoped query passes the id through the bound `eventScopedParams`
+  // array and interpolates only ${table.*} / ${LEAN_*_SELECT} into its text
+  const scoped = read.match(/client\.query\(`[^`]*event_id = \$1[^`]*`, eventScopedParams\)/g) || [];
+  assert.ok(scoped.length >= 5, `event-scoped queries are parameterised (found ${scoped.length})`);
+  for (const q of scoped) {
+    for (const t of q.match(/\$\{[^}]+\}/g) || []) {
+      assert.ok(/^\$\{(table\.|LEAN_)/.test(t), `scoped query interpolates only table / LEAN_* constants, found ${t}`);
+    }
+  }
+  assert.match(read, /const eventScopedParams = dashboardEventId \? \[dashboardEventId\] : \[\];/);
 });

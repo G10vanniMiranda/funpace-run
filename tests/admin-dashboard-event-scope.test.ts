@@ -22,7 +22,9 @@ test('executive-dashboard + summary handlers resolve an explicit event scope', (
   assert.match(dashboard, /const eventScope = resolveDashboardEventScope\(res, fullDatabase, url\)/);
   assert.match(dashboard, /if \(!eventScope\) return;/);
   assert.match(dashboard, /event: eventScope\.context,/);
-  assert.match(dashboard, /buildExecutiveDashboard\(fullDatabase, new Date\(\), \{ eventId: eventScope\.event\.id \}\)/);
+  // ADMIN-002 Stage 5C: the rows are already event-filtered in SQL; the engine
+  // is handed eventScope.scoped (Stage 4B narrow) purely as defence-in-depth.
+  assert.match(dashboard, /buildExecutiveDashboard\(eventScope\.scoped, new Date\(\), \{ eventId: eventScope\.event\.id \}\)/);
   const summary = block(server, 'async function handleAdminSummary', '\nasync function ');
   assert.match(summary, /const eventScope = resolveDashboardEventScope\(res, fullDatabase, url\)/);
   assert.match(summary, /const database = eventScope\.scoped;/);
