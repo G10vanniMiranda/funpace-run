@@ -9,6 +9,7 @@ import { selectAvailableLotCandidate } from './lot-capacity.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { calculateCouponPricing, getCouponCampaignAttribution } from './coupons.js';
 import { assertDatabaseEnvironmentIsolation } from './environment.js';
+import { resolveEventScope } from './event-scope.js';
 import {
   EMAIL_DELIVERY_COOLDOWN_MS,
   buildLegacyEmailSummaryPatch,
@@ -1268,7 +1269,12 @@ export async function expireTemporaryReservationsInPostgres() {
   }
 }
 
-async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope = 'all'): Promise<Database> {
+// Exported for ADMIN-002 Stage 5C tests (SQL event push-down isolation / parity).
+export async function readPostgresDatabase(
+  client: Queryable,
+  scope: DatabaseReadScope = 'all',
+  options: { eventId?: string; eventSlug?: string } = {},
+): Promise<Database> {
   if (scope === 'admin-auth') {
     const adminSessions = await client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`);
     const adminUsers = await client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`);
@@ -1336,15 +1342,39 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   // node-postgres serializes a client; issuing Promise.all on one client is
   // deprecated and can leave request completion detached from query completion.
   const events = include.events ? await client.query(`select id, name, slug, status, date, start_time, location_name, city, state from ${table.events}`) : emptyRows;
-  const distances = include.distances ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`) : emptyRows;
-  const lots = include.lots ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`) : emptyRows;
+
+  // ADMIN-002 Stage 5C: for the executive dashboard / summary, resolve the
+  // selected event UP FRONT and push `where event_id = $1` (and EXISTS chains
+  // for tables without event_id) into SQL — the read no longer loads a global
+  // dataset and filters it in Node. Resolution uses the ONE Stage 4B authority;
+  // when it fails the handler still answers the controlled 400 from
+  // `database.events` (these tables are simply not loaded).
+  let dashboardEventId: string | null = null;
+  if (leanDashboard && events.rows.length) {
+    const resolution = resolveEventScope(
+      events.rows.map((row) => ({
+        id: row.id, name: row.name, slug: row.slug, status: row.status, date: row.date,
+        startTime: row.start_time, locationName: row.location_name, city: row.city, state: row.state,
+      })),
+      { eventId: options.eventId, eventSlug: options.eventSlug },
+    );
+    dashboardEventId = resolution.ok ? resolution.event.id : null;
+  }
+  const eventScopedParams = dashboardEventId ? [dashboardEventId] : [];
+
+  const distances = !include.distances ? emptyRows
+    : leanDashboard
+      ? (dashboardEventId ? await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances} where event_id = $1`, eventScopedParams) : emptyRows)
+      : await client.query(`select id, event_id, name, distance_km, capacity, status from ${table.distances}`);
+  const lots = !include.lots ? emptyRows
+    : leanDashboard
+      ? (dashboardEventId ? await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots} where event_id = $1`, eventScopedParams) : emptyRows)
+      : await client.query(`select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity from ${table.lots}`);
   // ADMIN-002 Stage 5B: the 'admin-dashboard' scope selects only the columns the
   // executive dashboard / summary actually read, and an allow-listed slice of the
   // registration payload jsonb — never the full payload, gateway_payload,
   // payment-event payload or meta_context (data minimisation + PII).
-  const registrations = include.registrations
-    ? await client.query(leanDashboard
-      ? `select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents,
+  const LEAN_REGISTRATION_SELECT = `select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents,
            jsonb_build_object(
              'city', payload->>'city', 'state', payload->>'state', 'gender', payload->>'gender',
              'shirtSize', payload->>'shirtSize', 'distance', payload->>'distance',
@@ -1352,23 +1382,31 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
            ) as payload,
            created_at, updated_at, expires_at, paid_at, confirmed_at,
            confirmation_email_sent_at, confirmation_email_error
-         from ${table.registrations}`
-      : `select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price, coupon_code, coupon_applied_at, coupon_used_at from ${table.registrations}`)
-    : emptyRows;
-  const payments = include.payments
-    ? await client.query(leanDashboard
-      ? `select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status from ${table.payments}`
-      : `select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`)
-    : emptyRows;
-  const paymentEvents = include.paymentEvents
-    ? await client.query(leanDashboard
-      ? `select id, payment_id, provider_event_id, event_type, received_at from ${table.paymentEvents}`
-      : `select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`)
-    : emptyRows;
+         from ${table.registrations}`;
+  const LEAN_PAYMENT_SELECT = `select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status from ${table.payments}`;
+  const LEAN_PAYMENT_EVENT_SELECT = `select id, payment_id, provider_event_id, event_type, received_at from ${table.paymentEvents}`;
+  const registrations = !include.registrations ? emptyRows
+    : leanDashboard
+      ? (dashboardEventId ? await client.query(`${LEAN_REGISTRATION_SELECT} where event_id = $1`, eventScopedParams) : emptyRows)
+      : await client.query(`select id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at, marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at, confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider, confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type, partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price, coupon_code, coupon_applied_at, coupon_used_at from ${table.registrations}`);
+  const payments = !include.payments ? emptyRows
+    : leanDashboard
+      ? (dashboardEventId ? await client.query(`${LEAN_PAYMENT_SELECT} p where exists (select 1 from ${table.registrations} r where r.id = p.registration_id and r.event_id = $1)`, eventScopedParams) : emptyRows)
+      : await client.query(`select id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url, created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload from ${table.payments}`);
+  const paymentEvents = !include.paymentEvents ? emptyRows
+    : leanDashboard
+      ? (dashboardEventId ? await client.query(`${LEAN_PAYMENT_EVENT_SELECT} pe where exists (select 1 from ${table.payments} p join ${table.registrations} r on r.id = p.registration_id where p.id = pe.payment_id and r.event_id = $1)`, eventScopedParams) : emptyRows)
+      : await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`);
   const emailDeliveries = include.emailDeliveries ? await client.query(`select id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider, provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at from ${table.emailDeliveries}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
-  const checkIns = include.checkIns ? await client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`) : emptyRows;
-  const kitDeliveries = include.kitDeliveries ? await client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`) : emptyRows;
+  const checkIns = !include.checkIns ? emptyRows
+    : leanDashboard
+      ? (dashboardEventId ? await client.query(`select ci.id, ci.registration_id, ci.status, ci.checked_in_at, ci.checked_in_by, ci.notes from ${table.checkIns} ci where exists (select 1 from ${table.registrations} r where r.id = ci.registration_id and r.event_id = $1)`, eventScopedParams) : emptyRows)
+      : await client.query(`select id, registration_id, status, checked_in_at, checked_in_by, notes from ${table.checkIns}`);
+  const kitDeliveries = !include.kitDeliveries ? emptyRows
+    : leanDashboard
+      ? (dashboardEventId ? await client.query(`select kd.id, kd.registration_id, kd.status, kd.delivered_at, kd.delivered_by, kd.notes from ${table.kitDeliveries} kd where exists (select 1 from ${table.registrations} r where r.id = kd.registration_id and r.event_id = $1)`, eventScopedParams) : emptyRows)
+      : await client.query(`select id, registration_id, status, delivered_at, delivered_by, notes from ${table.kitDeliveries}`);
   const auditLogs = include.auditLogs ? await client.query(`select id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at from ${table.auditLogs}`) : emptyRows;
   const adminSessions = include.adminSessions ? await client.query(`select id, actor, role, created_at, expires_at, revoked_at, ip_address, user_agent from ${table.adminSessions}`) : emptyRows;
   const adminUsers = include.adminUsers ? await client.query(`select id, email, password_hash, role, created_at, updated_at, last_login_at, disabled_at from ${table.adminUsers}`) : emptyRows;
@@ -4119,7 +4157,7 @@ export function getDatabaseRuntimeConfig() {
 
 export async function transaction<Result>(
   operation: (database: Database) => Result | Promise<Result>,
-  options: { persist?: boolean; scope?: DatabaseReadScope } = {},
+  options: { persist?: boolean; scope?: DatabaseReadScope; eventId?: string; eventSlug?: string } = {},
 ) {
   const configurationIssue = getDatabaseConfigurationIssue();
   const shouldPersist = options.persist !== false;
@@ -4151,7 +4189,10 @@ export async function transaction<Result>(
       await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-write'))");
     }
 
-    const database = await readPostgresDatabase(client, options.scope);
+    const database = await readPostgresDatabase(client, options.scope, {
+      eventId: options.eventId,
+      eventSlug: options.eventSlug,
+    });
     const result = await operation(database);
 
     if (shouldPersist) {
