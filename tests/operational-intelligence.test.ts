@@ -139,3 +139,40 @@ test('registration timeline merges payment, webhook, email, sheet, kit and check
   assert.ok(timeline.some((event) => event.type === 'email.sent'));
   assert.ok(timeline.some((event) => event.type === 'check_in.completed'));
 });
+
+// -- ADMIN-002 Stage 4B: event scope -------------------------------------
+test('§45/§46/§47 buildExecutiveDashboard(eventId) scopes lots, shirts and charts to one event', () => {
+  const db = database({
+    events: [
+      { id: 'A', name: 'A', slug: 'a', status: 'published', date: '2026-09-20', startTime: '06:00', locationName: 'x', city: 'Porto Velho', state: 'RO' },
+      { id: 'B', name: 'B', slug: 'b', status: 'published', date: '2026-10-20', startTime: '06:00', locationName: 'x', city: 'Manaus', state: 'AM' },
+    ],
+    distances: [
+      { id: 'dA', eventId: 'A', name: '5K', distanceKm: 5, capacity: 100, status: 'active' },
+      { id: 'dB', eventId: 'B', name: '10K', distanceKm: 10, capacity: 100, status: 'active' },
+    ],
+    lots: [
+      { id: 'lA', eventId: 'A', name: 'Lote A', priceCents: 10_000, capacity: 100, soldCount: 0, status: 'active', startsAt: '2026-01-01T00:00:00.000Z', endsAt: '2026-12-31T00:00:00.000Z', orderIndex: 1, continuesAfterCapacity: false },
+      { id: 'lB', eventId: 'B', name: 'Lote B', priceCents: 20_000, capacity: 100, soldCount: 0, status: 'active', startsAt: '2026-01-01T00:00:00.000Z', endsAt: '2026-12-31T00:00:00.000Z', orderIndex: 1, continuesAfterCapacity: false },
+    ],
+    registrations: [
+      registration('a1', 'paid', { eventId: 'A', distanceId: 'dA', lotId: 'lA', cpfHash: 'p1', paidAt: '2026-07-13T11:00:00.000Z', payload: { city: 'Porto Velho', state: 'RO', gender: 'female', distance: '5K', shirtSize: 'P', birthDate: '1996-01-01' } as never }),
+      registration('b1', 'paid', { eventId: 'B', distanceId: 'dB', lotId: 'lB', cpfHash: 'p2', paidAt: '2026-07-13T11:00:00.000Z', payload: { city: 'Manaus', state: 'AM', gender: 'male', distance: '10K', shirtSize: 'GG', birthDate: '1996-01-01' } as never }),
+      registration('b2', 'paid', { eventId: 'B', distanceId: 'dB', lotId: 'lB', cpfHash: 'p3', paidAt: '2026-07-13T11:00:00.000Z', payload: { city: 'Manaus', state: 'AM', gender: 'male', distance: '10K', shirtSize: 'GG', birthDate: '1996-01-01' } as never }),
+    ],
+    payments: [payment('pa1', 'a1', { status: 'paid' }), payment('pb1', 'b1', { status: 'paid' }), payment('pb2', 'b2', { status: 'paid' })],
+  });
+
+  const a = buildExecutiveDashboard(db, now, { eventId: 'A' });
+  assert.deepEqual(a.lots.map((l) => l.name), ['Lote A']); // only event A lots listed
+  assert.deepEqual(a.athletes.byShirt.map((s) => s.label), ['P']); // shirt production not mixed with B
+  assert.equal(a.athletes.byShirt.reduce((sum, s) => sum + s.count, 0), 1);
+  assert.deepEqual(a.charts.byDistance.map((d) => d.label), ['5K']);
+  assert.equal(a.financial.grossRevenueCents, 10_000);
+
+  const b = buildExecutiveDashboard(db, now, { eventId: 'B' });
+  assert.deepEqual(b.lots.map((l) => l.name), ['Lote B']);
+  assert.deepEqual(b.athletes.byShirt.map((s) => s.label), ['GG']);
+  assert.equal(b.athletes.byShirt.reduce((sum, s) => sum + s.count, 0), 2);
+  assert.equal(b.financial.grossRevenueCents, 20_000);
+});

@@ -1,6 +1,7 @@
 import type { Database, RegistrationRecord } from './database.js';
 import { businessDateKey, businessDateKeysEndingToday, businessHour } from './business-time.js';
-import { buildExecutiveMetrics } from './executive-metrics.js';
+import { buildExecutiveMetrics, type ExecutiveScopeOptions } from './executive-metrics.js';
+import { scopeDatabaseToEvent } from './event-scope.js';
 import { calculateLotCapacity } from './lot-capacity.js';
 
 export type OperationalAlertCandidate = {
@@ -41,19 +42,26 @@ function marketingSource(registration: RegistrationRecord) {
   return 'Direto';
 }
 
-export function buildExecutiveDashboard(database: Database, now = new Date()) {
-  const paid = database.registrations.filter((registration) => registration.status === 'paid');
+export function buildExecutiveDashboard(
+  database: Database,
+  now = new Date(),
+  options: ExecutiveScopeOptions = {},
+) {
+  // ADMIN-002 Stage 4B: every panel below is scoped to one event when an
+  // eventId is given (idempotent; no-op when absent).
+  const scoped = options.eventId ? scopeDatabaseToEvent(database, options.eventId) : database;
+  const paid = scoped.registrations.filter((registration) => registration.status === 'paid');
   // Single source of truth for every business number (revenue, participant
   // conversion, checkout conversion, people-vs-rows). No parallel formulas here.
-  const metrics = buildExecutiveMetrics(database, now);
+  const metrics = buildExecutiveMetrics(scoped, now);
   const { financial, checkouts } = metrics;
-  const statusCounts = database.registrations.reduce<Record<string, number>>((summary, registration) => {
+  const statusCounts = scoped.registrations.reduce<Record<string, number>>((summary, registration) => {
     summary[registration.status] = (summary[registration.status] || 0) + 1;
     return summary;
   }, {});
 
-  const lots = database.lots.slice().sort((a, b) => a.orderIndex - b.orderIndex).map((lot) => {
-    const capacity = calculateLotCapacity(lot, database.registrations, now);
+  const lots = scoped.lots.slice().sort((a, b) => a.orderIndex - b.orderIndex).map((lot) => {
+    const capacity = calculateLotCapacity(lot, scoped.registrations, now);
     const occupancyPercent = capacity.capacityTotal ? Number((capacity.occupied / capacity.capacityTotal * 100).toFixed(1)) : 0;
     return { id: lot.id, name: lot.name, priceCents: lot.priceCents, ...capacity, occupancyPercent,
       level: occupancyPercent >= 100 ? 'blocked' : occupancyPercent >= 95 ? 'critical' : occupancyPercent >= 80 ? 'warning' : 'normal' };
@@ -82,9 +90,9 @@ export function buildExecutiveDashboard(database: Database, now = new Date()) {
   });
 
   const campaigns = groupPaid(paid, (registration) => registration.payload.attribution?.utmCampaign || 'Sem campanha');
-  const sources = groupPaid(database.registrations, marketingSource).map((source) => {
+  const sources = groupPaid(scoped.registrations, marketingSource).map((source) => {
     const sourcePaid = paid.filter((registration) => marketingSource(registration) === source.label);
-    const total = database.registrations.filter((registration) => marketingSource(registration) === source.label).length;
+    const total = scoped.registrations.filter((registration) => marketingSource(registration) === source.label).length;
     return { ...source, total, paid: sourcePaid.length, conversionRate: total ? Number((sourcePaid.length / total * 100).toFixed(1)) : 0, cpaCents: null as number | null };
   });
 
@@ -127,8 +135,8 @@ export function buildExecutiveDashboard(database: Database, now = new Date()) {
     lots,
     charts: {
       daily, hourly, cumulativeRevenue,
-      byLot: groupPaid(paid, (registration) => database.lots.find((lot) => lot.id === registration.lotId)?.name || registration.lotId),
-      byDistance: groupPaid(paid, (registration) => database.distances.find((distance) => distance.id === registration.distanceId)?.name || registration.distanceId),
+      byLot: groupPaid(paid, (registration) => scoped.lots.find((lot) => lot.id === registration.lotId)?.name || registration.lotId),
+      byDistance: groupPaid(paid, (registration) => scoped.distances.find((distance) => distance.id === registration.distanceId)?.name || registration.distanceId),
       byCity: groupPaid(paid, (registration) => registration.payload.city || 'Não informado'),
       byGender: groupPaid(paid, (registration) => registration.payload.gender === 'female' ? 'Feminino' : registration.payload.gender === 'male' ? 'Masculino' : 'Não informado'),
     },
@@ -139,21 +147,21 @@ export function buildExecutiveDashboard(database: Database, now = new Date()) {
       byGender: groupPaid(paid, (registration) => registration.payload.gender || 'Não informado'),
       byDistance: groupPaid(paid, (registration) => registration.payload.distance),
       byShirt: groupPaid(paid, (registration) => registration.payload.shirtSize),
-      byLot: groupPaid(paid, (registration) => database.lots.find((lot) => lot.id === registration.lotId)?.name || registration.lotId),
+      byLot: groupPaid(paid, (registration) => scoped.lots.find((lot) => lot.id === registration.lotId)?.name || registration.lotId),
       byAge: groupPaid(paid, (registration) => {
         const age = registration.payload.birthDate ? Math.floor((now.getTime() - new Date(registration.payload.birthDate).getTime()) / 31_557_600_000) : -1;
         if (age < 0) return 'Não informado'; if (age < 18) return 'Até 17'; if (age < 30) return '18–29'; if (age < 40) return '30–39'; if (age < 50) return '40–49'; return '50+';
       }),
     },
     recent: {
-      payments: database.payments.filter((payment) => payment.status === 'paid').sort((a, b) => (b.paidAt || b.updatedAt).localeCompare(a.paidAt || a.updatedAt)).slice(0, 10).map((payment) => ({
+      payments: scoped.payments.filter((payment) => payment.status === 'paid').sort((a, b) => (b.paidAt || b.updatedAt).localeCompare(a.paidAt || a.updatedAt)).slice(0, 10).map((payment) => ({
         id: payment.id, registrationId: payment.registrationId, amountCents: payment.amountCents,
         paidAt: payment.paidAt, updatedAt: payment.updatedAt, gatewayStatus: payment.gatewayStatus,
       })),
       confirmations: paid.slice().sort((a, b) => (b.confirmedAt || b.updatedAt).localeCompare(a.confirmedAt || a.updatedAt)).slice(0, 10).map((registration) => ({ id: registration.id, confirmedAt: registration.confirmedAt, amountCents: registration.amountCents })),
       // Sanitised projection only: NO raw gateway payload reaches the browser
       // (no customer name / email / document / phone). ADMIN-002 Stage 1.
-      webhooks: database.paymentEvents
+      webhooks: scoped.paymentEvents
         .filter((event) => event.eventType.includes('infinitepay'))
         .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
         .slice(0, 10)

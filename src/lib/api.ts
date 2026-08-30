@@ -389,8 +389,12 @@ export function logoutAdmin() {
   return apiFetch<{ ok: boolean }>('/api/admin/session', { method: 'DELETE', retry: false });
 }
 
-export function getAdminSummary(adminKey: string) {
-  return adminFetch<AdminSummaryResponse>('/api/admin/summary', adminKey);
+export function getAdminSummary(adminKey: string, eventSlug?: string) {
+  return adminFetch<AdminSummaryResponse>(`/api/admin/summary${toQueryString({ event: eventSlug || '' })}`, adminKey);
+}
+
+export function getAdminEvents(adminKey: string) {
+  return adminFetch<import('../types/registration').AdminEventsResponse>('/api/admin/events', adminKey);
 }
 
 export function getAdminReconciliation(adminKey: string) {
@@ -403,7 +407,7 @@ export function runAdminReconciliation(adminKey: string, mode: 'dry_run' | 'appl
   );
 }
 
-export function getAdminExecutiveDashboard(adminKey: string) { return adminFetch<AdminExecutiveDashboard>('/api/admin/executive-dashboard', adminKey); }
+export function getAdminExecutiveDashboard(adminKey: string, eventSlug?: string) { return adminFetch<AdminExecutiveDashboard>(`/api/admin/executive-dashboard${toQueryString({ event: eventSlug || '' })}`, adminKey); }
 export function getAdminAlerts(adminKey: string, filters: Record<string, string> = {}) { return adminFetch<AdminAlertsResponse>(`/api/admin/alerts${toQueryString(filters)}`, adminKey); }
 export function updateAdminAlert(adminKey: string, alertId: string, status: 'acknowledged' | 'resolved', resolution: string) {
   return adminFetch<{ alert: import('../types/registration').AdminOperationalAlert }>(`/api/admin/alerts/${encodeURIComponent(alertId)}`, adminKey, { method: 'PATCH', body: JSON.stringify({ status, resolution }) });

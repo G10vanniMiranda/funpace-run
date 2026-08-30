@@ -1,5 +1,9 @@
 import type { Database, PaymentEventRecord, PaymentRecord, RegistrationRecord } from './database.js';
 import { BUSINESS_TIMEZONE, businessDateKey, businessTodayKey, businessWeekStart } from './business-time.js';
+import { scopeDatabaseToEvent } from './event-scope.js';
+
+/** Optional event scoping for every executive number (ADMIN-002 Stage 4B). */
+export type ExecutiveScopeOptions = { eventId?: string };
 
 /**
  * ADMIN-002 — SINGLE EXECUTIVE METRIC ENGINE.
@@ -92,15 +96,20 @@ export type ExecutiveMetrics = {
   };
 };
 
-export function buildExecutiveMetrics(database: Database, now: Date = new Date()): ExecutiveMetrics {
-  const registrations = database.registrations;
+export function buildExecutiveMetrics(
+  database: Database,
+  now: Date = new Date(),
+  options: ExecutiveScopeOptions = {},
+): ExecutiveMetrics {
+  const scoped = options.eventId ? scopeDatabaseToEvent(database, options.eventId) : database;
+  const registrations = scoped.registrations;
   const paid = registrations.filter((registration) => registration.status === 'paid');
 
   // --- financial ---
   const grossRevenueCents = paid.reduce((sum, registration) => sum + registration.amountCents, 0);
 
   const paidPaymentByRegistration = new Set(
-    database.payments
+    scoped.payments
       .filter((payment) => payment.status === 'paid')
       .map((payment) => payment.registrationId),
   );
@@ -134,8 +143,8 @@ export function buildExecutiveMetrics(database: Database, now: Date = new Date()
   const participantConversionRate = toPercent1(uniquePaidPeople, uniquePeople);
 
   // --- checkout population (separate universe) ---
-  const checkoutsCreatedList = database.payments.filter((payment) =>
-    paymentHadCheckout(payment, database.paymentEvents),
+  const checkoutsCreatedList = scoped.payments.filter((payment) =>
+    paymentHadCheckout(payment, scoped.paymentEvents),
   );
   const created = checkoutsCreatedList.length;
   // Numerator lives in the SAME universe as the denominator: a paid payment that

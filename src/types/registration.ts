@@ -164,7 +164,20 @@ export type AvailabilityResponse = {
   }>;
 };
 
+/** ADMIN-002 Stage 4B: which event a dashboard response is scoped to. */
+export type AdminEventContext = {
+  id: string;
+  slug: string;
+  name: string;
+  status: 'draft' | 'published' | 'closed';
+  date: string;
+};
+
+export type AdminEventListItem = { id: string; slug: string; name: string; status: 'published' | 'closed'; date: string };
+export type AdminEventsResponse = { events: AdminEventListItem[] };
+
 export type AdminSummaryResponse = {
+  event: AdminEventContext;
   totals: {
     registrations: number;
     paid: number;
@@ -383,6 +396,8 @@ export type DashboardChartPoint = { label: string; count: number; amountCents: n
 export type AdminExecutiveWebhookEvent = { id: string; paymentId: string; providerEventId: string; eventType: string; receivedAt: string };
 export type AdminExecutiveDashboard = {
   generatedAt: string;
+  /** ADMIN-002 Stage 4B: the single event every panel below is scoped to. */
+  event: AdminEventContext;
   financial: {
     grossRevenueCents: number;
     confirmedRevenueCents: number;
@@ -421,8 +436,9 @@ export type AdminExecutiveDashboard = {
   marketing: { sources: Array<DashboardChartPoint & { total: number; paid: number; conversionRate: number; cpaCents: number | null }>; campaigns: DashboardChartPoint[]; topSource: string };
   athletes: { byCity: DashboardChartPoint[]; byState: DashboardChartPoint[]; byGender: DashboardChartPoint[]; byDistance: DashboardChartPoint[]; byShirt: DashboardChartPoint[]; byLot: DashboardChartPoint[]; byAge: DashboardChartPoint[] };
   recent: { payments: Array<{ id: string; registrationId: string; amountCents: number; paidAt?: string | null; updatedAt: string; gatewayStatus?: string | null }>; confirmations: Array<{ id: string; confirmedAt?: string | null; amountCents: number }>; webhooks: AdminExecutiveWebhookEvent[] };
-  alerts: { active: number; critical: number; recent: AdminOperationalAlert[] };
-  reconciliation: { manualReviewRequired: number; lastRun: AdminReconciliationDashboard['runs'][number] | null };
+  /** ADMIN-002 Stage 4B: alerts/reconciliation are NOT event-scoped yet — declared explicitly. */
+  alerts: { scope: 'all-events'; active: number; critical: number; recent: AdminOperationalAlert[] };
+  reconciliation: { scope: 'all-events'; manualReviewRequired: number; lastRun: AdminReconciliationDashboard['runs'][number] | null };
 };
 
 export type AdminMonitoringResponse = {

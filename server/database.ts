@@ -1304,7 +1304,9 @@ async function readPostgresDatabase(client: Queryable, scope: DatabaseReadScope 
   }
 
   const include = {
-    events: ['all', 'availability', 'checkout'].includes(scope),
+    // ADMIN-002 Stage 4B: the executive dashboard needs run-events to resolve
+    // which event a request is scoped to (run-events is a tiny table).
+    events: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
     distances: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
     lots: ['all', 'availability', 'checkout', 'admin-registrations'].includes(scope),
     registrations: ['all', 'availability', 'registration-status', 'checkout', 'admin-registrations'].includes(scope),
@@ -2901,6 +2903,27 @@ export async function getReconciliationDashboardInPostgres() {
       resolvedAt: row.resolved_at, resolutionNotes: row.resolution_notes,
     })),
   };
+}
+
+/**
+ * ADMIN-002 Stage 4B: minimal event list for the executive dashboard selector.
+ * Non-sensitive metadata only. `draft` events are excluded conservatively (RBAC
+ * policy for draft visibility is unresolved — recorded as debt); `closed` events
+ * stay so historical dashboards remain reachable.
+ */
+export async function listAdminEventsInPostgres() {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `select id, slug, name, status, date from ${table.events}
+     where status in ('published', 'closed') order by date desc, name asc`,
+  );
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    slug: String(row.slug),
+    name: String(row.name),
+    status: String(row.status) as 'published' | 'closed',
+    date: String(row.date),
+  }));
 }
 
 export type PartnerAnalyticsFilters = {
