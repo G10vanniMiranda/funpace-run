@@ -105,11 +105,6 @@ const currencyFormatter = new Intl.NumberFormat('pt-BR', {
   currency: 'BRL',
 });
 
-const dateFormatter = new Intl.DateTimeFormat('pt-BR', {
-  day: '2-digit',
-  month: 'short',
-});
-
 const dateTimeFormatter = new Intl.DateTimeFormat('pt-BR', {
   dateStyle: 'short',
   timeStyle: 'short',
@@ -819,46 +814,6 @@ function Topbar({
   );
 }
 
-function KpiGrid({ dashboard, loading }: { dashboard: DashboardModel; loading: boolean }) {
-  const cards: Array<{
-    label: string;
-    value: string | number;
-    icon: LucideIcon;
-    detail: string;
-    trend: 'up' | 'neutral';
-  }> = [
-      { label: 'Total de inscritos', value: dashboard.totalRegistrations, icon: Users, detail: `${dashboard.paidRegistrations} pagos`, trend: 'up' },
-      { label: 'Inscrições hoje', value: dashboard.todayRegistrations, icon: Activity, detail: 'Janela operacional', trend: 'neutral' },
-      { label: 'Inscrições na semana', value: dashboard.weekRegistrations, icon: BarChart3, detail: 'Últimos 7 dias', trend: 'up' },
-      { label: 'Faturamento', value: currencyFormatter.format(dashboard.revenueCents / 100), icon: WalletCards, detail: 'Receita paga', trend: 'up' },
-      { label: 'Faturamento hoje', value: currencyFormatter.format(dashboard.todayRevenueCents / 100), icon: CreditCard, detail: 'Pagos hoje', trend: 'neutral' },
-      { label: 'Ticket médio', value: currencyFormatter.format(dashboard.averageTicketCents / 100), icon: Ticket, detail: 'Por inscrição paga', trend: 'neutral' },
-      { label: 'Taxa de conversão', value: `${dashboard.conversionRate}%`, icon: ArrowUpRight, detail: 'Pagas / total', trend: 'up' },
-      { label: 'Check-ins realizados', value: dashboard.checkIns, icon: ClipboardCheck, detail: 'Operação presencial', trend: 'neutral' },
-      { label: 'Kits entregues', value: dashboard.kitDeliveries, icon: Gift, detail: 'Retirada registrada', trend: 'neutral' },
-      { label: 'Vagas restantes', value: dashboard.remainingSpots, icon: Medal, detail: `${dashboard.currentLotName}`, trend: 'neutral' },
-      { label: 'Lote atual', value: dashboard.currentLotName, icon: Flag, detail: currencyFormatter.format(dashboard.currentLotPriceCents / 100), trend: 'neutral' },
-      { label: 'Atletas por distância', value: dashboard.distanceSummary, icon: Trophy, detail: 'Total inscrito', trend: 'neutral' },
-    ];
-
-  return (
-    <section className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      {cards.map((card) => (
-        <div key={card.label}>
-          <KpiCard
-            label={card.label}
-            value={card.value}
-            icon={card.icon}
-            detail={card.detail}
-            trend={card.trend}
-            loading={loading}
-          />
-        </div>
-      ))}
-    </section>
-  );
-}
-
 function KpiCard({
   label,
   value,
@@ -915,7 +870,10 @@ function ControlSummary({
   }> = [
       { label: 'Pagas', value: dashboard.paidRegistrations, icon: BadgeCheck, detail: 'Inscrições confirmadas', trend: 'up' },
       { label: 'Pendentes', value: dashboard.pendingPayments, icon: TimerReset, detail: 'Aguardando pagamento', trend: 'neutral' },
-      { label: 'Receita', value: currencyFormatter.format(dashboard.revenueCents / 100), icon: WalletCards, detail: 'Pagamentos aprovados', trend: 'up' },
+      // ADMIN-002 Stage 1: financial card only when the role may see revenue.
+      ...(dashboard.financialVisible
+        ? [{ label: 'Receita', value: currencyFormatter.format(dashboard.revenueCents / 100), icon: WalletCards, detail: 'Pagamentos aprovados', trend: 'up' as const }]
+        : []),
       { label: 'Emails pendentes', value: dashboard.paidWithoutEmail, icon: Mail, detail: 'Confirmação não enviada', trend: 'neutral' },
       { label: 'Kits entregues', value: dashboard.kitDeliveries, icon: Shirt, detail: 'Retirada registrada', trend: 'neutral' },
       { label: 'Check-ins', value: dashboard.checkIns, icon: ClipboardCheck, detail: 'Presença registrada', trend: 'neutral' },
@@ -1620,17 +1578,17 @@ function ExecutiveDashboardPanel({ adminKey }: { adminKey: string }) {
     <section className="mt-4 space-y-4">
       <div className="flex flex-col gap-3 border border-white/10 bg-zinc-950/80 p-5 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-black uppercase tracking-widest text-brand">Centro de controle operacional</p><h1 className="mt-2 text-3xl font-black tracking-tight">Dashboard Executivo</h1><p className="mt-2 text-sm text-zinc-400">Visão financeira, comercial e operacional atualizada automaticamente.</p></div><p className="font-mono text-xs text-zinc-500">{data ? `Atualizado ${dateTimeFormatter.format(new Date(data.generatedAt))}` : 'Carregando…'}</p></div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Receita bruta" value={currencyFormatter.format((financial?.grossRevenueCents || 0) / 100)} icon={WalletCards} detail="pagamentos confirmados" trend="up" loading={loading} />
-        <KpiCard label="Receita líquida" value={currencyFormatter.format((financial?.netRevenueCents || 0) / 100)} icon={BadgeCheck} detail={financial?.feeConfigurationAvailable ? 'descontadas taxas e reembolsos' : 'sem taxa configurada'} trend="up" loading={loading} />
+        <KpiCard label="Receita bruta" value={currencyFormatter.format((financial?.grossRevenueCents || 0) / 100)} icon={WalletCards} detail="todas as inscrições pagas" trend="up" loading={loading} />
+        <KpiCard label="Receita confirmada" value={currencyFormatter.format((financial?.confirmedRevenueCents || 0) / 100)} icon={BadgeCheck} detail="pagas com liquidação registrada" trend="up" loading={loading} />
         <KpiCard label="Receita hoje" value={currencyFormatter.format((financial?.todayRevenueCents || 0) / 100)} icon={Activity} detail="confirmações de hoje" trend="neutral" loading={loading} />
         <KpiCard label="Receita da semana" value={currencyFormatter.format((financial?.weekRevenueCents || 0) / 100)} icon={BarChart3} detail="últimos sete dias" trend="up" loading={loading} />
-        <KpiCard label="Ticket médio" value={currencyFormatter.format((financial?.averageTicketCents || 0) / 100)} icon={Ticket} detail="por inscrição confirmada" trend="neutral" loading={loading} />
-        <KpiCard label="Inscrições" value={registrationsData?.total || 0} icon={Users} detail={`${registrationsData?.confirmed || 0} confirmadas`} trend="up" loading={loading} />
-        <KpiCard label="Conversão" value={`${registrationsData?.conversionRate || 0}%`} icon={ArrowUpRight} detail="confirmadas / inscrições" trend="up" loading={loading} />
+        <KpiCard label="Ticket médio" value={currencyFormatter.format((financial?.averageTicketCents || 0) / 100)} icon={Ticket} detail="por inscrição paga" trend="neutral" loading={loading} />
+        <KpiCard label="Pessoas inscritas" value={registrationsData?.uniquePeople || 0} icon={Users} detail={`${registrationsData?.registrationRows || 0} registros · ${registrationsData?.uniquePaidPeople || 0} pagantes`} trend="up" loading={loading} />
+        <KpiCard label="Conversão de participantes" value={`${registrationsData?.participantConversionRate || 0}%`} icon={ArrowUpRight} detail="pessoas pagantes / pessoas inscritas" trend="up" loading={loading} />
         <KpiCard label="Abandono checkout" value={`${data?.checkouts.abandonmentRate || 0}%`} icon={TimerReset} detail={`${data?.checkouts.created || 0} criados · ${data?.checkouts.paid || 0} pagos`} trend="neutral" loading={loading} />
       </div>
       <Panel title="Inscrições por status" eyebrow="Funil operacional"><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">{[
-        ['Confirmadas', registrationsData?.confirmed || 0, 'text-brand'], ['Pendentes', registrationsData?.pending || 0, 'text-amber-300'], ['Expiradas', registrationsData?.expired || 0, 'text-zinc-300'], ['Canceladas', registrationsData?.cancelled || 0, 'text-red-300'], ['Reembolsadas', registrationsData?.refunded || 0, 'text-cyan-300'], ['Conversão', `${registrationsData?.conversionRate || 0}%`, 'text-white'],
+        ['Confirmadas', registrationsData?.confirmed || 0, 'text-brand'], ['Pendentes', registrationsData?.pending || 0, 'text-amber-300'], ['Expiradas', registrationsData?.expired || 0, 'text-zinc-300'], ['Canceladas', registrationsData?.cancelled || 0, 'text-red-300'], ['Reembolsadas', registrationsData?.refunded || 0, 'text-cyan-300'], ['Conversão participantes', `${registrationsData?.participantConversionRate || 0}%`, 'text-white'],
       ].map(([label, value, tone]) => <div key={String(label)} className="border border-white/10 bg-black/30 p-4"><p className="text-xs font-black uppercase tracking-widest text-zinc-500">{label}</p><p className={`mt-3 font-mono text-2xl font-black ${tone}`}>{value}</p></div>)}</div></Panel>
       <div className="grid gap-4 xl:grid-cols-3"><Panel title="Receita por dia" eyebrow="Financeiro"><ExecutiveSeries data={data?.charts.daily || []} /></Panel><Panel title="Receita por hora" eyebrow="Comportamento"><ExecutiveSeries data={data?.charts.hourly || []} /></Panel><Panel title="Receita acumulada" eyebrow="Tendência"><ExecutiveSeries data={data?.charts.cumulativeRevenue || []} /></Panel></div>
       <div className="grid gap-4 xl:grid-cols-2"><Panel title="Receita por lote" eyebrow="Financeiro"><DistributionBars data={data?.charts.byLot || []} value="amount" /></Panel><Panel title="Receita por distância" eyebrow="Financeiro"><DistributionBars data={data?.charts.byDistance || []} value="amount" /></Panel><Panel title="Receita por cidade" eyebrow="Geografia"><DistributionBars data={data?.charts.byCity || []} value="amount" /></Panel><Panel title="Receita por sexo" eyebrow="Atletas"><DistributionBars data={data?.charts.byGender || []} value="amount" /></Panel></div>
@@ -2604,12 +2562,16 @@ type ChartPoint = {
 type DashboardModel = {
   totalRegistrations: number;
   paidRegistrations: number;
+  uniquePeople: number;
+  uniquePaidPeople: number;
   todayRegistrations: number;
   weekRegistrations: number;
   revenueCents: number;
   todayRevenueCents: number;
   averageTicketCents: number;
+  /** participant conversion (unique paid people / unique people), 1 decimal, from the canonical engine */
   conversionRate: number;
+  financialVisible: boolean;
   remainingSpots: number;
   currentLotName: string;
   currentLotPriceCents: number;
@@ -2633,26 +2595,30 @@ function getDashboardModel(summary: AdminSummaryResponse | null, registrations: 
   const paid = registrations.filter((registration) => registration.status === 'paid');
   const todayRegistrations = summary?.totals.todayRegistrations ?? registrations.filter((registration) => toDateKey(new Date(registration.createdAt)) === todayKey).length;
   const weekRegistrations = summary?.totals.weekRegistrations ?? registrations.filter((registration) => new Date(registration.createdAt) >= startOfDay(weekAgo)).length;
-  const todayRevenueCents = summary?.totals.todayRevenueCents ?? paid
-    .filter((registration) => toDateKey(new Date(registration.createdAt)) === todayKey)
-    .reduce((total, registration) => total + registration.amountCents, 0);
-  const revenueCents = summary?.totals.revenueCents ?? paid.reduce((total, registration) => total + registration.amountCents, 0);
+  // Financial / conversion numbers are business truth: consume the canonical
+  // engine via /api/admin/summary. No independent frontend formulas.
+  const financialVisible = summary?.totals.financialVisible ?? true;
+  const todayRevenueCents = summary?.totals.todayRevenueCents ?? 0;
+  const revenueCents = summary?.totals.revenueCents ?? 0;
   const totalRegistrations = summary?.totals.registrations ?? registrations.length;
   const paidRegistrations = summary?.totals.paid ?? paid.length;
-  const averageTicketCents = paidRegistrations > 0 ? Math.round(revenueCents / paidRegistrations) : activeLot?.priceCents || eventInfo.currentLotPriceCents;
-  const conversionRate = totalRegistrations > 0 ? Math.round((paidRegistrations / totalRegistrations) * 100) : 0;
-  const dailyRegistrations = summary?.daily || buildDailySeries(registrations, 'count');
-  const dailyRevenue = summary?.daily || buildDailySeries(paid, 'amount');
+  const averageTicketCents = summary?.totals.averageTicketCents ?? 0;
+  const conversionRate = summary?.totals.participantConversionRate ?? 0;
+  const dailyRegistrations = summary?.daily ?? [];
+  const dailyRevenue = summary?.daily ?? [];
 
   return {
     totalRegistrations,
     paidRegistrations,
+    uniquePeople: summary?.totals.uniquePeople ?? totalRegistrations,
+    uniquePaidPeople: summary?.totals.uniquePaidPeople ?? paidRegistrations,
     todayRegistrations,
     weekRegistrations,
     revenueCents,
     todayRevenueCents,
     averageTicketCents,
     conversionRate,
+    financialVisible,
     remainingSpots: activeLot?.remaining ?? eventInfo.currentLotCapacity,
     currentLotName: activeLot?.name || eventInfo.currentLot,
     currentLotPriceCents: activeLot?.priceCents ?? eventInfo.currentLotPriceCents,
@@ -2665,25 +2631,6 @@ function getDashboardModel(summary: AdminSummaryResponse | null, registrations: 
     pendingPayments: summary?.totals.pending ?? registrations.filter((registration) => registration.status === 'pending_payment').length,
     paidWithoutEmail: summary?.totals.paidWithoutEmail ?? registrations.filter((registration) => registration.status === 'paid' && !registration.confirmationEmailSentAt).length,
   };
-}
-
-function buildDailySeries(registrations: AdminRegistration[], mode: 'count' | 'amount'): ChartPoint[] {
-  const days = Array.from({ length: 7 }).map((_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() - (6 - index));
-    return startOfDay(date);
-  });
-
-  return days.map((date) => {
-    const key = toDateKey(date);
-    const items = registrations.filter((registration) => toDateKey(new Date(registration.createdAt)) === key);
-
-    return {
-      label: dateFormatter.format(date).replace('.', ''),
-      count: mode === 'count' ? items.length : 0,
-      amountCents: mode === 'amount' ? items.reduce((total, registration) => total + registration.amountCents, 0) : 0,
-    };
-  });
 }
 
 function getInitials(name: string) {
