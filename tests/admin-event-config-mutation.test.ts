@@ -14,6 +14,7 @@ import test from 'node:test';
 
 const adminTsx = readFileSync('src/pages/Admin.tsx', 'utf8');
 const serverIndex = readFileSync('server/index.ts', 'utf8');
+const serverDatabase = readFileSync('server/database.ts', 'utf8');
 
 function panel(): string {
   const start = adminTsx.indexOf('function EventManagementPanel(');
@@ -66,19 +67,37 @@ test('durable feedback: the modal renders submitting / success / failure and can
 });
 
 test('§7 backend contract for PATCH /api/admin/lots/:id is intact (no business-semantics change)', () => {
-  const fn = serverIndex.slice(
+  // The handler keeps auth + the reason gate, then delegates to the narrow
+  // transactional mutation (EVENT-OPS-001). It must NOT reach for the
+  // full-database blob path any more.
+  const handler = serverIndex.slice(
     serverIndex.indexOf('async function handleAdminLotUpdate('),
     serverIndex.indexOf('\nasync function handleAdminSystemCheck('),
   );
-  assert.match(fn, /requireAdmin\(req, res, \['administrator'\]\)/, 'administrator only');
-  assert.match(fn, /reason\.length < 5/, 'reason >= 5 enforced');
-  assert.match(fn, /priceCents < 0\) return \{ statusCode: 400/, 'invalid price rejected');
-  assert.match(fn, /\['active', 'inactive', 'sold_out', 'scheduled', 'closed'\]\.includes/, 'status enum enforced');
-  assert.match(fn, /capacity < lot\.soldCount/, 'capacity vs soldCount invariant');
-  assert.match(fn, /body\?\.status === 'active' && database\.lots\.some\([\s\S]*?item\.status === 'active'\)\) return \{ statusCode: 409/, 'one-active-lot invariant');
-  assert.match(fn, /action: 'lot\.updated', entityType: 'lot', entityId: lotId, payload: \{ reason, before, after: lot \}/, 'lot.updated audit with before/after + reason');
-  // full-replace: still reads all six fields from the body
+  assert.match(handler, /requireAdmin\(req, res, \['administrator'\]\)/, 'administrator only');
+  assert.match(handler, /reason\.length < 5/, 'reason >= 5 enforced in the handler');
+  assert.match(handler, /await updateLotConfigurationInPostgres\(\{/, 'delegates to the narrow transaction');
+  assert.doesNotMatch(handler, /await transaction[<(]/, 'no generic blob transaction() for lot updates');
+  assert.doesNotMatch(handler, /database\.lots\.some\(/, 'no in-memory full-db scan');
   for (const k of ['name', 'capacity', 'priceCents', 'status', 'startsAt', 'endsAt']) {
-    assert.match(fn, new RegExp(`body\\??[.!]?\\??\\.?${k}\\b|body!\\.${k}\\b|body\\?\\.${k}\\b`), `reads body.${k}`);
+    assert.match(handler, new RegExp(`\\b${k}: body\\?\\.${k}\\b|name: compactText\\(body\\?\\.name`), `forwards body.${k}`);
   }
+
+  // The business semantics now live in server/database.ts — same checks, same
+  // order, same status codes and messages, enforced against `for update` rows.
+  const fn = serverDatabase.slice(
+    serverDatabase.indexOf('export async function updateLotConfigurationInPostgres('),
+    serverDatabase.indexOf('export async function snapshot()'),
+  );
+  assert.ok(fn.length > 0, 'updateLotConfigurationInPostgres located');
+  assert.match(fn, /from \$\{table\.lots\} where id = \$1 for update/, 'target lot row is locked FOR UPDATE');
+  assert.match(fn, /capacity < before\.soldCount[\s\S]*?statusCode: 409/, 'capacity vs soldCount invariant (409)');
+  assert.match(fn, /priceCents < 0[\s\S]*?statusCode: 400/, 'invalid price rejected (400)');
+  assert.match(fn, /\['active', 'inactive', 'sold_out', 'scheduled', 'closed'\]\.includes/, 'status enum enforced');
+  assert.match(fn, /where event_id = \$1 and id <> \$2 and status = 'active'[\s\S]*?statusCode: 409/, 'one-active-lot invariant (409)');
+  assert.match(fn, /input\.startsAt >= input\.endsAt[\s\S]*?statusCode: 400/, 'inverted sale window rejected (400)');
+  assert.match(fn, /A capacidade nao pode ser menor que \$\{before\.soldCount\} vagas ocupadas\./);
+  assert.match(fn, /Ja existe outro lote ativo\. Encerre-o antes de ativar este lote\./);
+  assert.match(fn, /update \$\{table\.lots\}\s*\n\s*set name = \$2, capacity = \$3, price_cents = \$4, status = \$5, starts_at = \$6, ends_at = \$7\s*\n\s*where id = \$1/, 'single-row UPDATE of run-lots');
+  assert.match(fn, /insert into \$\{table\.auditLogs\}[\s\S]*?'lot\.updated', 'lot', \$4[\s\S]*?reason: input\.reason, before, after/, 'atomic lot.updated audit with before/after + reason');
 });

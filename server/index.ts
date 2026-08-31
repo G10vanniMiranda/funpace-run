@@ -51,6 +51,7 @@ import {
   revokeAdminSessionInPostgres,
   selectLotForRegistrationNumber,
   transaction,
+  updateLotConfigurationInPostgres,
   upsertAdminBootstrapInPostgres,
   usesPostgresDatabase,
   type Database,
@@ -4110,18 +4111,27 @@ async function handleAdminLotUpdate(req: IncomingMessage, res: ServerResponse, l
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<{ reason?: string; name?: string; capacity?: number; priceCents?: number; status?: string; startsAt?: string; endsAt?: string }>(await readBody(req)); const reason = body?.reason?.trim() || '';
   if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const lot = database.lots.find((item) => item.id === lotId); if (!lot) return { statusCode: 404, payload: { message: 'Lote nao encontrado.' } };
-    const capacity = Math.floor(Number(body?.capacity)); const priceCents = Math.floor(Number(body?.priceCents));
-    if (!Number.isFinite(capacity) || capacity < lot.soldCount) return { statusCode: 409, payload: { message: `A capacidade nao pode ser menor que ${lot.soldCount} vagas ocupadas.` } };
-    if (!Number.isFinite(priceCents) || priceCents < 0) return { statusCode: 400, payload: { message: 'Preco invalido.' } };
-    if (!['active', 'inactive', 'sold_out', 'scheduled', 'closed'].includes(body?.status || '')) return { statusCode: 400, payload: { message: 'Status de lote invalido.' } };
-    if (body?.status === 'active' && database.lots.some((item) => item.id !== lotId && item.eventId === lot.eventId && item.status === 'active')) return { statusCode: 409, payload: { message: 'Ja existe outro lote ativo. Encerre-o antes de ativar este lote.' } };
-    if (body?.startsAt && body?.endsAt && body.startsAt >= body.endsAt) return { statusCode: 400, payload: { message: 'O encerramento deve ser posterior ao inicio.' } };
-    const before = { ...lot }; lot.name = compactText(body?.name, 100) || lot.name; lot.capacity = capacity; lot.priceCents = priceCents; lot.status = body!.status as typeof lot.status; lot.startsAt = body?.startsAt || ''; lot.endsAt = body?.endsAt || '';
-    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'lot.updated', entityType: 'lot', entityId: lotId, payload: { reason, before, after: lot }, createdAt: new Date().toISOString() }));
-    return { statusCode: 200, payload: { lot } };
-  }); json(res, result.statusCode, result.payload);
+  // EVENT-OPS-001: delegate to a narrow single-row transaction (run-lots +
+  // run-audit-logs) instead of the generic full-database blob path.
+  const result = await updateLotConfigurationInPostgres({
+    lotId,
+    reason,
+    name: compactText(body?.name, 100),
+    capacity: body?.capacity,
+    priceCents: body?.priceCents,
+    status: body?.status,
+    startsAt: body?.startsAt,
+    endsAt: body?.endsAt,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
+  });
+  json(res, result.statusCode, result.payload);
 }
 
 async function handleAdminSystemCheck(req: IncomingMessage, res: ServerResponse, target: 'email' | 'gateway') {
