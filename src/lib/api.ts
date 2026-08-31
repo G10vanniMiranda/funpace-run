@@ -389,6 +389,18 @@ function toQueryString(filters: Record<string, string>) {
   return query ? `?${query}` : '';
 }
 
+// ADMIN-003 Stage 2: the Inscrições tab is scoped to one event carried in the
+// page URL as `?event=<slug>` (stateless, following the Executive Dashboard).
+// Resource-by-id calls and drawer mutations inherit that same event so the
+// backend can reject a cross-event target. Empty string => no-op in toQueryString.
+function currentEventParam(): string {
+  try {
+    return new URLSearchParams(window.location.search).get('event') || '';
+  } catch {
+    return '';
+  }
+}
+
 async function adminFetch<ResponsePayload>(path: string, adminKey: string, init: ApiRequestOptions = {}) {
   const headers = new Headers(init.headers);
 
@@ -442,14 +454,14 @@ export function updateAdminAlert(adminKey: string, alertId: string, status: 'ack
 }
 export function getAdminMonitoring(adminKey: string) { return adminFetch<AdminMonitoringResponse>('/api/admin/monitoring', adminKey); }
 
-export function getAdminRegistrations(adminKey: string, filters: Record<string, string>) {
-  return adminFetch<AdminRegistrationsResponse>(`/api/admin/registrations${toQueryString(filters)}`, adminKey);
+export function getAdminRegistrations(adminKey: string, filters: Record<string, string>, options: { signal?: AbortSignal } = {}) {
+  return adminFetch<AdminRegistrationsResponse>(`/api/admin/registrations${toQueryString(filters)}`, adminKey, { signal: options.signal });
 }
 
 export function getAdminGoogleSheetsStatus(adminKey: string) { return adminFetch<import('../types/registration').AdminGoogleSheetsStatus>('/api/admin/google-sheets/status', adminKey); }
 export function retryAdminGoogleSheets(adminKey: string) { return adminFetch<{ queued: number; remaining: number }>('/api/admin/google-sheets/retry', adminKey, { method: 'POST' }); }
 export function checkAdminGoogleSheets(adminKey: string) { return adminFetch<{ ok: boolean; createdSheets: string[]; message: string }>('/api/admin/google-sheets/check', adminKey, { method: 'POST' }); }
-export function syncAdminRegistrationToGoogleSheets(adminKey: string, registrationId: string) { return adminFetch<{ queued: number }>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/sync-google-sheets`, adminKey, { method: 'POST' }); }
+export function syncAdminRegistrationToGoogleSheets(adminKey: string, registrationId: string) { return adminFetch<{ queued: number }>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/sync-google-sheets${toQueryString({ event: currentEventParam() })}`, adminKey, { method: 'POST' }); }
 
 export function getAdminAuditLogs(adminKey: string, filters: Record<string, string> = {}) {
   return adminFetch<AdminAuditLogsResponse>(`/api/admin/audit-logs${toQueryString(filters)}`, adminKey);
@@ -559,7 +571,7 @@ export function runAdminPartnerConsistency(adminKey: string) {
 
 function postAdminRegistrationAction(adminKey: string, registrationId: string, action: 'check-in' | 'kit', notes = '') {
   return adminFetch<AdminRegistrationActionResponse>(
-    `/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`,
+    `/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}${toQueryString({ event: currentEventParam() })}`,
     adminKey,
     {
       method: 'POST',
@@ -590,23 +602,23 @@ export function updateAdminLot(adminKey: string, lotId: string, changes: { name:
 export function runAdminSystemCheck(adminKey: string, target: 'email' | 'gateway') { return adminFetch<AdminSystemCheckResponse>(`/api/admin/system-checks/${target}`, adminKey, { method: 'POST' }); }
 
 export function maintainAdminRegistration(adminKey: string, registrationId: string, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit', reason = '') {
-  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}`, adminKey, {
+  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}${toQueryString({ event: currentEventParam() })}`, adminKey, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false,
   });
 }
 
 export function updateAdminRegistration(adminKey: string, registrationId: string, changes: AdminRegistrationEditable, reason: string) {
-  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}`, adminKey, {
+  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}${toQueryString({ event: currentEventParam() })}`, adminKey, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes, reason }),
   });
 }
 
 export function getAdminRegistrationDetails(adminKey: string, registrationId: string) {
-  return adminFetch<AdminRegistrationDetailsResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}`, adminKey);
+  return adminFetch<AdminRegistrationDetailsResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}${toQueryString({ event: currentEventParam() })}`, adminKey);
 }
 
 export function assignAdminBibNumber(adminKey: string, registrationId: string, bibNumber: string, reason: string) {
-  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/bib-number`, adminKey, {
+  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/bib-number${toQueryString({ event: currentEventParam() })}`, adminKey, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bibNumber, reason }),
   });
 }

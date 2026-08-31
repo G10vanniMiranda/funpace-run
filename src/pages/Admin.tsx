@@ -50,6 +50,7 @@ import {
   getAdminCsvUrl,
   getAdminReportExportUrl,
   getAdminRegistrations,
+  getAdminEvents,
   getAdminGoogleSheetsStatus,
   retryAdminGoogleSheets,
   syncAdminRegistrationToGoogleSheets,
@@ -78,7 +79,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -191,6 +192,24 @@ const statusStyles: Record<RegistrationStatus, string> = {
   refunded: 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200',
 };
 
+// ADMIN-003 Stage 2: the selected event slug is stateless — it lives in the page
+// URL as `?event=<slug>`, shared with the Executive Dashboard (Stage 4B).
+function readEventSlugFromLocation(): string {
+  try {
+    return new URLSearchParams(window.location.search).get('event') || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeEventSlugToLocation(slug: string): void {
+  const params = new URLSearchParams(window.location.search);
+  if (slug) params.set('event', slug);
+  else params.delete('event');
+  const query = params.toString();
+  window.history.replaceState(null, '', query ? `${window.location.pathname}?${query}` : window.location.pathname);
+}
+
 export function AdminPage() {
   const [adminKey, setAdminKey] = useState('');
   const [draftPassword, setDraftPassword] = useState('');
@@ -204,7 +223,13 @@ export function AdminPage() {
   const [filters, setFilters] = useState({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: '25', city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc', sheetStatus: '' });
   const [googleSheetsStatus, setGoogleSheetsStatus] = useState<AdminGoogleSheetsStatus | null>(null);
   const [reportFilters, setReportFilters] = useState({ dateFrom: '', dateTo: '' });
-  const [registrationPagination, setRegistrationPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
+  const [registrationPagination, setRegistrationPagination] = useState<AdminRegistrationsResponse['pagination']>({ page: 1, pageSize: 25, total: 0, totalPages: 1, people: 0, historicalRegistrations: 0 });
+  // ADMIN-003 Stage 2: the Inscrições tab is person-centric within ONE event.
+  const [registrationEvent, setRegistrationEvent] = useState<AdminEventContext | null>(null);
+  const [registrationEventError, setRegistrationEventError] = useState<{ code: string; message: string } | null>(null);
+  const [registrationEventOptions, setRegistrationEventOptions] = useState<AdminEventListItem[]>([]);
+  const [registrationEventSwitch, setRegistrationEventSwitch] = useState(0);
+  const registrationsRequestSeq = useRef(0);
   const [error, setError] = useState('');
   const [actionMessage, setActionMessage] = useState('');
   const [loading, setLoading] = useState(false);
@@ -217,7 +242,17 @@ export function AdminPage() {
   const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
   const adminLoadInFlight = useRef(false);
 
-  const csvUrl = useMemo(() => getAdminCsvUrl(filters), [filters]);
+  // ADMIN-003 Stage 2: on the Inscrições tab the CSV follows the tab —
+  // person-centric and scoped to the same event (`view=people`). Every other
+  // tab's top-bar export keeps the historical row-centric global dump.
+  const csvUrl = useMemo(
+    () => getAdminCsvUrl(
+      activeNav === 'registrations'
+        ? { ...filters, view: 'people', event: registrationEvent?.slug || readEventSlugFromLocation() }
+        : filters,
+    ),
+    [filters, registrationEvent, activeNav],
+  );
   const dashboard = useMemo(() => getDashboardModel(summary, registrations), [summary, registrations]);
 
   // ADMIN-002 Stage 6B: the single canonical "administrative session expired"
@@ -244,10 +279,19 @@ export function AdminPage() {
       // the others, and an unresolved event scope (>=2 published events, no
       // ?event= yet) does not spam a blocking error while the Executive
       // Dashboard shows its recoverable event selector (§29).
-      const eventParam = new URLSearchParams(window.location.search).get('event') || undefined;
+      const eventParam = readEventSlugFromLocation() || undefined;
+      // ADMIN-003 Stage 2: the Inscrições tab uses the person-centric, event-
+      // scoped view; every other panel keeps consuming the global row list.
+      // A monotonic sequence guards against an event switch landing its
+      // response after a newer one (no full L1 refactor — just latest-wins).
+      const isRegistrationsView = activeNav === 'registrations';
+      const registrationsSeq = isRegistrationsView ? ++registrationsRequestSeq.current : registrationsRequestSeq.current;
+      const registrationsQuery = isRegistrationsView
+        ? { ...filters, view: 'people', event: eventParam || '' }
+        : { status: '', distanceId: '', lotId: '', q: '' };
       const [summaryOutcome, registrationsOutcome, auditOutcome] = await Promise.allSettled([
         getAdminSummary(key, eventParam),
-        getAdminRegistrations(key, activeNav === 'registrations' ? filters : { status: '', distanceId: '', lotId: '', q: '' }),
+        getAdminRegistrations(key, registrationsQuery),
         getAdminAuditLogs(key),
       ]);
 
@@ -271,13 +315,39 @@ export function AdminPage() {
         }
       }
 
-      if (registrationsOutcome.status === 'fulfilled') {
+      // Only apply the registrations outcome if it is still the latest one for
+      // the tab (an older event's response must not overwrite a newer view).
+      const registrationsIsStale = isRegistrationsView && registrationsSeq !== registrationsRequestSeq.current;
+      if (registrationsIsStale) {
+        // discarded on purpose
+      } else if (registrationsOutcome.status === 'fulfilled') {
         setRegistrations(registrationsOutcome.value.registrations);
         setRegistrationPagination(registrationsOutcome.value.pagination);
-      } else if (!nextError) {
-        nextError = registrationsOutcome.reason instanceof ApiError
-          ? registrationsOutcome.reason.message
-          : 'Não foi possível carregar as inscrições.';
+        if (isRegistrationsView) {
+          const resolvedEvent = registrationsOutcome.value.event || null;
+          setRegistrationEvent(resolvedEvent);
+          setRegistrationEventError(null);
+          // §7: exactly one published event and no ?event= yet → canonicalise.
+          if (resolvedEvent && !readEventSlugFromLocation()) {
+            writeEventSlugToLocation(resolvedEvent.slug);
+          }
+        }
+      } else {
+        const reason = registrationsOutcome.reason;
+        const eventSelectionCode = reason instanceof ApiError
+          && EVENT_SELECTION_CODES.indexOf(reason.businessCode || '') !== -1
+          ? reason.businessCode || ''
+          : '';
+        if (isRegistrationsView && eventSelectionCode) {
+          // §8/§29: ambiguous / unknown / no published event → drive the tab's
+          // own selection recovery state instead of a blocking banner.
+          setRegistrations([]);
+          setRegistrationEvent(null);
+          setRegistrationEventError({ code: eventSelectionCode, message: reason instanceof ApiError ? reason.message : '' });
+          void getAdminEvents(key).then((response) => setRegistrationEventOptions(response.events)).catch(() => undefined);
+        } else if (!nextError) {
+          nextError = reason instanceof ApiError ? reason.message : 'Não foi possível carregar as inscrições.';
+        }
       }
 
       if (auditOutcome.status === 'fulfilled') {
@@ -294,9 +364,20 @@ export function AdminPage() {
     }
   };
 
+  // ADMIN-003 Stage 2: switching the Inscrições event resets incompatible
+  // filters (distance/lot belong to the previous event) and page, then reloads
+  // via `registrationEventSwitch` so the fetch runs with the updated filters.
+  const selectRegistrationEvent = (slug: string) => {
+    writeEventSlugToLocation(slug);
+    registrationsRequestSeq.current += 1;
+    setRegistrationEventError(null);
+    setFilters((previous) => ({ ...previous, page: '1', distanceId: '', lotId: '' }));
+    setRegistrationEventSwitch((value) => value + 1);
+  };
+
   useEffect(() => {
     void loadAdminData();
-  }, [filters.status, filters.distanceId, filters.lotId, filters.page, filters.pageSize, filters.city, filters.team, filters.shirtSize, filters.bibNumber, filters.sortBy, filters.sortOrder, filters.sheetStatus, activeNav]);
+  }, [filters.status, filters.distanceId, filters.lotId, filters.page, filters.pageSize, filters.city, filters.team, filters.shirtSize, filters.bibNumber, filters.sortBy, filters.sortOrder, filters.sheetStatus, activeNav, registrationEventSwitch]);
 
   useEffect(() => {
     void getAdminSession().then((session) => { setAdminActor(`${session.actor} · ${session.role}`); setAdminRole(session.role); setAdminKey('session'); void loadAdminData('session'); }).catch(() => undefined).finally(() => setAuthChecking(false));
@@ -533,6 +614,10 @@ export function AdminPage() {
               auditLogs={auditLogs}
               filters={filters}
               registrationPagination={registrationPagination}
+              registrationEvent={registrationEvent}
+              registrationEventError={registrationEventError}
+              registrationEventOptions={registrationEventOptions}
+              onSelectRegistrationEvent={selectRegistrationEvent}
               loading={loading}
               onFiltersChange={setFilters}
               reportFilters={reportFilters}
@@ -615,6 +700,10 @@ function AdminSection({
   auditLogs,
   filters,
   registrationPagination,
+  registrationEvent,
+  registrationEventError,
+  registrationEventOptions,
+  onSelectRegistrationEvent,
   loading,
   onFiltersChange,
   reportFilters,
@@ -634,7 +723,11 @@ function AdminSection({
   registrations: AdminRegistration[];
   auditLogs: AdminAuditLog[];
   filters: AdminFilters;
-  registrationPagination: { page: number; pageSize: number; total: number; totalPages: number };
+  registrationPagination: AdminRegistrationsResponse['pagination'];
+  registrationEvent: AdminEventContext | null;
+  registrationEventError: { code: string; message: string } | null;
+  registrationEventOptions: AdminEventListItem[];
+  onSelectRegistrationEvent: (slug: string) => void;
   loading: boolean;
   onFiltersChange: (filters: AdminFilters) => void;
   reportFilters: { dateFrom: string; dateTo: string };
@@ -709,6 +802,10 @@ function AdminSection({
         registrations={registrations}
         filters={filters}
         pagination={registrationPagination}
+        event={registrationEvent}
+        eventError={registrationEventError}
+        eventOptions={registrationEventOptions}
+        onSelectEvent={onSelectRegistrationEvent}
         loading={loading}
         onFiltersChange={onFiltersChange}
         onSearch={onSearch}
@@ -2333,6 +2430,10 @@ function RegistrationsPanel({
   registrations,
   filters,
   pagination,
+  event,
+  eventError,
+  eventOptions,
+  onSelectEvent,
   loading,
   onFiltersChange,
   onSearch,
@@ -2342,13 +2443,59 @@ function RegistrationsPanel({
   summary: AdminSummaryResponse | null;
   registrations: AdminRegistration[];
   filters: AdminFilters;
-  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+  pagination: AdminRegistrationsResponse['pagination'];
+  event: AdminEventContext | null;
+  eventError: { code: string; message: string } | null;
+  eventOptions: AdminEventListItem[];
+  onSelectEvent: (slug: string) => void;
   loading: boolean;
   onFiltersChange: (filters: AdminFilters) => void;
   onSearch: (event: FormEvent) => void;
   onOpenRegistration: (registration: AdminRegistration) => void;
 }) {
   const [syncingId, setSyncingId] = useState('');
+
+  // ADMIN-003 Stage 2 §8/§29: 2+ published events (or an unknown/closed slug
+  // that no longer resolves) → require an explicit human choice. No table, no
+  // "first/most recent" auto-pick, no repeated calls to an invalid endpoint.
+  if (eventError) {
+    return (
+      <section className="mt-4 border border-white/10 bg-zinc-950/80">
+        <div className="p-6 md:p-8">
+          <p className="text-xs font-black uppercase tracking-widest text-brand">Inscrições</p>
+          <h2 className="mt-2 text-2xl font-black tracking-tight">Selecione um evento</h2>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-400">
+            {eventError.code === 'NO_PUBLISHED_EVENT'
+              ? 'Nenhum evento publicado no momento. Publique um evento para acompanhar as pessoas inscritas.'
+              : eventError.code === 'EVENT_NOT_FOUND'
+                ? 'O evento informado no endereço não foi encontrado. Escolha um evento para continuar.'
+                : 'Há mais de um evento publicado. Escolha qual evento você quer acompanhar nas inscrições.'}
+          </p>
+          {eventOptions.length > 0 && (
+            <label className="mt-5 block max-w-md text-xs font-bold uppercase tracking-widest text-zinc-400">
+              Evento
+              <select
+                className="mt-2 min-h-12 w-full border border-zinc-800 bg-black px-3 text-white outline-none focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
+                defaultValue=""
+                onChange={(changeEvent) => { if (changeEvent.target.value) onSelectEvent(changeEvent.target.value); }}
+              >
+                <option value="" disabled>Escolha um evento…</option>
+                {eventOptions.map((option) => (
+                  <option key={option.id} value={option.slug}>
+                    {option.name}{option.status === 'closed' ? ' (encerrado)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  const peopleCount = pagination.people ?? pagination.total;
+  const historicalCount = pagination.historicalRegistrations ?? peopleCount;
+
   return (
     <section className="mt-4 border border-white/10 bg-zinc-950/80">
       <div className="border-b border-white/10 p-4 md:p-5">
@@ -2357,11 +2504,31 @@ function RegistrationsPanel({
             <p className="text-xs font-black uppercase tracking-widest text-brand">Inscrições</p>
             <h2 className="mt-2 text-2xl font-black tracking-tight">Mesa operacional de atletas</h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-              Pesquisa, filtros, exportação e acesso ao cadastro, pagamento e histórico operacional do atleta.
+              Pessoas inscritas no evento selecionado. Cada linha é uma pessoa; as tentativas anteriores ficam no histórico do atleta.
             </p>
+            {event && (
+              <p className="mt-2 text-xs font-bold uppercase tracking-widest text-zinc-400">
+                Evento: <span className="text-white">{event.name}</span>
+                {event.status === 'closed' && <span className="ml-2 text-amber-300">(encerrado)</span>}
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap gap-2 text-xs font-bold uppercase tracking-widest text-zinc-500">
-            <span className="border border-white/10 px-2.5 py-1">Colunas: padrão</span>
+            {eventOptions.length > 1 && (
+              <select
+                aria-label="Trocar de evento"
+                className="border border-white/10 bg-black px-2.5 py-1 text-white outline-none focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
+                value={event?.slug || ''}
+                onChange={(changeEvent) => onSelectEvent(changeEvent.target.value)}
+              >
+                {!event && <option value="" disabled>Selecione um evento…</option>}
+                {eventOptions.map((option) => (
+                  <option key={option.id} value={option.slug}>
+                    {option.name}{option.status === 'closed' ? ' (encerrado)' : ''}
+                  </option>
+                ))}
+              </select>
+            )}
             <span className="border border-white/10 px-2.5 py-1">Ordenação: recentes</span>
           </div>
         </div>
@@ -2402,7 +2569,12 @@ function RegistrationsPanel({
           <SelectFilter value={filters.sheetStatus} onChange={(value) => onFiltersChange({ ...filters, sheetStatus: value, page: '1' })} options={[{ value: '', label: 'Todos no Sheets' }, { value: 'unsynchronized', label: 'Não sincronizados' }]} />
         </div>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-500">
-          <span>{pagination.total} resultado(s)</span>
+          <span>
+            <span className="font-bold text-zinc-300">{formatCount(peopleCount)} {peopleCount === 1 ? 'pessoa' : 'pessoas'}</span>
+            {historicalCount !== peopleCount && (
+              <span className="ml-2 text-zinc-500">· {formatCount(historicalCount)} registros históricos</span>
+            )}
+          </span>
           <div className="flex flex-wrap items-center gap-2">
             <SelectFilter value={filters.sortBy} onChange={(value) => onFiltersChange({ ...filters, sortBy: value, page: '1' })} options={[{ value: 'createdAt', label: 'Ordenar por data' }, { value: 'fullName', label: 'Ordenar por nome' }, { value: 'status', label: 'Ordenar por status' }, { value: 'amountCents', label: 'Ordenar por valor' }, { value: 'bibNumber', label: 'Ordenar por peito' }]} />
             <SelectFilter value={filters.sortOrder} onChange={(value) => onFiltersChange({ ...filters, sortOrder: value, page: '1' })} options={[{ value: 'desc', label: 'Decrescente' }, { value: 'asc', label: 'Crescente' }]} />
@@ -2443,6 +2615,11 @@ function RegistrationsPanel({
                         <p className="truncate font-bold">{registration.fullName}</p>
                         <p className="mt-1 truncate font-mono text-xs text-zinc-500">{registration.id}</p>
                         {registration.bibNumber && <p className="mt-1 text-xs font-black uppercase text-brand">Peito {registration.bibNumber}</p>}
+                        {(registration.attemptsCount ?? 1) > 1 && (
+                          <p className="mt-1 inline-block border border-white/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-zinc-400">
+                            {registration.attemptsCount} tentativas
+                          </p>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -2725,6 +2902,34 @@ function AthleteDrawer({
           <p className="mt-3 border border-amber-400/20 bg-amber-400/10 p-3 text-xs font-bold uppercase tracking-wider text-amber-100">
             Operacoes presenciais liberadas apenas para inscrições pagas.
           </p>
+        )}
+
+        {(details?.personHistory?.length ?? 0) > 1 && (
+          <details className="mt-5 border border-white/10 bg-white/3 p-4">
+            <summary className="cursor-pointer text-xs font-black uppercase tracking-widest text-zinc-300">
+              Histórico de tentativas ({details?.personHistory.length})
+            </summary>
+            <p className="mt-2 text-xs text-zinc-500">
+              Tentativas anteriores desta pessoa neste evento. Nenhuma foi apagada ou alterada; a linha principal é a inscrição canônica.
+            </p>
+            <ol className="mt-3 space-y-2">
+              {(details?.personHistory || []).map((attempt) => (
+                <li
+                  key={attempt.id}
+                  className={`flex flex-wrap items-center gap-x-3 gap-y-1 border p-2 text-xs ${attempt.isCanonical ? 'border-brand/30 bg-brand/5' : 'border-white/10'}`}
+                >
+                  <span className={`border px-1.5 py-0.5 font-bold uppercase tracking-widest ${statusStyles[attempt.status]}`}>
+                    {statusLabels[attempt.status]}
+                  </span>
+                  <span className="text-zinc-400">{dateTimeFormatter.format(new Date(attempt.createdAt))}</span>
+                  <span className="text-zinc-400">{currencyFormatter.format(attempt.amountCents / 100)}</span>
+                  {attempt.paidAt && <span className="text-brand">pago em {dateTimeFormatter.format(new Date(attempt.paidAt))}</span>}
+                  {attempt.isCanonical && <span className="font-bold uppercase tracking-widest text-brand">canônica</span>}
+                  <span className="ml-auto font-mono text-[10px] text-zinc-600">{attempt.id}</span>
+                </li>
+              ))}
+            </ol>
+          </details>
         )}
 
         <div className="mt-5 border border-white/10 bg-white/3 p-4">
