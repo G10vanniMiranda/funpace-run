@@ -40,6 +40,7 @@ import {
 import { eventInfo } from '../config/event';
 import { useAdminMutation } from '../hooks/useAdminMutation';
 import type { AdminMutationState } from '../lib/admin-mutation-runtime';
+import { buildLotUpdatePayload } from '../lib/admin-lot-mutation';
 import { PartnersPanel } from '../components/admin/PartnersPanel';
 import QRCode from 'qrcode';
 import {
@@ -2344,6 +2345,11 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
   const [config, setConfig] = useState<AdminEventConfig | null>(null);
   const [message, setMessage] = useState('');
   const [saveDraft, setSaveDraft] = useState<{ kind: 'event' | 'distance' | 'lot'; id?: string; reason: string } | null>(null);
+  // ADMIN-UX-HOTFIX-001 — event/lot config saves run on the reusable mutation
+  // state machine: idle → confirming → submitting → success | failure. Feedback
+  // is rendered in the modal (durable), never the transient panel banner, and a
+  // silent no-op / swallowed rejection is impossible.
+  const saveMutation = useAdminMutation<{ message: string }>();
   const [checkLoading, setCheckLoading] = useState<'email' | 'gateway' | ''>('');
   const [checkResult, setCheckResult] = useState<{ target: 'email' | 'gateway'; summary: string; ok: boolean; checks: Array<{ label: string; ok: boolean; detail: string }> } | null>(null);
   const load = () => getAdminEventConfig(adminKey).then(setConfig).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Não foi possível carregar o evento.'));
@@ -2366,28 +2372,54 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
     config.event.status === 'draft' && config.health.sales.registrationAvailability === 'available' ? { key: 'draft-open', tone: 'warning' as const, title: 'Evento em rascunho com vendas prontas', detail: 'Ha lote e distancias ativas, mas o evento ainda esta como rascunho.' } : null,
   ].filter(Boolean) as Array<{ key: string; tone: 'warning'; title: string; detail: string }>;
   const updateEvent = (field: keyof AdminEventConfig['event'], value: string) => setConfig({ ...config, event: { ...config.event, [field]: value } });
-  const submitSave = async () => {
-    if (!saveDraft || saveDraft.reason.trim().length < 5) return;
-    try {
-      if (saveDraft.kind === 'event') {
-        await updateAdminEventConfig(adminKey, config.event, saveDraft.reason);
-        setMessage('Evento atualizado.');
-      } else if (saveDraft.kind === 'distance' && saveDraft.id) {
-        const distance = config.distances.find((item) => item.id === saveDraft.id);
-        if (!distance) return;
-        await updateAdminDistance(adminKey, distance.id, { capacity: distance.capacity, status: distance.status, reason: saveDraft.reason });
-        setMessage('Distancia atualizada.');
-      } else if (saveDraft.kind === 'lot' && saveDraft.id) {
-        const lot = config.lots.find((item) => item.id === saveDraft.id);
-        if (!lot) return;
-        await updateAdminLot(adminKey, lot.id, { ...lot, reason: saveDraft.reason });
-        setMessage('Lote atualizado.');
-        await load();
+  // ADMIN-UX-HOTFIX-001 — one confirm → exactly one PATCH. The mutation runtime
+  // owns submitting/success/failure; a rejected promise is never swallowed and a
+  // "lot not found in the loaded config" case is surfaced, not silently dropped.
+  const submitConfigSave = () => {
+    const draft = saveDraft;
+    if (!draft) return;
+    void saveMutation.submit(async () => {
+      const reason = draft.reason.trim();
+      if (reason.length < 5) {
+        throw new ApiError('Informe um motivo com pelo menos 5 caracteres.', { code: 'validation', businessCode: 'CONFIG_REASON_INVALID' });
       }
-      setSaveDraft(null);
-    } catch (error) {
-      setMessage(error instanceof ApiError ? error.message : 'Falha ao atualizar.');
-    }
+      if (draft.kind === 'event') {
+        await updateAdminEventConfig(adminKey, config.event, reason);
+        return { message: 'Alteração salva com sucesso.' };
+      }
+      if (draft.kind === 'distance' && draft.id) {
+        const distance = config.distances.find((item) => item.id === draft.id);
+        if (!distance) {
+          throw new ApiError('Distância não encontrada na configuração carregada. Recarregue e tente novamente.', { code: 'stale', businessCode: 'CONFIG_ENTITY_STALE' });
+        }
+        await updateAdminDistance(adminKey, distance.id, { capacity: distance.capacity, status: distance.status, reason });
+        return { message: 'Alteração salva com sucesso.' };
+      }
+      if (draft.kind === 'lot' && draft.id) {
+        const lot = config.lots.find((item) => item.id === draft.id);
+        const built = buildLotUpdatePayload(lot, reason);
+        if (!built.ok || !('payload' in built)) {
+          const errorText = 'error' in built ? built.error : 'Configuração de lote inválida.';
+          throw new ApiError(errorText, { code: 'validation', businessCode: 'LOT_PAYLOAD_INVALID' });
+        }
+        // full-replace: buildLotUpdatePayload guarantees the complete 7-field body
+        // (name / capacity / priceCents / status / startsAt / endsAt / reason).
+        await updateAdminLot(adminKey, (lot as { id: string }).id, built.payload);
+        return { message: 'Alteração salva com sucesso.' };
+      }
+      throw new ApiError('Nada para salvar.', { code: 'validation', businessCode: 'CONFIG_NOTHING_TO_SAVE' });
+    });
+  };
+
+  const acknowledgeConfigSave = () => {
+    saveMutation.acknowledge();
+    setSaveDraft(null);
+    void load();
+  };
+
+  const closeConfigSave = () => {
+    saveMutation.reset();
+    setSaveDraft(null);
   };
   const runCheck = async (target: 'email' | 'gateway') => {
     setCheckLoading(target);
@@ -2448,15 +2480,26 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
         <EditInput label="UF" value={config.event.state} maxLength={2} onChange={(value) => updateEvent('state', value.toUpperCase())} />
         <label className="text-xs font-bold text-zinc-400">Status<select value={config.event.status} onChange={(event) => updateEvent('status', event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="published">Publicado</option><option value="draft">Rascunho</option><option value="closed">Encerrado</option></select></label>
       </div>
-      <button type="button" onClick={() => setSaveDraft({ kind: 'event', reason: '' })} className="mt-4 bg-brand px-4 py-3 text-xs font-black uppercase text-black">Salvar evento</button>
+      <button type="button" onClick={() => { saveMutation.reset(); setSaveDraft({ kind: 'event', reason: '' }); }} className="mt-4 bg-brand px-4 py-3 text-xs font-black uppercase text-black">Salvar evento</button>
     </Panel>
     <Panel title="Distancias" eyebrow="Capacidade">
-      <div className="grid gap-3 lg:grid-cols-2">{config.distances.map((distance) => <div key={distance.id} className="border border-white/10 bg-black/30 p-4"><p className="font-black">{distance.name}</p><div className="mt-3 grid grid-cols-2 gap-2"><EditInput label="Capacidade" type="number" value={String(distance.capacity)} onChange={(value) => setConfig({ ...config, distances: config.distances.map((item) => item.id === distance.id ? { ...item, capacity: Number(value) } : item) })} /><label className="text-xs font-bold text-zinc-400">Status<select value={distance.status} onChange={(event) => setConfig({ ...config, distances: config.distances.map((item) => item.id === distance.id ? { ...item, status: event.target.value } : item) })} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="active">Ativa</option><option value="inactive">Inativa</option><option value="sold_out">Esgotada</option></select></label></div><button type="button" onClick={() => setSaveDraft({ kind: 'distance', id: distance.id, reason: '' })} className="mt-3 border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Salvar</button></div>)}</div>
+      <div className="grid gap-3 lg:grid-cols-2">{config.distances.map((distance) => <div key={distance.id} className="border border-white/10 bg-black/30 p-4"><p className="font-black">{distance.name}</p><div className="mt-3 grid grid-cols-2 gap-2"><EditInput label="Capacidade" type="number" value={String(distance.capacity)} onChange={(value) => setConfig({ ...config, distances: config.distances.map((item) => item.id === distance.id ? { ...item, capacity: Number(value) } : item) })} /><label className="text-xs font-bold text-zinc-400">Status<select value={distance.status} onChange={(event) => setConfig({ ...config, distances: config.distances.map((item) => item.id === distance.id ? { ...item, status: event.target.value } : item) })} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="active">Ativa</option><option value="inactive">Inativa</option><option value="sold_out">Esgotada</option></select></label></div><button type="button" onClick={() => { saveMutation.reset(); setSaveDraft({ kind: 'distance', id: distance.id, reason: '' }); }} className="mt-3 border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Salvar</button></div>)}</div>
     </Panel>
     <Panel title="Lotes e vendas" eyebrow="Comercial">
-      <div className="grid gap-3 xl:grid-cols-2">{config.lots.map((lot) => <div key={lot.id} className="border border-white/10 bg-black/30 p-4"><div className="grid gap-2 sm:grid-cols-2"><EditInput label="Nome" value={lot.name} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, name: value } : item) })} /><EditInput label="Preco em centavos" type="number" value={String(lot.priceCents)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, priceCents: Number(value) } : item) })} /><EditInput label="Capacidade" type="number" value={String(lot.capacity)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, capacity: Number(value) } : item) })} /><label className="text-xs font-bold text-zinc-400">Status<select value={lot.status} onChange={(event) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, status: event.target.value } : item) })} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="active">Ativo</option><option value="scheduled">Agendado</option><option value="inactive">Inativo</option><option value="sold_out">Esgotado</option><option value="closed">Encerrado</option></select></label><EditInput label="Inicio" type="datetime-local" value={lot.startsAt.slice(0, 16)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, startsAt: value } : item) })} /><EditInput label="Fim" type="datetime-local" value={lot.endsAt.slice(0, 16)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, endsAt: value } : item) })} /></div><p className="mt-2 text-xs text-zinc-500">{lot.soldCount} vagas ocupadas</p><button type="button" onClick={() => setSaveDraft({ kind: 'lot', id: lot.id, reason: '' })} className="mt-3 border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Salvar lote</button></div>)}</div>
+      <div className="grid gap-3 xl:grid-cols-2">{config.lots.map((lot) => <div key={lot.id} className="border border-white/10 bg-black/30 p-4"><div className="grid gap-2 sm:grid-cols-2"><EditInput label="Nome" value={lot.name} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, name: value } : item) })} /><EditInput label="Preco em centavos" type="number" value={String(lot.priceCents)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, priceCents: Number(value) } : item) })} /><EditInput label="Capacidade" type="number" value={String(lot.capacity)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, capacity: Number(value) } : item) })} /><label className="text-xs font-bold text-zinc-400">Status<select value={lot.status} onChange={(event) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, status: event.target.value } : item) })} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="active">Ativo</option><option value="scheduled">Agendado</option><option value="inactive">Inativo</option><option value="sold_out">Esgotado</option><option value="closed">Encerrado</option></select></label><EditInput label="Inicio" type="datetime-local" value={lot.startsAt.slice(0, 16)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, startsAt: value } : item) })} /><EditInput label="Fim" type="datetime-local" value={lot.endsAt.slice(0, 16)} onChange={(value) => setConfig({ ...config, lots: config.lots.map((item) => item.id === lot.id ? { ...item, endsAt: value } : item) })} /></div><p className="mt-2 text-xs text-zinc-500">{lot.soldCount} vagas ocupadas</p><button type="button" onClick={() => { saveMutation.reset(); setSaveDraft({ kind: 'lot', id: lot.id, reason: '' }); }} className="mt-3 border border-brand px-3 py-2 text-xs font-black uppercase text-brand">Salvar lote</button></div>)}</div>
     </Panel>
-    {saveDraft && <ActionModal title="Confirmar alteracao" description="Registre o motivo da alteracao antes de salvar." confirmLabel="Salvar alteracao" confirmDisabled={saveDraft.reason.trim().length < 5} onConfirm={() => void submitSave()} onClose={() => setSaveDraft(null)}><label className="block text-xs font-bold text-zinc-400">Motivo da alteracao<textarea value={saveDraft.reason} onChange={(event) => setSaveDraft({ ...saveDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" /></label></ActionModal>}
+    {saveDraft && (
+      <ConfigSaveModal
+        kind={saveDraft.kind}
+        reason={saveDraft.reason}
+        onReasonChange={(value) => setSaveDraft({ ...saveDraft, reason: value })}
+        state={saveMutation.state}
+        onSubmit={submitConfigSave}
+        onAcknowledge={acknowledgeConfigSave}
+        onSessionExpired={() => { window.location.href = '/admin'; }}
+        onClose={closeConfigSave}
+      />
+    )}
   </section>;
 }
 
@@ -2838,6 +2881,98 @@ function SendConfirmationEmailModal({
               >
                 {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
                 {submitting ? 'Enviando...' : failed ? 'Tentar novamente' : 'Enviar email'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ADMIN-UX-HOTFIX-001 — event / distance / lot config save modal on the reusable
+// mutation state machine. One confirm → one PATCH. The submitting / success /
+// failure surface is rendered HERE (durable); the modal never disappears leaving
+// the operator unsure whether the change persisted.
+function ConfigSaveModal({
+  kind,
+  reason,
+  onReasonChange,
+  state,
+  onSubmit,
+  onAcknowledge,
+  onSessionExpired,
+  onClose,
+}: {
+  kind: 'event' | 'distance' | 'lot';
+  reason: string;
+  onReasonChange: (value: string) => void;
+  state: AdminMutationState<{ message?: string }>;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onSessionExpired: () => void;
+  onClose: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const entity = kind === 'lot' ? 'lote' : kind === 'distance' ? 'distância' : 'evento';
+  const reasonValid = reason.trim().length >= 5;
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onClose} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">Confirmar alteração de {entity}</h3>
+            <p className="mt-2 text-sm text-zinc-400">Registre o motivo antes de salvar. A alteração é auditada.</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {!succeeded && !sessionExpired && (
+          <label className="mt-5 block text-xs font-bold text-zinc-400">
+            Motivo da alteração <span className="font-normal text-zinc-500">(mínimo de 5 caracteres)</span>
+            <textarea
+              value={reason}
+              onChange={(event) => onReasonChange(event.target.value)}
+              disabled={submitting}
+              className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white disabled:opacity-60"
+            />
+            <span className="mt-1 block text-right font-mono text-[10px] text-zinc-500">{reason.trim().length}/5</span>
+          </label>
+        )}
+
+        {succeeded && (
+          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            {state.successMessage || 'Alteração salva com sucesso.'}
+          </div>
+        )}
+        {failed && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Não foi possível salvar a alteração.'}
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {succeeded ? (
+            <button type="button" onClick={onAcknowledge} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : (
+            <>
+              <button type="button" onClick={onClose} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting || !reasonValid}
+                className="flex items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting ? 'Salvando…' : failed ? 'Tentar novamente' : 'Salvar alteração'}
               </button>
             </>
           )}
