@@ -4548,6 +4548,178 @@ export async function transaction<Result>(
   }
 }
 
+export type LotConfigurationUpdateInput = {
+  lotId: string;
+  reason: string;
+  name?: string;
+  capacity?: number;
+  priceCents?: number;
+  status?: string;
+  startsAt?: string;
+  endsAt?: string;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+function mapLotConfigurationRow(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    eventId: String(row.event_id),
+    name: String(row.name),
+    priceCents: Number(row.price_cents),
+    capacity: Number(row.capacity),
+    soldCount: Number(row.sold_count),
+    status: String(row.status),
+    startsAt: String(row.starts_at),
+    endsAt: String(row.ends_at),
+    orderIndex: Number(row.order_index || 0),
+    continuesAfterCapacity: Boolean(row.continues_after_capacity),
+  };
+}
+
+/**
+ * EVENT-OPS-001 — narrow, single-row transactional mutation for
+ * PATCH /api/admin/lots/:id. Replaces the generic transaction() blob mechanism
+ * (readPostgresDatabase(scope='all') → 14 full-table SELECTs → in-memory mutate
+ * → savePostgresDatabase(full database) → commit, all under the global
+ * 'funpace-run-write' advisory lock) which, under organic webhook traffic,
+ * exceeded the 15s client timeout for what is logically a one-row update.
+ *
+ * Touches only run-lots (one row) and run-audit-logs (one appended row).
+ *
+ * Concurrency:
+ *  - `select ... for update` on the target lot row serialises this mutation
+ *    against the payment-webhook path (confirmPaymentInPostgres mutates the same
+ *    row's sold_count/status), so the capacity-vs-sold_count check always runs
+ *    against the freshest committed value and neither side loses an update.
+ *  - an event-scoped advisory xact lock (`funpace-run-lot-config:<eventId>`)
+ *    serialises concurrent lot-config mutations for the same event, preserving
+ *    the one-active-lot invariant. It does NOT block other events, registrations,
+ *    or the webhook/registration advisory locks ('funpace-run-registration-lot',
+ *    'funpace-run-payment-confirmation'), so payment confirmation is unaffected.
+ *  - local lock_timeout / statement_timeout keep a contended call well under the
+ *    15s client timeout instead of blocking indefinitely.
+ *
+ * Validation order, status codes and messages are a faithful port of the
+ * previous in-memory implementation in handleAdminLotUpdate.
+ */
+export async function updateLotConfigurationInPostgres(
+  input: LotConfigurationUpdateInput,
+): Promise<{ statusCode: number; payload: unknown }> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await ensurePostgresReady();
+
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const targetResult = await client.query(
+      `select id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity
+       from ${table.lots} where id = $1 for update`,
+      [input.lotId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { statusCode: 404, payload: { message: 'Lote nao encontrado.' } };
+    }
+
+    await client.query('select pg_advisory_xact_lock(hashtext($1::text))', [
+      `funpace-run-lot-config:${targetRow.event_id}`,
+    ]);
+
+    const before = mapLotConfigurationRow(targetRow);
+    const capacity = Math.floor(Number(input.capacity));
+    const priceCents = Math.floor(Number(input.priceCents));
+
+    if (!Number.isFinite(capacity) || capacity < before.soldCount) {
+      await client.query('rollback');
+      return {
+        statusCode: 409,
+        payload: { message: `A capacidade nao pode ser menor que ${before.soldCount} vagas ocupadas.` },
+      };
+    }
+    if (!Number.isFinite(priceCents) || priceCents < 0) {
+      await client.query('rollback');
+      return { statusCode: 400, payload: { message: 'Preco invalido.' } };
+    }
+    if (!['active', 'inactive', 'sold_out', 'scheduled', 'closed'].includes(input.status || '')) {
+      await client.query('rollback');
+      return { statusCode: 400, payload: { message: 'Status de lote invalido.' } };
+    }
+    if (input.status === 'active') {
+      const otherActive = await client.query(
+        `select 1 from ${table.lots}
+         where event_id = $1 and id <> $2 and status = 'active'
+         limit 1`,
+        [before.eventId, input.lotId],
+      );
+      if (otherActive.rows.length > 0) {
+        await client.query('rollback');
+        return {
+          statusCode: 409,
+          payload: { message: 'Ja existe outro lote ativo. Encerre-o antes de ativar este lote.' },
+        };
+      }
+    }
+    if (input.startsAt && input.endsAt && input.startsAt >= input.endsAt) {
+      await client.query('rollback');
+      return { statusCode: 400, payload: { message: 'O encerramento deve ser posterior ao inicio.' } };
+    }
+
+    const name = (input.name || '').trim() || before.name;
+    const startsAt = input.startsAt || '';
+    const endsAt = input.endsAt || '';
+
+    const updatedResult = await client.query(
+      `update ${table.lots}
+         set name = $2, capacity = $3, price_cents = $4, status = $5, starts_at = $6, ends_at = $7
+       where id = $1
+       returning id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity`,
+      [input.lotId, name, capacity, priceCents, input.status, startsAt, endsAt],
+    );
+    const after = mapLotConfigurationRow(updatedResult.rows[0]);
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'lot.updated', 'lot', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.lotId,
+        JSON.stringify({ reason: input.reason, before, after }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { statusCode: 200, payload: { lot: after } };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function snapshot() {
   const configurationIssue = getDatabaseConfigurationIssue();
 
