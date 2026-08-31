@@ -3000,11 +3000,20 @@ export type AdminParticipantRow = AdminRow & { attemptsCount: number };
 // canonical registration (paid > active > newest) is the row shown; every
 // attempt stays available as history. Filters/search/sort apply to the
 // canonical row exactly like the row-centric path.
-function getParticipantRows(url: URL, database: Database): {
+export type ParticipantResultSet = {
+  /** every person that survived event scope + consolidation + search + filters,
+   *  sorted, BEFORE any page slice. */
   rows: AdminParticipantRow[];
+  /** count of ALL those people (the whole result set, not a page). */
   peopleTotal: number;
-  historicalRegistrations: number;
-} {
+  /** sum of attemptsCount over ALL those people (the whole result set, not a
+   *  page). `peopleTotal` and `historicalRegistrationsTotal` therefore belong to
+   *  the same pre-pagination universe, so "N pessoas · M registros históricos"
+   *  is coherent on every page. */
+  historicalRegistrationsTotal: number;
+};
+
+function getParticipantRows(url: URL, database: Database): ParticipantResultSet {
   const { matchesRegistration, matchesRow, sortRows } = buildAdminRowFilters(url);
   const rows: AdminParticipantRow[] = [];
   for (const participant of consolidateParticipants(database.registrations)) {
@@ -3018,7 +3027,45 @@ function getParticipantRows(url: URL, database: Database): {
   return {
     rows: sorted,
     peopleTotal: sorted.length,
-    historicalRegistrations: sorted.reduce((sum, row) => sum + row.attemptsCount, 0),
+    historicalRegistrationsTotal: sorted.reduce((sum, row) => sum + row.attemptsCount, 0),
+  };
+}
+
+export type ParticipantsPage = {
+  registrations: AdminParticipantRow[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    people: number;
+    historicalRegistrations: number;
+  };
+};
+
+// ADMIN-003 Stage 2: build the person-centric page. `peopleTotal` and
+// `historicalRegistrationsTotal` are computed over the FULL filtered result set
+// first; only `registrations` is then sliced to the requested page. The totals
+// in `pagination` are always the global (pre-pagination) figures — page 2, 3, …
+// return the exact same `total` / `people` / `historicalRegistrations`.
+export function buildParticipantsPage(url: URL, database: Database): ParticipantsPage {
+  const { rows: people, peopleTotal, historicalRegistrationsTotal } = getParticipantRows(url, database);
+  const requestedPage = Math.max(Number.parseInt(url.searchParams.get('page') || '1', 10) || 1, 1);
+  const pageSize = url.searchParams.has('pageSize')
+    ? Math.min(Math.max(Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25, 1), 200)
+    : Math.max(people.length, 1);
+  const totalPages = Math.max(Math.ceil(peopleTotal / pageSize), 1);
+  const page = Math.min(requestedPage, totalPages);
+  return {
+    registrations: people.slice((page - 1) * pageSize, page * pageSize),
+    pagination: {
+      page,
+      pageSize,
+      total: peopleTotal,
+      totalPages,
+      people: peopleTotal,
+      historicalRegistrations: historicalRegistrationsTotal,
+    },
   };
 }
 
@@ -4278,18 +4325,8 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
     const eventScope = resolveDashboardEventScope(res, fullDatabase, url);
     if (!eventScope) return;
 
-    const { rows, peopleTotal, historicalRegistrations } = getParticipantRows(url, eventScope.scoped);
-    const pageSize = url.searchParams.has('pageSize')
-      ? Math.min(Math.max(Number.parseInt(url.searchParams.get('pageSize') || '25', 10) || 25, 1), 200)
-      : Math.max(rows.length, 1);
-    const total = peopleTotal;
-    const totalPages = Math.max(Math.ceil(total / pageSize), 1);
-    const page = Math.min(requestedPage, totalPages);
-    json(res, 200, {
-      registrations: rows.slice((page - 1) * pageSize, page * pageSize),
-      pagination: { page, pageSize, total, totalPages, people: peopleTotal, historicalRegistrations },
-      event: eventScope.context,
-    });
+    const { registrations, pagination } = buildParticipantsPage(url, eventScope.scoped);
+    json(res, 200, { registrations, pagination, event: eventScope.context });
     return;
   }
 

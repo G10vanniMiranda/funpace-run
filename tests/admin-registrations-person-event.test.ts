@@ -32,9 +32,8 @@ test('§53 GET /api/admin/registrations?view=people resolves an event scope then
   assert.match(handler, /url\.searchParams\.get\('view'\) === 'people'/);
   assert.match(handler, /resolveDashboardEventScope\(res, fullDatabase, url\)/);
   assert.match(handler, /if \(!eventScope\) return;/);
-  assert.match(handler, /getParticipantRows\(url, eventScope\.scoped\)/);
-  assert.match(handler, /people: peopleTotal, historicalRegistrations/);
-  assert.match(handler, /event: eventScope\.context,/);
+  assert.match(handler, /buildParticipantsPage\(url, eventScope\.scoped\)/);
+  assert.match(handler, /json\(res, 200, \{ registrations, pagination, event: eventScope\.context \}\)/);
 });
 
 test('§54 no "all events" / silent fallback — the resolver is the dashboard one', () => {
@@ -96,10 +95,17 @@ test('§57 filters/search/sort are shared between the row and person paths, with
   assert.match(participants, /row\.attemptsCount = participant\.history\.length;/);
 });
 
-test('§58 pagination paginates consolidated people, not registration rows', () => {
-  const handler = block(server, 'async function handleAdminRegistrations(', '\nasync function ');
-  assert.match(handler, /const total = peopleTotal;/);
-  assert.match(handler, /rows\.slice\(\(page - 1\) \* pageSize, page \* pageSize\)/);
+test('§58 pagination paginates consolidated people; totals are the pre-slice universe', () => {
+  const builder = block(server, 'export function buildParticipantsPage(', '\nasync function ');
+  // totals come from the FULL filtered result set, sliced only for `registrations`
+  assert.match(builder, /const \{ rows: people, peopleTotal, historicalRegistrationsTotal \} = getParticipantRows\(url, database\)/);
+  assert.match(builder, /registrations: people\.slice\(\(page - 1\) \* pageSize, page \* pageSize\)/);
+  assert.match(builder, /total: peopleTotal,/);
+  assert.match(builder, /people: peopleTotal,/);
+  assert.match(builder, /historicalRegistrations: historicalRegistrationsTotal,/);
+  const resultSet = block(server, 'function getParticipantRows(', 'export type ParticipantsPage');
+  assert.match(resultSet, /historicalRegistrationsTotal: sorted\.reduce\(\(sum, row\) => sum \+ row\.attemptsCount, 0\)/);
+  assert.match(resultSet, /peopleTotal: sorted\.length,/);
 });
 
 test('§60 the tab CSV is event-scoped + person-centric only under view=people; Stage 1 escapeCsv intact', () => {
