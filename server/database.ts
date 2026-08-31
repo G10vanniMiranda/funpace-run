@@ -20,6 +20,11 @@ import {
   resolveEmailDeliveryContextKey,
   type EmailDeliveryRecord,
 } from './email-delivery-history.js';
+import {
+  CONFIRMATION_EMAIL_OUTBOX_BATCH_SIZE,
+  CONFIRMATION_EMAIL_OUTBOX_LEASE_MS,
+  type ConfirmationEmailOutboxRecord,
+} from './confirmation-email-outbox.js';
 
 const { Pool } = pg;
 
@@ -269,6 +274,7 @@ export type Database = {
   payments: PaymentRecord[];
   paymentEvents: PaymentEventRecord[];
   emailDeliveries?: EmailDeliveryRecord[];
+  confirmationEmailOutbox?: ConfirmationEmailOutboxRecord[];
   googleSheetSyncs: GoogleSheetSyncRecord[];
   checkIns: CheckInRecord[];
   kitDeliveries: KitDeliveryRecord[];
@@ -372,6 +378,24 @@ function mapEmailDeliveryRow(row: Record<string, unknown>): EmailDeliveryRecord 
     updatedAt: String(row.updated_at),
   };
 }
+function mapConfirmationEmailOutboxRow(row: Record<string, unknown>): ConfirmationEmailOutboxRecord {
+  return {
+    id: String(row.id),
+    registrationId: String(row.registration_id),
+    eventId: row.event_id ? String(row.event_id) : null,
+    emailType: row.email_type as ConfirmationEmailOutboxRecord['emailType'],
+    status: row.status as ConfirmationEmailOutboxRecord['status'],
+    attempts: Number(row.attempts),
+    nextAttemptAt: String(row.next_attempt_at),
+    lockedAt: row.locked_at ? String(row.locked_at) : null,
+    lockedBy: row.locked_by ? String(row.locked_by) : null,
+    lastError: row.last_error ? String(row.last_error) : null,
+    source: row.source ? String(row.source) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    processedAt: row.processed_at ? String(row.processed_at) : null,
+  };
+}
 function mapGoogleSheetSyncRow(row: Record<string, unknown>): GoogleSheetSyncRecord {
   return {
     id: String(row.id),
@@ -449,6 +473,7 @@ const table = {
   payments: '"run-payments"',
   paymentEvents: '"run-payment-events"',
   emailDeliveries: '"run-email-deliveries"',
+  confirmationEmailOutbox: '"run-email-outbox"',
   googleSheetSyncs: '"run-google-sheet-sync"',
   checkIns: '"run-check-ins"',
   kitDeliveries: '"run-kit-deliveries"',
@@ -554,6 +579,7 @@ const initialDatabase: Database = {
   payments: [],
   paymentEvents: [],
   emailDeliveries: [],
+  confirmationEmailOutbox: [],
   googleSheetSyncs: [],
   checkIns: [],
   kitDeliveries: [],
@@ -626,6 +652,7 @@ function normalizeDatabase(database: Partial<Database>): Database {
     payments: database.payments || [],
     paymentEvents: database.paymentEvents || [],
     emailDeliveries: database.emailDeliveries || [],
+    confirmationEmailOutbox: database.confirmationEmailOutbox || [],
     googleSheetSyncs: database.googleSheetSyncs || [],
     checkIns: database.checkIns || [],
     kitDeliveries: database.kitDeliveries || [],
@@ -779,6 +806,29 @@ async function ensurePostgresDatabase(client: Queryable) {
         (status = 'attempting' and sent_at is null and failed_at is null)
         or (status = 'sent' and sent_at is not null and failed_at is null and error is null and provider_message_id is not null)
         or (status = 'failed' and sent_at is null and failed_at is not null and error is not null)
+      )
+    );
+    create table if not exists ${table.confirmationEmailOutbox} (
+      id text primary key,
+      registration_id text not null references ${table.registrations}(id),
+      event_id text,
+      email_type text not null check (email_type in ('confirmation')),
+      status text not null check (status in ('pending', 'processing', 'completed', 'failed')),
+      attempts integer not null default 0 check (attempts >= 0),
+      next_attempt_at text not null,
+      locked_at text,
+      locked_by text,
+      last_error text,
+      source text,
+      created_at text not null,
+      updated_at text not null,
+      processed_at text,
+      constraint "run-email-outbox_registration_type_key" unique (registration_id, email_type),
+      constraint "run-email-outbox_status_shape_check" check (
+        (status = 'pending' and locked_by is null)
+        or (status = 'processing' and locked_at is not null and locked_by is not null)
+        or (status = 'completed' and processed_at is not null)
+        or (status = 'failed' and processed_at is not null)
       )
     );
     create table if not exists ${table.googleSheetSyncs} (
@@ -986,6 +1036,8 @@ async function ensurePostgresDatabase(client: Queryable) {
     create unique index if not exists "run-email-deliveries_provider_message_id_idx" on ${table.emailDeliveries}(provider, provider_message_id) where provider_message_id is not null and btrim(provider_message_id) <> '';
     create index if not exists "run-email-deliveries_registration_created_idx" on ${table.emailDeliveries}(registration_id, created_at asc);
     create index if not exists "run-email-deliveries_status_attempted_idx" on ${table.emailDeliveries}(status, attempted_at asc);
+    create index if not exists "run-email-outbox_due_idx" on ${table.confirmationEmailOutbox}(next_attempt_at asc) where status = 'pending';
+    create index if not exists "run-email-outbox_processing_idx" on ${table.confirmationEmailOutbox}(locked_at asc) where status = 'processing';
     create index if not exists "run-google-sheet-sync_status_idx" on ${table.googleSheetSyncs}(status);
     create index if not exists "run-google-sheet-sync_entity_idx" on ${table.googleSheetSyncs}(entity_type, entity_id);
     create index if not exists "run-google-sheet-sync_updated_at_idx" on ${table.googleSheetSyncs}(updated_at);
@@ -1287,6 +1339,7 @@ export async function readPostgresDatabase(
       payments: [],
       paymentEvents: [],
       emailDeliveries: [],
+      confirmationEmailOutbox: [],
       googleSheetSyncs: [],
       checkIns: [],
       kitDeliveries: [],
@@ -1329,6 +1382,7 @@ export async function readPostgresDatabase(
     payments: ['all', 'registration-status', 'checkout', 'admin-registrations', 'admin-dashboard'].includes(scope),
     paymentEvents: ['all', 'checkout', 'admin-registrations', 'admin-dashboard'].includes(scope),
     emailDeliveries: ['all', 'checkout', 'admin-registrations'].includes(scope),
+    confirmationEmailOutbox: ['all'].includes(scope),
     googleSheetSyncs: ['all', 'admin-registrations'].includes(scope),
     checkIns: ['all', 'admin-registrations', 'admin-dashboard'].includes(scope),
     kitDeliveries: ['all', 'admin-registrations', 'admin-dashboard'].includes(scope),
@@ -1398,6 +1452,7 @@ export async function readPostgresDatabase(
       ? (dashboardEventId ? await client.query(`${LEAN_PAYMENT_EVENT_SELECT} pe where exists (select 1 from ${table.payments} p join ${table.registrations} r on r.id = p.registration_id where p.id = pe.payment_id and r.event_id = $1)`, eventScopedParams) : emptyRows)
       : await client.query(`select id, payment_id, provider_event_id, event_type, payload, received_at from ${table.paymentEvents}`);
   const emailDeliveries = include.emailDeliveries ? await client.query(`select id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider, provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at from ${table.emailDeliveries}`) : emptyRows;
+  const confirmationEmailOutbox = include.confirmationEmailOutbox ? await client.query(`select id, registration_id, event_id, email_type, status, attempts, next_attempt_at, locked_at, locked_by, last_error, source, created_at, updated_at, processed_at from ${table.confirmationEmailOutbox}`) : emptyRows;
   const googleSheetSyncs = include.googleSheetSyncs ? await client.query(`select id, entity_type, entity_id, sheet_name, operation, status, row_number, attempts, last_attempt_at, synchronized_at, last_error, created_at, updated_at from ${table.googleSheetSyncs}`) : emptyRows;
   const checkIns = !include.checkIns ? emptyRows
     : leanDashboard
@@ -1507,6 +1562,7 @@ export async function readPostgresDatabase(
       receivedAt: row.received_at,
     })),
     emailDeliveries: emailDeliveries.rows.map(mapEmailDeliveryRow),
+    confirmationEmailOutbox: confirmationEmailOutbox.rows.map(mapConfirmationEmailOutboxRow),
     googleSheetSyncs: googleSheetSyncs.rows.map(mapGoogleSheetSyncRow),
     checkIns: checkIns.rows.map((row) => ({
       id: row.id,
@@ -1795,6 +1851,30 @@ async function savePostgresDatabase(client: Queryable, database: Database) {
         item.id, item.registrationId, item.kind, item.recipientEmail, item.recipientHash, item.contextKey,
         item.idempotencyKey, item.provider, item.providerMessageId, item.status, item.attemptCount,
         item.attemptedAt, item.sentAt, item.failedAt, item.error, item.metadata, item.createdAt, item.updatedAt,
+      ],
+    );
+  }
+  for (const item of database.confirmationEmailOutbox || []) {
+    await client.query(
+      `insert into ${table.confirmationEmailOutbox}
+       (id, registration_id, event_id, email_type, status, attempts, next_attempt_at, locked_at, locked_by,
+        last_error, source, created_at, updated_at, processed_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       on conflict (id) do update set
+         event_id = excluded.event_id,
+         status = excluded.status,
+         attempts = excluded.attempts,
+         next_attempt_at = excluded.next_attempt_at,
+         locked_at = excluded.locked_at,
+         locked_by = excluded.locked_by,
+         last_error = excluded.last_error,
+         source = excluded.source,
+         updated_at = excluded.updated_at,
+         processed_at = excluded.processed_at`,
+      [
+        item.id, item.registrationId, item.eventId, item.emailType, item.status, item.attempts,
+        item.nextAttemptAt, item.lockedAt, item.lockedBy, item.lastError, item.source,
+        item.createdAt, item.updatedAt, item.processedAt,
       ],
     );
   }
@@ -2655,6 +2735,15 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
       await insertPartnerAudit(client, { partnerId: row.partner_id, action: 'webhook.received', registrationId: row.id, eventId: row.event_id, metadata: { ...partnerMetadata, eventType: input.eventType, providerEventId: input.providerEventId, gatewayStatus: input.gatewayStatus }, createdAt: now });
       await insertPartnerAudit(client, { partnerId: row.partner_id, action: 'payment.approved', registrationId: row.id, eventId: row.event_id, oldData: { status: row.status }, newData: { status: 'paid', amountCents: Number(row.amount_cents) }, metadata: { ...partnerMetadata, providerTransactionId: input.providerTransactionId }, createdAt: now });
     }
+    // EMAIL-OPS-002 — the confirmation-email obligation commits ATOMICALLY with
+    // PAID. If this enqueue throws, the whole payment-confirmation transaction
+    // rolls back (catch below). Idempotent on (registration_id, email_type), so
+    // a duplicate webhook or a re-confirmation never creates a second obligation.
+    await enqueueConfirmationEmailInPostgres(client, row.id, {
+      eventId: row.event_id,
+      source: input.auditAction || 'payment_confirmation',
+      now,
+    });
     await client.query('commit');
     return { statusCode: 200, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, duplicated: duplicate };
   } catch (error) {
@@ -3684,6 +3773,17 @@ export async function claimRegistrationEmailInPostgres(
     const row = result.rows[0];
 
     if (!row || row.status !== 'paid') {
+      // EMAIL-OPS-002 §12 — no silent null. Record why the claim was declined.
+      await client.query(
+        `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+         values ($1, 'system', 'email.confirmation.claim_skipped', 'registration', $2, $3, $4)`,
+        [randomUUID(), registrationId, {
+          provider,
+          reason: !row ? 'no_registration' : 'not_paid_at_claim',
+          status: row?.status || null,
+          contextKey: options.contextKey || null,
+        }, new Date().toISOString()],
+      );
       await client.query('commit');
       return null;
     }
@@ -3707,12 +3807,30 @@ export async function claimRegistrationEmailInPostgres(
     const recentAttempt = existing?.status === 'attempting'
       && Date.now() - new Date(existing.attemptedAt).getTime() < EMAIL_DELIVERY_COOLDOWN_MS;
 
-    if (existing?.status === 'sent' || recentAttempt || !canClaimEmailDeliveryAfterLegacySummary({
+    const canClaimAfterLegacy = canClaimEmailDeliveryAfterLegacySummary({
       legacySentAt: row.confirmation_email_sent_at,
       force: options.force,
       contextKey: options.contextKey,
       existingDelivery: Boolean(existing),
-    })) {
+    });
+    if (existing?.status === 'sent' || recentAttempt || !canClaimAfterLegacy) {
+      // EMAIL-OPS-002 §12 — no silent null. Record the specific gate that
+      // declined the claim. 'already_sent' / 'legacy_summary_present' are
+      // expected duplicate suppression and never raise an alert.
+      await client.query(
+        `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+         values ($1, 'system', 'email.confirmation.claim_skipped', 'registration', $2, $3, $4)`,
+        [randomUUID(), registrationId, {
+          provider,
+          reason: existing?.status === 'sent'
+            ? 'already_sent'
+            : recentAttempt
+              ? 'recent_attempt'
+              : 'legacy_summary_present',
+          deliveryId: existing?.id || null,
+          contextKey: options.contextKey || null,
+        }, new Date().toISOString()],
+      );
       await client.query('commit');
       return null;
     }
@@ -3924,6 +4042,226 @@ export async function completeRegistrationEmailInPostgres(
   } finally {
     client.release();
   }
+}
+
+// ---------------------------------------------------------------------------
+// EMAIL-OPS-002 — confirmation-email outbox (durable obligation layer)
+// ---------------------------------------------------------------------------
+// Separate bounded context from run-google-sheet-sync. run-email-deliveries
+// stays the send-idempotency ledger; this table is the durable "email owed"
+// obligation. Enqueue happens inside the payment transaction so a committed
+// PAID always implies a committed obligation.
+
+// Enqueue on an EXISTING transaction/client (called from confirmPaymentInPostgres).
+// If this throws, the caller's payment transaction rolls back. The unique
+// (registration_id, email_type) + ON CONFLICT DO NOTHING absorb duplicate
+// webhooks and repeated confirmation passes.
+export async function enqueueConfirmationEmailInPostgres(
+  client: Queryable,
+  registrationId: string,
+  options: { eventId?: string | null; emailType?: 'confirmation'; source?: string | null; now?: string } = {},
+): Promise<void> {
+  const trimmedId = String(registrationId || '').trim();
+  if (!trimmedId) return;
+  const now = options.now || new Date().toISOString();
+  await client.query(
+    `insert into ${table.confirmationEmailOutbox}
+       (id, registration_id, event_id, email_type, status, attempts, next_attempt_at,
+        locked_at, locked_by, last_error, source, created_at, updated_at, processed_at)
+     values ($1, $2, $3, $4, 'pending', 0, $5, null, null, null, $6, $5, $5, null)
+     on conflict (registration_id, email_type) do nothing`,
+    [randomUUID(), trimmedId, options.eventId ?? null, options.emailType || 'confirmation', now, options.source ?? null],
+  );
+}
+
+// Stand-alone enqueue for callers NOT already inside a payment transaction
+// (Admin manual recovery). Idempotent: repeated calls never pile up.
+export async function enqueueConfirmationEmailObligationInPostgres(
+  registrationId: string,
+  options: { emailType?: 'confirmation'; source?: string | null } = {},
+): Promise<'created' | 'rearmed' | 'exists' | 'unknown_registration'> {
+  const client = await requirePool().connect();
+  const emailType = options.emailType || 'confirmation';
+  const source = options.source ?? 'admin_recovery';
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    const registration = await client.query(
+      `select event_id from ${table.registrations} where id = $1 for update`,
+      [registrationId],
+    );
+    if (registration.rowCount !== 1) {
+      await client.query('rollback');
+      return 'unknown_registration';
+    }
+    const existing = await client.query(
+      `select status from ${table.confirmationEmailOutbox}
+       where registration_id = $1 and email_type = $2 for update`,
+      [registrationId, emailType],
+    );
+    const now = new Date().toISOString();
+    if (!existing.rowCount) {
+      await enqueueConfirmationEmailInPostgres(client, registrationId, {
+        eventId: registration.rows[0].event_id,
+        emailType,
+        source,
+        now,
+      });
+      await client.query('commit');
+      return 'created';
+    }
+    // A row already occupies the (registration, email_type) slot. An in-flight
+    // obligation (pending / processing) is left untouched. A terminal one
+    // (completed / failed) is RE-ARMED — this path is only ever reached from an
+    // explicit operator "resend" after a failed manual attempt, so a fresh
+    // durable retry is exactly the intent. Automatic enqueue from the payment
+    // transaction keeps its ON CONFLICT DO NOTHING and never re-arms.
+    if (['completed', 'failed'].includes(existing.rows[0].status)) {
+      await client.query(
+        `update ${table.confirmationEmailOutbox}
+         set status = 'pending', attempts = 0, next_attempt_at = $2, locked_at = null, locked_by = null,
+             last_error = null, processed_at = null, source = $3, updated_at = $2
+         where registration_id = $1 and email_type = $4`,
+        [registrationId, now, source, emailType],
+      );
+      await client.query('commit');
+      return 'rearmed';
+    }
+    await client.query('commit');
+    return 'exists';
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Return crashed 'processing' tasks (lease expired) to 'pending'.
+export async function reclaimStaleConfirmationEmailOutboxInPostgres(now = new Date().toISOString()): Promise<number> {
+  await ensurePostgresReady();
+  const threshold = new Date(new Date(now).getTime() - CONFIRMATION_EMAIL_OUTBOX_LEASE_MS).toISOString();
+  const result = await requirePool().query(
+    `update ${table.confirmationEmailOutbox}
+     set status = 'pending', locked_at = null, locked_by = null, next_attempt_at = $1, updated_at = $1
+     where status = 'processing' and locked_at is not null and locked_at < $2`,
+    [now, threshold],
+  );
+  return result.rowCount || 0;
+}
+
+// Concurrency-safe batch claim: FOR UPDATE SKIP LOCKED, oldest eligible first,
+// bounded. Two workers never claim the same row.
+export async function claimDueConfirmationEmailOutboxInPostgres(
+  lockedBy: string,
+  limit = CONFIRMATION_EMAIL_OUTBOX_BATCH_SIZE,
+  now = new Date().toISOString(),
+): Promise<ConfirmationEmailOutboxRecord[]> {
+  const client = await requirePool().connect();
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    const claimed = await client.query(
+      `with due as (
+         select id from ${table.confirmationEmailOutbox}
+         where status = 'pending' and next_attempt_at <= $1
+         order by next_attempt_at asc, created_at asc, id asc
+         limit $2
+         for update skip locked
+       )
+       update ${table.confirmationEmailOutbox} o
+       set status = 'processing', locked_at = $1, locked_by = $3, updated_at = $1
+       from due
+       where o.id = due.id
+       returning o.id, o.registration_id, o.event_id, o.email_type, o.status, o.attempts, o.next_attempt_at,
+                 o.locked_at, o.locked_by, o.last_error, o.source, o.created_at, o.updated_at, o.processed_at`,
+      [now, Math.max(1, limit), lockedBy],
+    );
+    await client.query('commit');
+    return claimed.rows.map(mapConfirmationEmailOutboxRow);
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Terminal writes are lease-ownership guarded: `status = 'processing' AND
+// locked_by = $expectedLockedBy`. If a stale-reclaim already returned the task
+// to the pool and another drain re-claimed it, an abandoned worker's late
+// terminal write no-ops instead of clobbering the current owner's lease. The
+// boolean reports whether this worker still owned the row.
+export async function completeConfirmationEmailOutboxInPostgres(
+  id: string,
+  expectedLockedBy: string,
+  now = new Date().toISOString(),
+): Promise<boolean> {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `update ${table.confirmationEmailOutbox}
+     set status = 'completed', locked_at = null, locked_by = null, processed_at = $3, updated_at = $3
+     where id = $1 and status = 'processing' and locked_by = $2`,
+    [id, expectedLockedBy, now],
+  );
+  return (result.rowCount || 0) > 0;
+}
+
+export async function rescheduleConfirmationEmailOutboxInPostgres(
+  id: string,
+  expectedLockedBy: string,
+  attempts: number,
+  nextAttemptAt: string,
+  lastError: string,
+  now = new Date().toISOString(),
+): Promise<boolean> {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `update ${table.confirmationEmailOutbox}
+     set status = 'pending', attempts = $3, next_attempt_at = $4, last_error = $5,
+         locked_at = null, locked_by = null, updated_at = $6
+     where id = $1 and status = 'processing' and locked_by = $2`,
+    [id, expectedLockedBy, attempts, nextAttemptAt, String(lastError || '').slice(0, 500), now],
+  );
+  return (result.rowCount || 0) > 0;
+}
+
+export async function failConfirmationEmailOutboxInPostgres(
+  id: string,
+  expectedLockedBy: string,
+  attempts: number,
+  lastError: string,
+  now = new Date().toISOString(),
+): Promise<boolean> {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `update ${table.confirmationEmailOutbox}
+     set status = 'failed', attempts = $3, last_error = $4, locked_at = null, locked_by = null,
+         processed_at = $5, updated_at = $5
+     where id = $1 and status = 'processing' and locked_by = $2`,
+    [id, expectedLockedBy, attempts, String(lastError || '').slice(0, 500), now],
+  );
+  return (result.rowCount || 0) > 0;
+}
+
+// Durable-state probe: lets the worker tell "already satisfied" from "still
+// owed" when the canonical sender declines a claim and returns null.
+export async function getConfirmationEmailDurableStateInPostgres(
+  registrationId: string,
+): Promise<{ hasSentDelivery: boolean; legacySentAt: string | null }> {
+  await ensurePostgresReady();
+  const result = await requirePool().query(
+    `select
+       (select count(*) from ${table.emailDeliveries}
+         where registration_id = $1 and kind = 'confirmation' and status = 'sent')::int as sent_count,
+       (select confirmation_email_sent_at from ${table.registrations} where id = $1) as legacy_sent_at`,
+    [registrationId],
+  );
+  const row = result.rows[0] || {};
+  return {
+    hasSentDelivery: Number(row.sent_count || 0) > 0,
+    legacySentAt: row.legacy_sent_at ? String(row.legacy_sent_at) : null,
+  };
 }
 
 export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promise<GoogleSheetSyncRecord> {

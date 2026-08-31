@@ -10,6 +10,13 @@ import {
   claimRegistrationEmailInPostgres,
   completeRegistrationEmailInPostgres,
   confirmPaymentInPostgres,
+  claimDueConfirmationEmailOutboxInPostgres,
+  completeConfirmationEmailOutboxInPostgres,
+  enqueueConfirmationEmailObligationInPostgres,
+  failConfirmationEmailOutboxInPostgres,
+  getConfirmationEmailDurableStateInPostgres,
+  reclaimStaleConfirmationEmailOutboxInPostgres,
+  rescheduleConfirmationEmailOutboxInPostgres,
   createAdminSessionInPostgres,
   createPendingRegistrationInPostgres,
   findAdminSessionInPostgres,
@@ -67,6 +74,12 @@ import {
   isLatestEmailDelivery,
   upsertEmailDeliveryOutboxInMemory,
 } from './email-delivery-history.js';
+import {
+  CONFIRMATION_EMAIL_OUTBOX_BATCH_SIZE,
+  CONFIRMATION_EMAIL_OUTBOX_DRAIN_BUDGET_MS,
+  classifyConfirmationSenderResult,
+  resolveOutboxTask,
+} from './confirmation-email-outbox.js';
 import {
   processGoogleSheetSync,
   processGoogleSheetSyncBacklog,
@@ -2555,8 +2568,24 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     const googleSheetSyncs = result.registrationId && result.paymentId
       ? await queueConfirmedPaymentGoogleSheetSync(result.registrationId, result.paymentId)
       : [];
+    // EMAIL-OPS-002 — the confirmation-email obligation is already durably
+    // committed inside confirmPaymentInPostgres. This immediate attempt is a
+    // latency optimisation ONLY: any failure is logged (never silently absorbed
+    // by Promise.allSettled) and the 5-minute /api/cron/confirmation-emails
+    // drain stays authoritative for the payment -> email invariant.
+    const immediateEmailAttempt = result.registrationId
+      ? processPaymentConfirmationEmail(req, result.registrationId).catch((error) => {
+        console.error(JSON.stringify({
+          at: new Date().toISOString(),
+          message: 'confirmation_email_immediate_attempt_failed',
+          registrationId: result.registrationId,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        return null;
+      })
+      : Promise.resolve(null);
     await Promise.allSettled([
-      result.registrationId ? processPaymentConfirmationEmail(req, result.registrationId) : Promise.resolve(),
+      immediateEmailAttempt,
       processQueuedGoogleSheetSyncs(googleSheetSyncs),
       result.registrationId ? queueConfirmedMetaPurchase(result.registrationId) : Promise.resolve(),
     ]);
@@ -3571,6 +3600,132 @@ async function handleGoogleSheetsRecovery(req: IncomingMessage, res: ServerRespo
   });
 }
 
+// EMAIL-OPS-002 — confirmation-email outbox drain. A dedicated bounded context:
+// it never touches Google Sheets sync or payment reconciliation. The durable
+// obligation is enqueued atomically with PAID (see confirmPaymentInPostgres);
+// this worker is what guarantees the payment -> email invariant is eventually
+// satisfied. run-email-deliveries + the Resend Idempotency-Key remain the
+// layered send-idempotency defences underneath it.
+async function processConfirmationEmailOutbox(
+  runId: string,
+  batchSize = CONFIRMATION_EMAIL_OUTBOX_BATCH_SIZE,
+) {
+  const summary = { reclaimed: 0, claimed: 0, completed: 0, rescheduled: 0, failed: 0, alerted: 0, deferred: 0, lostLease: 0 };
+  if (!usesPostgresDatabase()) return summary;
+
+  const deadline = Date.now() + CONFIRMATION_EMAIL_OUTBOX_DRAIN_BUDGET_MS;
+  summary.reclaimed = await reclaimStaleConfirmationEmailOutboxInPostgres();
+  const due = await claimDueConfirmationEmailOutboxInPostgres(runId, batchSize);
+  summary.claimed = due.length;
+
+  for (const task of due) {
+    const nowISO = new Date().toISOString();
+    // Wall-clock guard: never let one serverless invocation run past its
+    // budget. Any task we claimed but did not touch is released back to
+    // 'pending' immediately (no attempt increment) for the next 5-minute drain.
+    if (Date.now() > deadline) {
+      await rescheduleConfirmationEmailOutboxInPostgres(task.id, runId, task.attempts, nowISO, 'deferred: drain time budget', nowISO);
+      summary.deferred += 1;
+      continue;
+    }
+    let senderResult:
+      | { ok?: boolean; skipped?: boolean; provider?: string; error?: string | null; providerMessageId?: string | null }
+      | null = null;
+    try {
+      // No contextKey / no force: the outbox MUST use the same default
+      // idempotency key as the webhook's immediate attempt, so that a prior
+      // successful send short-circuits the claim (existing.status === 'sent')
+      // instead of sending a second email. A non-empty contextKey would bypass
+      // the legacy-summary guard — that bypass is only for deliberate
+      // operator-triggered re-sends, never for automatic recovery.
+      senderResult = await processRegistrationEmail(task.registrationId);
+    } catch (error) {
+      senderResult = {
+        ok: false,
+        provider: getEmailProvider(),
+        error: error instanceof Error ? error.message : 'Unknown email error',
+      };
+    }
+
+    // Only probe the durable ledger when this attempt did not itself produce a
+    // provider-accepted send — that is when "already satisfied" vs "still owed"
+    // actually needs deciding.
+    let durable: { hasSentDelivery: boolean; legacySentAt: string | null } = {
+      hasSentDelivery: false,
+      legacySentAt: null,
+    };
+    if (!(senderResult && senderResult.ok && senderResult.providerMessageId)) {
+      durable = await getConfirmationEmailDurableStateInPostgres(task.registrationId).catch(() => durable);
+    }
+
+    const signal = classifyConfirmationSenderResult(senderResult, durable);
+    const resolution = resolveOutboxTask(task, signal, nowISO);
+
+    // Every terminal write is lease-ownership guarded. A `false` return means a
+    // stale-reclaim handed this task to another drain while our send was in
+    // flight — that drain owns the outcome now, so we record nothing and never
+    // raise an alert for a task we no longer control.
+    if (resolution.action === 'complete') {
+      const owned = await completeConfirmationEmailOutboxInPostgres(task.id, runId, nowISO);
+      if (owned) summary.completed += 1;
+      else summary.lostLease += 1;
+      continue;
+    }
+    if (resolution.action === 'retry') {
+      const owned = await rescheduleConfirmationEmailOutboxInPostgres(
+        task.id,
+        runId,
+        resolution.attempts,
+        resolution.nextAttemptAt,
+        resolution.lastError,
+        nowISO,
+      );
+      if (owned) summary.rescheduled += 1;
+      else summary.lostLease += 1;
+      continue;
+    }
+    const failedOwned = await failConfirmationEmailOutboxInPostgres(task.id, runId, resolution.attempts, resolution.lastError, nowISO);
+    if (!failedOwned) {
+      summary.lostLease += 1;
+      continue;
+    }
+    summary.failed += 1;
+    if (resolution.alert) {
+      summary.alerted += 1;
+      // No PII: the registration id is an opaque UUID.
+      await recordOperationalAlert({
+        dedupeKey: `confirmation-email-outbox:${task.registrationId}`,
+        severity: 'critical',
+        alertType: 'confirmation_email_unrecoverable',
+        title: 'E-mail de confirmação não recuperável',
+        message: `A inscrição ${task.registrationId} esgotou as tentativas de envio do e-mail de confirmação.`,
+        entityType: 'registration',
+        entityId: task.registrationId,
+        payload: { attempts: resolution.attempts },
+      });
+    }
+  }
+  return summary;
+}
+
+async function handleConfirmationEmailRecovery(req: IncomingMessage, res: ServerResponse) {
+  if (!isAuthorizedCron(req)) {
+    json(res, cronSecret ? 401 : 503, { message: cronSecret ? 'Nao autorizado.' : 'CRON_SECRET nao configurado.' });
+    return;
+  }
+  const startedAt = Date.now();
+  const runId = `cron-confirmation-emails-${randomUUID()}`;
+  const summary = await processConfirmationEmailOutbox(runId);
+  console.log(JSON.stringify({
+    at: new Date().toISOString(),
+    message: 'confirmation_email_outbox_processed',
+    runId,
+    ...summary,
+    elapsedMs: Date.now() - startedAt,
+  }));
+  json(res, 200, { success: true, ...summary, elapsedMs: Date.now() - startedAt });
+}
+
 const EVENT_SCOPE_ERROR_MESSAGE: Record<EventScopeErrorCode, string> = {
   EVENT_NOT_FOUND: 'Evento nao encontrado.',
   NO_PUBLISHED_EVENT: 'Nenhum evento publicado.',
@@ -4167,6 +4322,19 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
     const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
     const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId)!;
     if (!emailResult?.ok) {
+      // EMAIL-OPS-002 §17 — a failed manual attempt still leaves a durable
+      // recovery obligation so the 5-minute outbox drain retries it. Idempotent
+      // on (registration_id, email_type): clicking again never piles up work.
+      if (usesPostgresDatabase() && !emailResult?.skipped) {
+        await enqueueConfirmationEmailObligationInPostgres(registrationId, { source: 'admin_recovery' }).catch((error) => {
+          console.error(JSON.stringify({
+            at: new Date().toISOString(),
+            message: 'confirmation_email_admin_recovery_enqueue_failed',
+            registrationId,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        });
+      }
       json(res, 502, {
         message: `Nao foi possivel enviar o email: ${emailResult?.error || refreshedRegistration.confirmationEmailError || 'falha desconhecida'}`,
         registration: toAdminRow(refreshed, refreshedRegistration),
@@ -5277,6 +5445,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     if (req.method === 'GET' && url.pathname === '/api/cron/meta') {
       await handleMetaRecovery(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/cron/confirmation-emails') {
+      await handleConfirmationEmailRecovery(req, res);
       return;
     }
 
