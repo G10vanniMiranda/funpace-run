@@ -127,6 +127,11 @@ export const percentFormatter = new Intl.NumberFormat('pt-BR', { minimumFraction
 export const integerFormatter = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 0 });
 const formatPercent = (value: number | undefined) => `${percentFormatter.format(Number(value) || 0)}%`;
 const formatCount = (value: number | undefined) => integerFormatter.format(Number(value) || 0);
+// ADMIN-003 Stage 3: the backend withholds `amountCents` (and other financial
+// fields) from the `operation` role, so currency renders must tolerate its
+// absence and show a neutral placeholder instead of `R$ NaN`.
+const formatCentsBRL = (cents: number | null | undefined) =>
+  typeof cents === 'number' && Number.isFinite(cents) ? currencyFormatter.format(cents / 100) : '—';
 
 // ADMIN-002 Stage 7B §13 — lot capacity status carries text, never colour alone.
 export const LOT_LEVEL_LABEL: Record<string, string> = {
@@ -429,6 +434,14 @@ export function AdminPage() {
       return;
     }
 
+    // ADMIN-003 Stage 3: exporting the registrations base is administrator /
+    // finance only. The backend returns 403 for `operation` — this is just so
+    // the client never fires a request it knows will be refused.
+    if (adminRole === 'operation') {
+      setError('Exportação de inscrições não disponível para o seu perfil.');
+      return;
+    }
+
     setError('');
     try {
       const response = await fetch(csvUrl, { credentials: 'include' });
@@ -581,6 +594,7 @@ export function AdminPage() {
             onOpenSidebar={() => setSidebarOpen(true)}
             onRefresh={() => void loadAdminData()}
             onExport={() => void downloadCsv()}
+            canExport={adminRole !== 'operation'}
             actor={adminActor}
             onLogout={() => void handleLogout()}
           />
@@ -798,6 +812,7 @@ function AdminSection({
       <ControlSummary dashboard={dashboard} registrations={registrations} loading={loading && !summary} />
       <RegistrationsPanel
         adminKey={adminKey}
+        adminRole={adminRole}
         summary={summary}
         registrations={registrations}
         filters={filters}
@@ -927,6 +942,7 @@ function Topbar({
   onOpenSidebar,
   onRefresh,
   onExport,
+  canExport,
   actor,
   onLogout,
 }: {
@@ -936,6 +952,7 @@ function Topbar({
   onOpenSidebar: () => void;
   onRefresh: () => void;
   onExport: () => void;
+  canExport: boolean;
   actor: string;
   onLogout: () => void;
 }) {
@@ -972,7 +989,7 @@ function Topbar({
             <span className="hidden sm:inline">Atualizar</span>
           </button>}
           <button type="button" onClick={onLogout} className="min-h-10 border border-white/10 px-3 text-xs font-bold uppercase text-zinc-300 hover:border-red-400 hover:text-red-300">Sair</button>
-          {activeNav !== 'partners' && <button
+          {activeNav !== 'partners' && canExport && <button
             type="button"
             onClick={onExport}
             className="flex min-h-10 items-center gap-2 bg-brand px-3 text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white"
@@ -2426,6 +2443,7 @@ function MetricBox({
 
 function RegistrationsPanel({
   adminKey,
+  adminRole,
   summary,
   registrations,
   filters,
@@ -2440,6 +2458,7 @@ function RegistrationsPanel({
   onOpenRegistration,
 }: {
   adminKey: string;
+  adminRole: AdminRole | null;
   summary: AdminSummaryResponse | null;
   registrations: AdminRegistration[];
   filters: AdminFilters;
@@ -2454,6 +2473,10 @@ function RegistrationsPanel({
   onOpenRegistration: (registration: AdminRegistration) => void;
 }) {
   const [syncingId, setSyncingId] = useState('');
+  // ADMIN-003 Stage 3: the `operation` role never receives financial fields
+  // from the backend — hide the "Valor" column and its sort so the surface
+  // matches the contract.
+  const showFinancialColumn = adminRole !== 'operation';
 
   // ADMIN-003 Stage 2 §8/§29: 2+ published events (or an unknown/closed slug
   // that no longer resolves) → require an explicit human choice. No table, no
@@ -2576,7 +2599,7 @@ function RegistrationsPanel({
             )}
           </span>
           <div className="flex flex-wrap items-center gap-2">
-            <SelectFilter value={filters.sortBy} onChange={(value) => onFiltersChange({ ...filters, sortBy: value, page: '1' })} options={[{ value: 'createdAt', label: 'Ordenar por data' }, { value: 'fullName', label: 'Ordenar por nome' }, { value: 'status', label: 'Ordenar por status' }, { value: 'amountCents', label: 'Ordenar por valor' }, { value: 'bibNumber', label: 'Ordenar por peito' }]} />
+            <SelectFilter value={filters.sortBy} onChange={(value) => onFiltersChange({ ...filters, sortBy: value, page: '1' })} options={[{ value: 'createdAt', label: 'Ordenar por data' }, { value: 'fullName', label: 'Ordenar por nome' }, { value: 'status', label: 'Ordenar por status' }, ...(showFinancialColumn ? [{ value: 'amountCents', label: 'Ordenar por valor' }] : []), { value: 'bibNumber', label: 'Ordenar por peito' }]} />
             <SelectFilter value={filters.sortOrder} onChange={(value) => onFiltersChange({ ...filters, sortOrder: value, page: '1' })} options={[{ value: 'desc', label: 'Decrescente' }, { value: 'asc', label: 'Crescente' }]} />
             <SelectFilter value={filters.pageSize} onChange={(value) => onFiltersChange({ ...filters, pageSize: value, page: '1' })} options={[{ value: '25', label: '25 por pagina' }, { value: '50', label: '50 por pagina' }, { value: '100', label: '100 por pagina' }]} />
             <button type="button" onClick={() => onFiltersChange({ status: '', distanceId: '', lotId: '', q: '', page: '1', pageSize: filters.pageSize, city: '', team: '', shirtSize: '', bibNumber: '', sortBy: 'createdAt', sortOrder: 'desc', sheetStatus: '' })} className="border border-white/10 px-3 py-2 font-black uppercase hover:border-brand hover:text-brand">Limpar filtros</button>
@@ -2598,7 +2621,7 @@ function RegistrationsPanel({
                 <th className="p-4">Prova</th>
                 <th className="p-4">Lote</th>
                 <th className="p-4">Pagamento</th>
-                <th className="p-4">Valor</th>
+                {showFinancialColumn && <th className="p-4">Valor</th>}
                 <th className="p-4">Inscrição</th>
                 <th className="p-4 text-right">Ação</th>
               </tr>
@@ -2637,7 +2660,7 @@ function RegistrationsPanel({
                   <td className="p-4">
                     <PaymentStatus status={registration.status} />
                   </td>
-                  <td className="p-4 font-mono font-bold">{currencyFormatter.format(registration.amountCents / 100)}</td>
+                  {showFinancialColumn && <td className="p-4 font-mono font-bold">{formatCentsBRL(registration.amountCents)}</td>}
                   <td className="p-4 font-mono text-xs text-zinc-500">{dateTimeFormatter.format(new Date(registration.createdAt))}</td>
                   <td className="p-4 text-right">
                     <button type="button" disabled={syncingId === registration.id} onClick={() => void (async () => { setSyncingId(registration.id); try { await syncAdminRegistrationToGoogleSheets(adminKey, registration.id); } finally { setSyncingId(''); } })()} className="mr-2 inline-flex min-h-10 items-center gap-2 border border-white/10 px-3 text-xs font-black uppercase text-zinc-300 hover:border-brand hover:text-brand disabled:opacity-40"><RefreshCcw className="h-4 w-4" />Sheets</button>
@@ -2800,6 +2823,8 @@ function AthleteDrawer({
   const canHandleOperation = canAssignBib;
   const canResendEmail = adminRole === 'administrator' || adminRole === 'finance';
   const canCancelRegistration = adminRole === 'administrator';
+  // ADMIN-003 Stage 3: `operation` gets no financial data from the backend.
+  const canSeeFinancial = adminRole === 'administrator' || adminRole === 'finance';
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/75">
@@ -2844,11 +2869,11 @@ function AthleteDrawer({
         <div className="mt-5 grid gap-4 sm:grid-cols-[160px_1fr]">
           <OperationalQr registrationId={registration.id} />
           <div className="border border-white/10 bg-white/3 p-4">
-            <p className="text-xs font-black uppercase tracking-widest text-zinc-500">Pagamento</p>
+            <p className="text-xs font-black uppercase tracking-widest text-zinc-500">{canSeeFinancial ? 'Pagamento' : 'Situação'}</p>
             <div className="mt-3">
               <PaymentStatus status={registration.status} />
             </div>
-            <p className="mt-4 font-mono text-2xl font-black">{currencyFormatter.format(registration.amountCents / 100)}</p>
+            {canSeeFinancial && <p className="mt-4 font-mono text-2xl font-black">{formatCentsBRL(registration.amountCents)}</p>}
             <p className="mt-2 text-sm text-zinc-400">Inscrição criada em {dateTimeFormatter.format(createdAt)}</p>
           </div>
         </div>
@@ -2922,7 +2947,7 @@ function AthleteDrawer({
                     {statusLabels[attempt.status]}
                   </span>
                   <span className="text-zinc-400">{dateTimeFormatter.format(new Date(attempt.createdAt))}</span>
-                  <span className="text-zinc-400">{currencyFormatter.format(attempt.amountCents / 100)}</span>
+                  {typeof attempt.amountCents === 'number' && <span className="text-zinc-400">{formatCentsBRL(attempt.amountCents)}</span>}
                   {attempt.paidAt && <span className="text-brand">pago em {dateTimeFormatter.format(new Date(attempt.paidAt))}</span>}
                   {attempt.isCanonical && <span className="font-bold uppercase tracking-widest text-brand">canônica</span>}
                   <span className="ml-auto font-mono text-[10px] text-zinc-600">{attempt.id}</span>

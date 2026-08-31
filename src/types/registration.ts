@@ -235,14 +235,22 @@ export type AdminRegistration = {
    */
   attemptsCount?: number;
   fullName: string;
+  /**
+   * ADMIN-003 Stage 3: for the `operation` role e-mail and phone arrive MASKED
+   * (e.g. `gi******@example.com`, `*******1234`). The value is still a string,
+   * never the raw contact.
+   */
   email: string;
   cpfMasked: string;
   phone: string;
-  birthDate: string;
+  /** ADMIN-003 Stage 3: withheld for the `operation` role. */
+  birthDate?: string;
   age: number | null;
   gender: AdminGender;
-  emergencyContactName: string;
-  emergencyContactPhone: string;
+  /** ADMIN-003 Stage 3: list view withholds this for `operation` (detail only). */
+  emergencyContactName?: string;
+  /** ADMIN-003 Stage 3: list view withholds this for `operation` (detail only). */
+  emergencyContactPhone?: string;
   city: string | null;
   state: string | null;
   team: string | null;
@@ -259,10 +267,16 @@ export type AdminRegistration = {
   lotId: string;
   shirtSize: string;
   status: RegistrationStatus;
-  paymentStatus: RegistrationStatus;
-  paymentProvider: string | null;
-  providerPaymentId: string | null;
-  amountCents: number;
+  /**
+   * ADMIN-003 Stage 3: every field below marked optional is WITHHELD for the
+   * `operation` role (financial / gateway / coupon / partner attribution /
+   * confirmation-provider technical data). The backend serializer is the
+   * authority — `("amountCents" in row) === false` for `operation`.
+   */
+  paymentStatus?: RegistrationStatus;
+  paymentProvider?: string | null;
+  providerPaymentId?: string | null;
+  amountCents?: number;
   partnerId?: string | null;
   partnerName?: string | null;
   partnerType?: import('./partner').PartnerType | null;
@@ -277,13 +291,13 @@ export type AdminRegistration = {
   couponUsedAt?: string | null;
   createdAt: string;
   updatedAt: string;
-  expiresAt: string | null;
-  paidAt: string | null;
-  confirmedAt: string | null;
-  gatewayStatus: string | null;
-  gatewayTransactionId: string | null;
-  paymentMethod: string | null;
-  hasPaymentDivergence: boolean;
+  expiresAt?: string | null;
+  paidAt?: string | null;
+  confirmedAt?: string | null;
+  gatewayStatus?: string | null;
+  gatewayTransactionId?: string | null;
+  paymentMethod?: string | null;
+  hasPaymentDivergence?: boolean;
   googleSheetsStatus: 'not_queued' | 'pending' | 'processing' | 'synchronized' | 'failed';
   googleSheetsSynchronizedAt: string | null;
   confirmationEmailSentAt?: string | null;
@@ -305,8 +319,10 @@ export type AdminRegistrationHistoryItem = {
   id: string;
   status: RegistrationStatus;
   createdAt: string;
-  amountCents: number;
-  paidAt: string | null;
+  /** ADMIN-003 Stage 3: withheld for the `operation` role. */
+  amountCents?: number;
+  /** ADMIN-003 Stage 3: withheld for the `operation` role. */
+  paidAt?: string | null;
   isCanonical: boolean;
 };
 
