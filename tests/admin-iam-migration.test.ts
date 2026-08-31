@@ -34,15 +34,24 @@ test('§38 migration is schema-only, additive, history-safe — no data writes, 
   assert.doesNotMatch(serverMigration, /"run-admin-users" alter column created_by set not null/i);
 });
 
-test('§9/§38 auth token table: purpose CHECK, hashed-only, single-active partial unique index', () => {
+test('§9/§38 auth token table: purpose CHECK, hashed-only, one-OUTSTANDING-token partial unique index (consumed_at + revoked_at, time-stable)', () => {
   assert.match(serverMigration, /create table if not exists public\."run-admin-auth-tokens"/);
   assert.match(serverMigration, /purpose text not null check \(purpose in \('invite', 'reset'\)\)/);
   assert.match(serverMigration, /token_hash text not null check \(token_hash ~ '\^\[0-9a-f\]\{64\}\$'\)/);
   // no raw-token column
   assert.doesNotMatch(serverMigration, /\braw_token\b|\btoken\s+text\b|\bsecret\b/i);
+  // two distinct terminal facts — user-used vs system-invalidated
   assert.match(serverMigration, /consumed_at text/);
-  // §16 invariant: at most one unconsumed token per (user_id, purpose)
-  assert.match(serverMigration, /create unique index if not exists "run-admin-auth-tokens_one_active_idx"\s*\n?\s*on public\."run-admin-auth-tokens"\(user_id, purpose\) where consumed_at is null/);
+  assert.match(serverMigration, /revoked_at text/);
+  assert.match(serverMigration, /alter table public\."run-admin-auth-tokens" add column if not exists revoked_at text/);
+  // §3/§4/§16 OUTSTANDING-token invariant: not consumed AND not revoked. Time-stable
+  // predicate — must NOT reference now()/current_timestamp.
+  assert.match(serverMigration, /drop index if exists "run-admin-auth-tokens_one_active_idx"/);
+  const outstandingIdx = serverMigration.match(/create unique index if not exists "run-admin-auth-tokens_one_outstanding_idx"[\s\S]*?;/)?.[0] ?? '';
+  assert.match(outstandingIdx, /on public\."run-admin-auth-tokens"\(user_id, purpose\)/);
+  assert.match(outstandingIdx, /where consumed_at is null and revoked_at is null/);
+  // the uniqueness predicate is TIME-STABLE — no volatile time function
+  assert.doesNotMatch(outstandingIdx, /\bnow\s*\(\s*\)|current_timestamp|current_date/i);
   assert.match(serverMigration, /create unique index if not exists "run-admin-auth-tokens_token_hash_idx"/);
 });
 
@@ -59,7 +68,11 @@ test('§26/§38 canonical schema snapshot reflects the same additions', () => {
   assert.match(adminUsers, /\n\s*created_by text,/);
   assert.match(adminUsers, /\n\s*disabled_by text,/);
   assert.match(canonicalSchema, /create table if not exists "run-admin-auth-tokens"/);
-  assert.match(canonicalSchema, /create unique index if not exists "run-admin-auth-tokens_one_active_idx"[^\n]*where consumed_at is null/);
+  const tokenTable = block(canonicalSchema, 'create table if not exists "run-admin-auth-tokens"', ');');
+  assert.match(tokenTable, /\n\s*consumed_at text,/);
+  assert.match(tokenTable, /\n\s*revoked_at text,/);
+  assert.match(canonicalSchema, /create unique index if not exists "run-admin-auth-tokens_one_outstanding_idx"[^\n]*where consumed_at is null and revoked_at is null/);
+  assert.doesNotMatch(canonicalSchema, /"run-admin-auth-tokens_one_active_idx"/);
 });
 
 test('§26 auto-migrate path (ensurePostgresDatabase) mirrors the canonical migration', () => {
@@ -69,7 +82,23 @@ test('§26 auto-migrate path (ensurePostgresDatabase) mirrors the canonical migr
   assert.match(body, /add column if not exists disabled_by text/);
   assert.match(body, /alter column password_hash drop not null/);
   assert.match(body, /create table if not exists \$\{table\.adminAuthTokens\}/);
-  assert.match(body, /run-admin-auth-tokens_one_active_idx.*where consumed_at is null/s);
+  assert.match(body, /add column if not exists revoked_at text/);
+  assert.match(body, /drop index if exists "run-admin-auth-tokens_one_active_idx"/);
+  assert.match(body, /run-admin-auth-tokens_one_outstanding_idx.*where consumed_at is null and revoked_at is null/s);
+});
+
+test('§4/§8 supersedeOutstandingAdminAuthTokensInPostgres: revoked_at (not consumed_at), scoped, client-injectable', () => {
+  const fn = block(databaseSource, 'export async function supersedeOutstandingAdminAuthTokensInPostgres', 'export type CancelRegistrationResult');
+  // supersession sets revoked_at — it is NOT the same as the user consuming it
+  assert.match(fn, /set revoked_at = \$1/);
+  assert.doesNotMatch(fn, /set consumed_at/);
+  // scoped to one (user_id, purpose) and only rows that are still outstanding
+  assert.match(fn, /where user_id = \$2 and purpose = \$3 and consumed_at is null and revoked_at is null/);
+  // purpose is validated; empty user id is a no-op
+  assert.match(fn, /Unknown auth token purpose/);
+  assert.match(fn, /if \(!normalizedUserId\) return 0;/);
+  // participates in the caller's transaction
+  assert.match(fn, /client\?: Queryable/);
 });
 
 // ---- §44 / §20 last-administrator invariant (data-layer primitive) ----

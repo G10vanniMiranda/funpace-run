@@ -19,10 +19,15 @@ import {
   generateAuthToken,
   hashAuthToken,
   isAuthTokenActive,
+  isAuthTokenOutstanding,
   isAuthTokenPurpose,
   verifyAuthToken,
+  verifyAuthTokenForAccept,
 } from '../server/iam/tokens.js';
-import { revokeAllAdminSessionsForUserInPostgres } from '../server/database.js';
+import {
+  revokeAllAdminSessionsForUserInPostgres,
+  supersedeOutstandingAdminAuthTokensInPostgres,
+} from '../server/database.js';
 
 // ADMIN-IAM-001 Stage 1 — pure data & security primitives.
 
@@ -141,14 +146,68 @@ test('§13 token purpose: only invite / reset', () => {
   assert.throws(() => assertAuthTokenPurpose('login'), /Unknown auth token purpose/);
 });
 
-test('§15 token lifecycle: active / expired / consumed, consumed wins', () => {
+test('§6 token lifecycle priority: consumed > revoked > expired > active', () => {
   const now = new Date('2026-01-02T00:00:00.000Z');
-  assert.equal(classifyAuthToken({ expiresAt: '2026-01-03T00:00:00.000Z', consumedAt: null }, now), 'active');
-  assert.equal(classifyAuthToken({ expiresAt: '2026-01-01T00:00:00.000Z', consumedAt: null }, now), 'expired');
-  assert.equal(classifyAuthToken({ expiresAt: '2026-01-03T00:00:00.000Z', consumedAt: '2026-01-01T12:00:00.000Z' }, now), 'consumed');
-  assert.equal(classifyAuthToken({ expiresAt: 'not-a-date', consumedAt: null }, now), 'expired');
-  assert.equal(isAuthTokenActive({ expiresAt: '2026-01-03T00:00:00.000Z', consumedAt: null }, now), true);
-  assert.equal(isAuthTokenActive({ expiresAt: '2026-01-03T00:00:00.000Z', consumedAt: 'x' }, now), false);
+  const future = '2026-01-03T00:00:00.000Z';
+  const past = '2026-01-01T00:00:00.000Z';
+  assert.equal(classifyAuthToken({ expiresAt: future, consumedAt: null, revokedAt: null }, now), 'active');
+  assert.equal(classifyAuthToken({ expiresAt: past, consumedAt: null, revokedAt: null }, now), 'expired');
+  assert.equal(classifyAuthToken({ expiresAt: future, consumedAt: null, revokedAt: '2026-01-01T12:00:00.000Z' }, now), 'revoked');
+  assert.equal(classifyAuthToken({ expiresAt: future, consumedAt: '2026-01-01T10:00:00.000Z', revokedAt: null }, now), 'consumed');
+  // consumed wins even if the row was later also revoked
+  assert.equal(classifyAuthToken({ expiresAt: future, consumedAt: 'x', revokedAt: 'y' }, now), 'consumed');
+  // revoked wins over expired when both apply (issued, superseded, then time passes)
+  assert.equal(classifyAuthToken({ expiresAt: past, consumedAt: null, revokedAt: past }, now), 'revoked');
+  assert.equal(classifyAuthToken({ expiresAt: 'not-a-date', consumedAt: null, revokedAt: null }, now), 'expired');
+});
+
+test('§3 isAuthTokenOutstanding mirrors the DB partial-unique predicate (time-stable)', () => {
+  // occupies the (user_id, purpose) slot while neither consumed nor revoked...
+  assert.equal(isAuthTokenOutstanding({ consumedAt: null, revokedAt: null }), true);
+  // ...EVEN IF expired — expiry alone does not free the slot
+  assert.equal(isAuthTokenOutstanding({ consumedAt: null, revokedAt: null }), true);
+  assert.equal(isAuthTokenOutstanding({ consumedAt: 'x', revokedAt: null }), false);
+  assert.equal(isAuthTokenOutstanding({ consumedAt: null, revokedAt: 'x' }), false);
+});
+
+test('§7 replacement invalidates the prior token: old raw token stops being acceptable', () => {
+  const now = new Date('2026-01-02T00:00:00.000Z');
+  const future = '2026-01-10T00:00:00.000Z';
+  const old = { ...generateAuthToken(), expiresAt: future, consumedAt: null as string | null, revokedAt: null as string | null };
+  const fresh = { ...generateAuthToken(), expiresAt: future, consumedAt: null as string | null, revokedAt: null as string | null };
+
+  // before replacement: the old token is acceptable
+  assert.equal(verifyAuthTokenForAccept({ ...old }, old.token, now), true);
+
+  // issuance revokes the prior outstanding token, then the replacement is stored
+  old.revokedAt = '2026-01-02T00:00:00.000Z';
+
+  // the old RAW token still hashes correctly (hash never changes) ...
+  assert.equal(verifyAuthToken(old.token, old.tokenHash), true);
+  // ... but it is no longer acceptable, because the row is now `revoked`
+  assert.equal(verifyAuthTokenForAccept({ ...old }, old.token, now), false);
+  assert.equal(classifyAuthToken(old, now), 'revoked');
+
+  // the replacement is the single acceptable token
+  assert.equal(verifyAuthTokenForAccept({ ...fresh }, fresh.token, now), true);
+  assert.equal(isAuthTokenOutstanding(fresh), true);
+  assert.equal(isAuthTokenOutstanding(old), false);
+});
+
+test('§7 an EXPIRED prior token never blocks a fresh invite/reset (re-issue is legitimate)', () => {
+  const now = new Date('2026-02-01T00:00:00.000Z');
+  for (const purpose of ['invite', 'reset'] as const) {
+    const stale = { expiresAt: '2026-01-01T00:00:00.000Z', consumedAt: null as string | null, revokedAt: null as string | null };
+    assert.equal(classifyAuthToken(stale, now), 'expired');
+    // it is still "outstanding" for the slot until issuance revokes it...
+    assert.equal(isAuthTokenOutstanding(stale), true);
+    // ...and after the issuance transaction terminalises it, the slot is free
+    stale.revokedAt = now.toISOString();
+    assert.equal(isAuthTokenOutstanding(stale), false);
+    // fresh replacement of the same purpose is active
+    const replacement = { expiresAt: authTokenExpiresAt(purpose, now), consumedAt: null, revokedAt: null };
+    assert.equal(isAuthTokenActive(replacement, now), true);
+  }
 });
 
 // ---- §25 audit action constants exist (not emitted here) ----
@@ -192,5 +251,35 @@ test('§43 revoke-all is a no-op for an empty email (no query issued)', async ()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const n = await revokeAllAdminSessionsForUserInPostgres('   ', '2026-03-01T00:00:00.000Z', client as any);
   assert.equal(n, 0);
+  assert.equal(client.calls.length, 0);
+});
+
+// ---- §4/§8 supersede-outstanding-tokens primitive (issuance-tx building block) ----
+
+test('§4 supersedeOutstandingAdminAuthTokensInPostgres revokes only unconsumed & unrevoked rows of that (user, purpose)', async () => {
+  const client = fakeClient();
+  const n = await supersedeOutstandingAdminAuthTokensInPostgres(
+    ' user-123 ', 'invite', '2026-03-01T00:00:00.000Z',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client as any,
+  );
+  assert.equal(n, 2);
+  assert.equal(client.calls.length, 1);
+  const { sql, params } = client.calls[0];
+  assert.match(sql, /update .*run-admin-auth-tokens/s);
+  assert.match(sql, /set\s+revoked_at\s*=\s*\$1/);
+  assert.match(sql, /where\s+user_id\s*=\s*\$2\s+and\s+purpose\s*=\s*\$3\s+and\s+consumed_at\s+is\s+null\s+and\s+revoked_at\s+is\s+null/);
+  assert.deepEqual(params, ['2026-03-01T00:00:00.000Z', 'user-123', 'invite']);
+});
+
+test('§13 supersede rejects an unknown purpose and no-ops on empty user id', async () => {
+  const client = fakeClient();
+  await assert.rejects(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    () => supersedeOutstandingAdminAuthTokensInPostgres('u1', 'login' as any, 't', client as any),
+    /Unknown auth token purpose/,
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.equal(await supersedeOutstandingAdminAuthTokensInPostgres('', 'reset', 't', client as any), 0);
   assert.equal(client.calls.length, 0);
 });

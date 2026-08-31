@@ -16,6 +16,14 @@ alter table public."run-admin-users" add column if not exists disabled_by text;
 
 alter table public."run-admin-users" alter column password_hash drop not null;
 
+-- Single-use invite / password-reset tokens. Only the SHA-256 hash of the
+-- high-entropy bearer token is stored; the raw token is returned once to the
+-- issuer and is never persisted or logged.
+--
+-- Two independent terminal facts, never conflated (audit / incident review):
+--   consumed_at  -> the USER completed the flow (accepted invite / set password);
+--   revoked_at   -> the SYSTEM invalidated it (a replacement token was issued, or
+--                   the account was disabled).
 create table if not exists public."run-admin-auth-tokens" (
   id text primary key,
   user_id text not null,
@@ -24,9 +32,14 @@ create table if not exists public."run-admin-auth-tokens" (
   email_snapshot text not null,
   expires_at text not null,
   consumed_at text,
+  revoked_at text,
   created_by text,
   created_at text not null
 );
+
+-- Defensive: if an earlier revision of this migration already created the table
+-- without revoked_at (e.g. on a preview environment), add the column now.
+alter table public."run-admin-auth-tokens" add column if not exists revoked_at text;
 
 -- O(1) lookup by hash for the future accept flow; also blocks any hash reuse.
 create unique index if not exists "run-admin-auth-tokens_token_hash_idx"
@@ -35,12 +48,16 @@ create unique index if not exists "run-admin-auth-tokens_token_hash_idx"
 create index if not exists "run-admin-auth-tokens_user_purpose_idx"
   on public."run-admin-auth-tokens"(user_id, purpose);
 
--- Invariant: at most ONE unconsumed token per (user_id, purpose). An expired but
--- unconsumed token still occupies the slot; the IAM-2/3 issuance transaction
--- consumes the previous outstanding token before inserting a new one. This partial
--- unique index is the DB-level guard for that invariant.
-create unique index if not exists "run-admin-auth-tokens_one_active_idx"
-  on public."run-admin-auth-tokens"(user_id, purpose) where consumed_at is null;
+-- INVARIANT: at most ONE OUTSTANDING token per (user_id, purpose), where
+-- "outstanding" = neither consumed by the user nor revoked by the system. The
+-- predicate is time-stable (no NOW()): a token that merely EXPIRED still occupies
+-- the slot until the IAM-2/3 issuance transaction revokes it (revoked_at = now())
+-- immediately before inserting the replacement. Expired tokens therefore never
+-- block a legitimate re-invite / re-reset, and every historical row is kept.
+drop index if exists "run-admin-auth-tokens_one_active_idx";
+create unique index if not exists "run-admin-auth-tokens_one_outstanding_idx"
+  on public."run-admin-auth-tokens"(user_id, purpose)
+  where consumed_at is null and revoked_at is null;
 
 -- Supports revoke-all-sessions-for-user and "active sessions" counts.
 create index if not exists "run-admin-sessions_actor_active_idx"

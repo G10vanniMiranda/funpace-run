@@ -239,6 +239,9 @@ export type AdminUserRecord = {
 
 // ADMIN-IAM-001 Stage 1: single-use invite / password-reset tokens. Only the
 // SHA-256 hash is stored; the raw token is never persisted or logged.
+// `consumedAt` = the user completed the flow; `revokedAt` = the system
+// invalidated it (replacement issued / account disabled). Kept distinct so audit
+// can tell "the user used this invite" from "we superseded it".
 export type AdminAuthTokenRecord = {
   id: string;
   userId: string;
@@ -247,6 +250,7 @@ export type AdminAuthTokenRecord = {
   emailSnapshot: string;
   expiresAt: string;
   consumedAt: string | null;
+  revokedAt: string | null;
   createdBy: string | null;
   createdAt: string;
 };
@@ -1211,12 +1215,18 @@ async function ensurePostgresDatabase(client: Queryable) {
     email_snapshot text not null,
     expires_at text not null,
     consumed_at text,
+    revoked_at text,
     created_by text,
     created_at text not null
   )`);
+  await client.query(`alter table ${table.adminAuthTokens} add column if not exists revoked_at text`);
   await client.query(`create unique index if not exists "run-admin-auth-tokens_token_hash_idx" on ${table.adminAuthTokens}(token_hash)`);
   await client.query(`create index if not exists "run-admin-auth-tokens_user_purpose_idx" on ${table.adminAuthTokens}(user_id, purpose)`);
-  await client.query(`create unique index if not exists "run-admin-auth-tokens_one_active_idx" on ${table.adminAuthTokens}(user_id, purpose) where consumed_at is null`);
+  // one OUTSTANDING token per (user_id, purpose): not consumed by the user and
+  // not revoked by the system. Time-stable predicate — an expired-but-unrevoked
+  // token is revoked by the IAM-2/3 issuance transaction, never blocks re-issue.
+  await client.query(`drop index if exists "run-admin-auth-tokens_one_active_idx"`);
+  await client.query(`create unique index if not exists "run-admin-auth-tokens_one_outstanding_idx" on ${table.adminAuthTokens}(user_id, purpose) where consumed_at is null and revoked_at is null`);
   await client.query(`create index if not exists "run-admin-sessions_actor_active_idx" on ${table.adminSessions}(actor) where revoked_at is null`);
 
   const existingEvents = await client.query(`select count(*)::int as count from ${table.events}`);
@@ -2948,6 +2958,43 @@ export async function revokeAllAdminSessionsForUserInPostgres(
         set revoked_at = $1
       where actor = $2 and revoked_at is null`,
     [revokedAt, normalizedEmail],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
+ * Terminalise every OUTSTANDING auth token for `(userId, purpose)` — i.e. rows
+ * that are neither consumed by the user nor already revoked, regardless of
+ * whether they have expired. IAM-2/3 calls this inside the token-issuance
+ * transaction (advisory lock -> supersede -> insert replacement) so that at most
+ * one outstanding token per (user, purpose) ever exists; the partial unique
+ * index `run-admin-auth-tokens_one_outstanding_idx` is the final DB-level guard.
+ *
+ * `revoked_at` (not `consumed_at`): the user never used these tokens; the system
+ * superseded them. Historical rows are preserved. Idempotent — a second call
+ * revokes nothing. Returns the number of tokens newly revoked. Pass the
+ * transaction `client` so this participates in the issuance transaction.
+ */
+export async function supersedeOutstandingAdminAuthTokensInPostgres(
+  userId: string,
+  purpose: 'invite' | 'reset',
+  revokedAt: string = new Date().toISOString(),
+  client?: Queryable,
+): Promise<number> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return 0;
+  if (purpose !== 'invite' && purpose !== 'reset') {
+    throw new Error(`Unknown auth token purpose: ${String(purpose)}`);
+  }
+  if (!client) {
+    await ensurePostgresReady();
+    client = requirePool();
+  }
+  const result = await client.query(
+    `update ${table.adminAuthTokens}
+        set revoked_at = $1
+      where user_id = $2 and purpose = $3 and consumed_at is null and revoked_at is null`,
+    [revokedAt, normalizedUserId, purpose],
   );
   return result.rowCount ?? 0;
 }

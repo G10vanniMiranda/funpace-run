@@ -71,25 +71,62 @@ export function authTokenExpiresAt(purpose: AuthTokenPurpose, from: Date = new D
   return new Date(from.getTime() + AUTH_TOKEN_TTL_MS[assertAuthTokenPurpose(purpose)]).toISOString();
 }
 
-export type AuthTokenState = 'active' | 'expired' | 'consumed';
+export type AuthTokenState = 'active' | 'expired' | 'revoked' | 'consumed';
 
-/** Minimal shape needed to reason about a stored token row. */
+/**
+ * Minimal shape needed to reason about a stored token row.
+ *   consumedAt -> the USER completed the flow (accepted invite / set password);
+ *   revokedAt  -> the SYSTEM invalidated it (replacement issued / account
+ *                 disabled). Two independent terminal facts, never conflated.
+ */
 export type AuthTokenLifecycle = {
   expiresAt: string;
   consumedAt: string | null;
+  revokedAt: string | null;
 };
 
 /**
- * Deterministic priority: consumed > expired > active. A consumed token is never
- * "active" even if not yet past `expiresAt`.
+ * Deterministic priority: consumed > revoked > expired > active.
+ *   - `consumed` is the strongest terminal fact — the user actually used it — and
+ *     is the one an incident review cares about most, so it wins even if the row
+ *     was later revoked.
+ *   - `revoked` (system supersession / account disable) wins over `expired`:
+ *     "we killed it" is more informative than "it aged out" when both apply.
+ *   - `expired` is natural time death.
  */
 export function classifyAuthToken(token: AuthTokenLifecycle, now: Date = new Date()): AuthTokenState {
   if (token.consumedAt) return 'consumed';
+  if (token.revokedAt) return 'revoked';
   const expiresAtMs = Date.parse(token.expiresAt);
   if (!Number.isFinite(expiresAtMs) || now.getTime() >= expiresAtMs) return 'expired';
   return 'active';
 }
 
+/** Accept-flow gate: only an `active` token may be redeemed. */
 export function isAuthTokenActive(token: AuthTokenLifecycle, now: Date = new Date()): boolean {
   return classifyAuthToken(token, now) === 'active';
+}
+
+/**
+ * Issuance / uniqueness concept: a token still occupies the single
+ * `(user_id, purpose)` slot while it is neither consumed nor revoked — an
+ * expired-but-unrevoked token is still "outstanding" until the next issuance
+ * revokes it. Mirrors the DB partial-unique-index predicate exactly. Time-stable.
+ */
+export function isAuthTokenOutstanding(token: Pick<AuthTokenLifecycle, 'consumedAt' | 'revokedAt'>): boolean {
+  return token.consumedAt == null && token.revokedAt == null;
+}
+
+/**
+ * Full accept check used by the future IAM-3 endpoint: the presented raw token
+ * must hash to the stored hash AND the stored row must still be `active`. A
+ * replaced (revoked) or expired token fails here even though its hash still
+ * matches — the raw token is dead the instant a replacement is issued.
+ */
+export function verifyAuthTokenForAccept(
+  storedToken: AuthTokenLifecycle & { tokenHash: string },
+  candidateRawToken: string,
+  now: Date = new Date(),
+): boolean {
+  return verifyAuthToken(candidateRawToken, storedToken.tokenHash) && isAuthTokenActive(storedToken, now);
 }

@@ -228,6 +228,8 @@ create table if not exists "run-admin-users" (
 -- ADMIN-IAM-001 Stage 1: single-use invite / password-reset tokens. Only the
 -- SHA-256 hash of the high-entropy bearer token is stored; the raw token is
 -- returned once to the issuer and never persisted or logged.
+-- consumed_at = the user completed the flow; revoked_at = the system invalidated
+-- it (replacement issued / account disabled). Kept distinct for audit.
 create table if not exists "run-admin-auth-tokens" (
   id text primary key,
   user_id text not null,
@@ -236,6 +238,7 @@ create table if not exists "run-admin-auth-tokens" (
   email_snapshot text not null,
   expires_at text not null,
   consumed_at text,
+  revoked_at text,
   created_by text,
   created_at text not null
 );
@@ -379,7 +382,7 @@ create index if not exists "run-admin-sessions_actor_active_idx" on "run-admin-s
 create unique index if not exists "run-admin-users_email_idx" on "run-admin-users"(email);
 create unique index if not exists "run-admin-auth-tokens_token_hash_idx" on "run-admin-auth-tokens"(token_hash);
 create index if not exists "run-admin-auth-tokens_user_purpose_idx" on "run-admin-auth-tokens"(user_id, purpose);
-create unique index if not exists "run-admin-auth-tokens_one_active_idx" on "run-admin-auth-tokens"(user_id, purpose) where consumed_at is null;
+create unique index if not exists "run-admin-auth-tokens_one_outstanding_idx" on "run-admin-auth-tokens"(user_id, purpose) where consumed_at is null and revoked_at is null;
 create index if not exists "run-partnership-leads_status_idx" on "run-partnership-leads"(status);
 create index if not exists "run-partnership-leads_created_at_idx" on "run-partnership-leads"(created_at);
 create index if not exists "run-partners_status_idx" on "run-partners"(status);
