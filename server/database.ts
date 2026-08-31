@@ -4079,8 +4079,10 @@ export async function enqueueConfirmationEmailInPostgres(
 export async function enqueueConfirmationEmailObligationInPostgres(
   registrationId: string,
   options: { emailType?: 'confirmation'; source?: string | null } = {},
-): Promise<'created' | 'exists' | 'unknown_registration'> {
+): Promise<'created' | 'rearmed' | 'exists' | 'unknown_registration'> {
   const client = await requirePool().connect();
+  const emailType = options.emailType || 'confirmation';
+  const source = options.source ?? 'admin_recovery';
   try {
     await ensurePostgresReady();
     await client.query('begin');
@@ -4092,17 +4094,41 @@ export async function enqueueConfirmationEmailObligationInPostgres(
       await client.query('rollback');
       return 'unknown_registration';
     }
-    const before = await client.query(
-      `select 1 from ${table.confirmationEmailOutbox} where registration_id = $1 and email_type = $2`,
-      [registrationId, options.emailType || 'confirmation'],
+    const existing = await client.query(
+      `select status from ${table.confirmationEmailOutbox}
+       where registration_id = $1 and email_type = $2 for update`,
+      [registrationId, emailType],
     );
-    await enqueueConfirmationEmailInPostgres(client, registrationId, {
-      eventId: registration.rows[0].event_id,
-      emailType: options.emailType,
-      source: options.source ?? 'admin_recovery',
-    });
+    const now = new Date().toISOString();
+    if (!existing.rowCount) {
+      await enqueueConfirmationEmailInPostgres(client, registrationId, {
+        eventId: registration.rows[0].event_id,
+        emailType,
+        source,
+        now,
+      });
+      await client.query('commit');
+      return 'created';
+    }
+    // A row already occupies the (registration, email_type) slot. An in-flight
+    // obligation (pending / processing) is left untouched. A terminal one
+    // (completed / failed) is RE-ARMED — this path is only ever reached from an
+    // explicit operator "resend" after a failed manual attempt, so a fresh
+    // durable retry is exactly the intent. Automatic enqueue from the payment
+    // transaction keeps its ON CONFLICT DO NOTHING and never re-arms.
+    if (['completed', 'failed'].includes(existing.rows[0].status)) {
+      await client.query(
+        `update ${table.confirmationEmailOutbox}
+         set status = 'pending', attempts = 0, next_attempt_at = $2, locked_at = null, locked_by = null,
+             last_error = null, processed_at = null, source = $3, updated_at = $2
+         where registration_id = $1 and email_type = $4`,
+        [registrationId, now, source, emailType],
+      );
+      await client.query('commit');
+      return 'rearmed';
+    }
     await client.query('commit');
-    return before.rowCount ? 'exists' : 'created';
+    return 'exists';
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;
@@ -4161,51 +4187,61 @@ export async function claimDueConfirmationEmailOutboxInPostgres(
   }
 }
 
-export async function completeConfirmationEmailOutboxInPostgres(id: string, now = new Date().toISOString()): Promise<void> {
+// Terminal writes are lease-ownership guarded: `status = 'processing' AND
+// locked_by = $expectedLockedBy`. If a stale-reclaim already returned the task
+// to the pool and another drain re-claimed it, an abandoned worker's late
+// terminal write no-ops instead of clobbering the current owner's lease. The
+// boolean reports whether this worker still owned the row.
+export async function completeConfirmationEmailOutboxInPostgres(
+  id: string,
+  expectedLockedBy: string,
+  now = new Date().toISOString(),
+): Promise<boolean> {
   await ensurePostgresReady();
-  // `and status = 'processing'` — only the worker that currently holds the lease
-  // resolves the task. If a stale-reclaim already returned it to the pool, this
-  // no-ops and the layered send-idempotency (run-email-deliveries + Resend key)
-  // absorbs the redundant attempt.
-  await requirePool().query(
+  const result = await requirePool().query(
     `update ${table.confirmationEmailOutbox}
-     set status = 'completed', locked_at = null, locked_by = null, processed_at = $2, updated_at = $2
-     where id = $1 and status = 'processing'`,
-    [id, now],
+     set status = 'completed', locked_at = null, locked_by = null, processed_at = $3, updated_at = $3
+     where id = $1 and status = 'processing' and locked_by = $2`,
+    [id, expectedLockedBy, now],
   );
+  return (result.rowCount || 0) > 0;
 }
 
 export async function rescheduleConfirmationEmailOutboxInPostgres(
   id: string,
+  expectedLockedBy: string,
   attempts: number,
   nextAttemptAt: string,
   lastError: string,
   now = new Date().toISOString(),
-): Promise<void> {
+): Promise<boolean> {
   await ensurePostgresReady();
-  await requirePool().query(
+  const result = await requirePool().query(
     `update ${table.confirmationEmailOutbox}
-     set status = 'pending', attempts = $2, next_attempt_at = $3, last_error = $4,
-         locked_at = null, locked_by = null, updated_at = $5
-     where id = $1 and status = 'processing'`,
-    [id, attempts, nextAttemptAt, String(lastError || '').slice(0, 500), now],
+     set status = 'pending', attempts = $3, next_attempt_at = $4, last_error = $5,
+         locked_at = null, locked_by = null, updated_at = $6
+     where id = $1 and status = 'processing' and locked_by = $2`,
+    [id, expectedLockedBy, attempts, nextAttemptAt, String(lastError || '').slice(0, 500), now],
   );
+  return (result.rowCount || 0) > 0;
 }
 
 export async function failConfirmationEmailOutboxInPostgres(
   id: string,
+  expectedLockedBy: string,
   attempts: number,
   lastError: string,
   now = new Date().toISOString(),
-): Promise<void> {
+): Promise<boolean> {
   await ensurePostgresReady();
-  await requirePool().query(
+  const result = await requirePool().query(
     `update ${table.confirmationEmailOutbox}
-     set status = 'failed', attempts = $2, last_error = $3, locked_at = null, locked_by = null,
-         processed_at = $4, updated_at = $4
-     where id = $1 and status = 'processing'`,
-    [id, attempts, String(lastError || '').slice(0, 500), now],
+     set status = 'failed', attempts = $3, last_error = $4, locked_at = null, locked_by = null,
+         processed_at = $5, updated_at = $5
+     where id = $1 and status = 'processing' and locked_by = $2`,
+    [id, expectedLockedBy, attempts, String(lastError || '').slice(0, 500), now],
   );
+  return (result.rowCount || 0) > 0;
 }
 
 // Durable-state probe: lets the worker tell "already satisfied" from "still

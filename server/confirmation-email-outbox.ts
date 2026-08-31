@@ -233,6 +233,20 @@ export function markConfirmationEmailOutboxProcessingInMemory(
   row.updatedAt = nowISO;
 }
 
+// Lease-ownership guard mirroring the Postgres terminal writes: an abandoned
+// worker whose task was stale-reclaimed and re-claimed by another drain can no
+// longer resolve it. Returns whether the caller still owned the row.
+export function applyOutboxResolutionInMemoryIfOwner(
+  row: ConfirmationEmailOutboxRecord,
+  resolution: OutboxTaskResolution,
+  nowISO: string,
+  expectedLockedBy: string,
+): boolean {
+  if (row.status !== 'processing' || row.lockedBy !== expectedLockedBy) return false;
+  applyOutboxResolutionInMemory(row, resolution, nowISO);
+  return true;
+}
+
 export function applyOutboxResolutionInMemory(
   row: ConfirmationEmailOutboxRecord,
   resolution: OutboxTaskResolution,

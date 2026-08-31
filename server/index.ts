@@ -3610,7 +3610,7 @@ async function processConfirmationEmailOutbox(
   runId: string,
   batchSize = CONFIRMATION_EMAIL_OUTBOX_BATCH_SIZE,
 ) {
-  const summary = { reclaimed: 0, claimed: 0, completed: 0, rescheduled: 0, failed: 0, alerted: 0, deferred: 0 };
+  const summary = { reclaimed: 0, claimed: 0, completed: 0, rescheduled: 0, failed: 0, alerted: 0, deferred: 0, lostLease: 0 };
   if (!usesPostgresDatabase()) return summary;
 
   const deadline = Date.now() + CONFIRMATION_EMAIL_OUTBOX_DRAIN_BUDGET_MS;
@@ -3624,7 +3624,7 @@ async function processConfirmationEmailOutbox(
     // budget. Any task we claimed but did not touch is released back to
     // 'pending' immediately (no attempt increment) for the next 5-minute drain.
     if (Date.now() > deadline) {
-      await rescheduleConfirmationEmailOutboxInPostgres(task.id, task.attempts, nowISO, 'deferred: drain time budget', nowISO);
+      await rescheduleConfirmationEmailOutboxInPostgres(task.id, runId, task.attempts, nowISO, 'deferred: drain time budget', nowISO);
       summary.deferred += 1;
       continue;
     }
@@ -3661,23 +3661,34 @@ async function processConfirmationEmailOutbox(
     const signal = classifyConfirmationSenderResult(senderResult, durable);
     const resolution = resolveOutboxTask(task, signal, nowISO);
 
+    // Every terminal write is lease-ownership guarded. A `false` return means a
+    // stale-reclaim handed this task to another drain while our send was in
+    // flight — that drain owns the outcome now, so we record nothing and never
+    // raise an alert for a task we no longer control.
     if (resolution.action === 'complete') {
-      await completeConfirmationEmailOutboxInPostgres(task.id, nowISO);
-      summary.completed += 1;
+      const owned = await completeConfirmationEmailOutboxInPostgres(task.id, runId, nowISO);
+      if (owned) summary.completed += 1;
+      else summary.lostLease += 1;
       continue;
     }
     if (resolution.action === 'retry') {
-      await rescheduleConfirmationEmailOutboxInPostgres(
+      const owned = await rescheduleConfirmationEmailOutboxInPostgres(
         task.id,
+        runId,
         resolution.attempts,
         resolution.nextAttemptAt,
         resolution.lastError,
         nowISO,
       );
-      summary.rescheduled += 1;
+      if (owned) summary.rescheduled += 1;
+      else summary.lostLease += 1;
       continue;
     }
-    await failConfirmationEmailOutboxInPostgres(task.id, resolution.attempts, resolution.lastError, nowISO);
+    const failedOwned = await failConfirmationEmailOutboxInPostgres(task.id, runId, resolution.attempts, resolution.lastError, nowISO);
+    if (!failedOwned) {
+      summary.lostLease += 1;
+      continue;
+    }
     summary.failed += 1;
     if (resolution.alert) {
       summary.alerted += 1;

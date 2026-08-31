@@ -81,9 +81,42 @@ test('the drain claims work concurrency-safely: FOR UPDATE SKIP LOCKED, bounded,
 });
 
 test('stale-processing reclaim is lease-based and time-stable within the call', () => {
-  const fn = block(databaseSource, 'export async function reclaimStaleConfirmationEmailOutboxInPostgres', 'export async function claimDueConfirmationEmailOutboxInPostgres');
+  const fn = block(databaseSource, 'export async function reclaimStaleConfirmationEmailOutboxInPostgres', 'export async function completeConfirmationEmailOutboxInPostgres');
   assert.match(fn, /CONFIRMATION_EMAIL_OUTBOX_LEASE_MS/);
   assert.match(fn, /where status = 'processing' and locked_at is not null and locked_at < \$2/);
+});
+
+test('§13 terminal writes are lease-OWNERSHIP guarded (status=processing AND locked_by), not status alone', () => {
+  for (const name of [
+    'completeConfirmationEmailOutboxInPostgres',
+    'rescheduleConfirmationEmailOutboxInPostgres',
+    'failConfirmationEmailOutboxInPostgres',
+  ]) {
+    const fn = block(databaseSource, `export async function ${name}(`, '\n}\n');
+    assert.match(fn, /where id = \$1 and status = 'processing' and locked_by = \$2/, `${name} guards on locked_by`);
+    assert.match(fn, /return \(result\.rowCount \|\| 0\) > 0;/, `${name} reports ownership`);
+  }
+  // the worker feeds runId as the expected owner and records lostLease instead
+  // of a false outcome when the guard rejects the write.
+  const worker = block(indexSource, 'async function processConfirmationEmailOutbox(', '\n  return summary;');
+  assert.match(worker, /completeConfirmationEmailOutboxInPostgres\(task\.id, runId,/);
+  assert.match(worker, /rescheduleConfirmationEmailOutboxInPostgres\(\s*task\.id,\s*runId,/);
+  assert.match(worker, /failConfirmationEmailOutboxInPostgres\(task\.id, runId,/);
+  assert.match(worker, /summary\.lostLease/);
+  assert.match(worker, /if \(!failedOwned\)/);
+});
+
+test('§18 a terminally failed obligation can be re-armed ONLY by explicit operator recovery', () => {
+  const fn = block(databaseSource, 'export async function enqueueConfirmationEmailObligationInPostgres', 'export async function reclaimStaleConfirmationEmailOutboxInPostgres');
+  // an existing in-flight row (pending/processing) is left untouched
+  assert.match(fn, /\['completed', 'failed'\]\.includes\(existing\.rows\[0\]\.status\)/);
+  assert.match(fn, /set status = 'pending', attempts = 0, next_attempt_at = \$2/);
+  assert.match(fn, /return 'rearmed'/);
+  assert.match(fn, /return 'exists'/);
+  // the AUTOMATIC (payment-transaction) enqueue never re-arms — ON CONFLICT DO NOTHING
+  const autoFn = block(databaseSource, 'export async function enqueueConfirmationEmailInPostgres', 'export async function enqueueConfirmationEmailObligationInPostgres');
+  assert.match(autoFn, /on conflict \(registration_id, email_type\) do nothing/);
+  assert.doesNotMatch(autoFn, /rearm|set status = 'pending'/i);
 });
 
 test('§12 silent-null elimination: every declined claim writes a claim_skipped audit, no alert', () => {

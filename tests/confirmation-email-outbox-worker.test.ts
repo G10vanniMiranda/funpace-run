@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   CONFIRMATION_EMAIL_OUTBOX_MAX_ATTEMPTS,
   applyOutboxResolutionInMemory,
+  applyOutboxResolutionInMemoryIfOwner,
   classifyConfirmationSenderResult,
   enqueueConfirmationEmailInMemory,
   markConfirmationEmailOutboxProcessingInMemory,
@@ -35,10 +36,11 @@ async function simulateDrain(
   durableProbe: DurableProbe = () => ({ hasSentDelivery: false, legacySentAt: null }),
   options: { batchSize?: number; runId?: string } = {},
 ) {
-  const summary = { reclaimed: 0, claimed: 0, completed: 0, rescheduled: 0, failed: 0, alerted: 0, deferred: 0 };
+  const runId = options.runId ?? 'worker';
+  const summary = { reclaimed: 0, claimed: 0, completed: 0, rescheduled: 0, failed: 0, alerted: 0, deferred: 0, lostLease: 0 };
   summary.reclaimed = reclaimStaleConfirmationEmailOutboxInMemory(list, now);
   const due = selectDueConfirmationEmailOutboxInMemory(list, now, options.batchSize ?? 25);
-  for (const task of due) markConfirmationEmailOutboxProcessingInMemory(task, now, options.runId ?? 'worker');
+  for (const task of due) markConfirmationEmailOutboxProcessingInMemory(task, now, runId);
   summary.claimed = due.length;
 
   for (const task of due) {
@@ -53,7 +55,11 @@ async function simulateDrain(
       : durableProbe(task.registrationId);
     const signal = classifyConfirmationSenderResult(senderResult, durable);
     const resolution = resolveOutboxTask(task, signal, now);
-    applyOutboxResolutionInMemory(task, resolution, now);
+    // Re-read the live row (another concurrent drain may have stale-reclaimed
+    // and re-claimed it while our sender ran).
+    const live = list.find((row) => row.id === task.id) ?? task;
+    const owned = applyOutboxResolutionInMemoryIfOwner(live, resolution, now, runId);
+    if (!owned) { summary.lostLease += 1; continue; }
     if (resolution.action === 'complete') summary.completed += 1;
     else if (resolution.action === 'retry') summary.rescheduled += 1;
     else {
@@ -77,7 +83,7 @@ test('worker recovers a pending task: one send, task completed', async () => {
     return { ok: true, providerMessageId: 're_ok' };
   });
   assert.equal(calls, 1);
-  assert.deepEqual(summary, { reclaimed: 0, claimed: 1, completed: 1, rescheduled: 0, failed: 0, alerted: 0, deferred: 0 });
+  assert.deepEqual(summary, { reclaimed: 0, claimed: 1, completed: 1, rescheduled: 0, failed: 0, alerted: 0, deferred: 0, lostLease: 0 });
   assert.equal(list[0].status, 'completed');
 });
 
@@ -185,5 +191,41 @@ test('re-draining after completion is a no-op (duplicate worker execution)', asy
   await simulateDrain(list, at(1), sender);
   const second = await simulateDrain(list, at(2), sender);
   assert.equal(sends, 1);
-  assert.deepEqual(second, { reclaimed: 0, claimed: 0, completed: 0, rescheduled: 0, failed: 0, alerted: 0, deferred: 0 });
+  assert.deepEqual(second, { reclaimed: 0, claimed: 0, completed: 0, rescheduled: 0, failed: 0, alerted: 0, deferred: 0, lostLease: 0 });
+});
+
+test('§13 terminal write ownership: a stale worker CANNOT clobber a task another worker now owns', () => {
+  const list: ConfirmationEmailOutboxRecord[] = [];
+  enqueueConfirmationEmailInMemory(list, { registrationId: 'reg-1' }, at(0), nextId);
+  const task = list[0];
+
+  // Worker A claims at t0 and begins a (hanging) send.
+  markConfirmationEmailOutboxProcessingInMemory(task, at(0), 'A');
+
+  // 10+ min later: a second drain reclaims the stale lease and re-claims it.
+  assert.equal(reclaimStaleConfirmationEmailOutboxInMemory(list, at(12)), 1);
+  const [reclaimed] = selectDueConfirmationEmailOutboxInMemory(list, at(12), 25);
+  markConfirmationEmailOutboxProcessingInMemory(reclaimed, at(12), 'B');
+
+  // Worker B completes it (its send succeeded).
+  assert.equal(
+    applyOutboxResolutionInMemoryIfOwner(reclaimed, { action: 'complete' }, at(12), 'B'),
+    true,
+  );
+  assert.equal(task.status, 'completed');
+
+  // Worker A's send finally returns (a failure) and it tries to reschedule/fail.
+  // Both terminal writes must be REJECTED — A no longer owns the row.
+  assert.equal(
+    applyOutboxResolutionInMemoryIfOwner(task, { action: 'retry', attempts: 1, nextAttemptAt: at(20), lastError: 'late' }, at(13), 'A'),
+    false,
+  );
+  assert.equal(
+    applyOutboxResolutionInMemoryIfOwner(task, { action: 'fail', attempts: 6, lastError: 'late', alert: true }, at(13), 'A'),
+    false,
+  );
+  // The row stays exactly as B left it — no spurious pending/failed, no alert path.
+  assert.equal(task.status, 'completed');
+  assert.equal(task.attempts, 0);
+  assert.equal(task.lastError, null);
 });
