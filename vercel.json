@@ -2,6 +2,9 @@
   "functions": {
     "api/cron/google-sheets.ts": {
       "maxDuration": 60
+    },
+    "api/cron/confirmation-emails.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
@@ -15,6 +18,10 @@
     },
     {
       "path": "/api/cron/google-sheets",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/confirmation-emails",
       "schedule": "*/5 * * * *"
     }
   ],

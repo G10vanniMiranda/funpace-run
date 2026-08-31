@@ -145,6 +145,38 @@ create index if not exists "run-email-deliveries_registration_created_idx"
 create index if not exists "run-email-deliveries_status_attempted_idx"
   on "run-email-deliveries"(status, attempted_at asc);
 
+create table if not exists "run-email-outbox" (
+  id text primary key,
+  registration_id text not null references "run-registrations"(id),
+  event_id text,
+  email_type text not null check (email_type in ('confirmation')),
+  status text not null check (status in ('pending', 'processing', 'completed', 'failed')),
+  attempts integer not null default 0 check (attempts >= 0),
+  next_attempt_at text not null,
+  locked_at text,
+  locked_by text,
+  last_error text,
+  source text,
+  created_at text not null,
+  updated_at text not null,
+  processed_at text,
+  constraint "run-email-outbox_registration_type_key" unique (registration_id, email_type),
+  constraint "run-email-outbox_status_shape_check" check (
+    (status = 'pending' and locked_by is null)
+    or (status = 'processing' and locked_at is not null and locked_by is not null)
+    or (status = 'completed' and processed_at is not null)
+    or (status = 'failed' and processed_at is not null)
+  )
+);
+
+create index if not exists "run-email-outbox_due_idx"
+  on "run-email-outbox"(next_attempt_at asc)
+  where status = 'pending';
+
+create index if not exists "run-email-outbox_processing_idx"
+  on "run-email-outbox"(locked_at asc)
+  where status = 'processing';
+
 create table if not exists "run-google-sheet-sync" (
   id text primary key,
   entity_type text not null check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'email_delivery', 'remarketing', 'confirmed_payments_projection')),

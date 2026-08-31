@@ -38,6 +38,8 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { eventInfo } from '../config/event';
+import { useAdminMutation } from '../hooks/useAdminMutation';
+import type { AdminMutationState } from '../lib/admin-mutation-runtime';
 import { PartnersPanel } from '../components/admin/PartnersPanel';
 import QRCode from 'qrcode';
 import {
@@ -244,6 +246,11 @@ export function AdminPage() {
   const [registrationDetails, setRegistrationDetails] = useState<AdminRegistrationDetailsResponse | null>(null);
   const [actionLoading, setActionLoading] = useState<string>('');
   const [maintenanceDraft, setMaintenanceDraft] = useState<{ registration: AdminRegistration; action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit'; reason: string } | null>(null);
+  // EMAIL-OPS-002 Stage 2 — the confirmation send/resend action is the first
+  // (and, this release, only) Admin mutation on the reusable state machine:
+  // idle → confirming → submitting → success | failure, with an in-context
+  // result that loadAdminData() cannot erase and an explicit 401 path.
+  const sendEmailMutation = useAdminMutation<Awaited<ReturnType<typeof maintainAdminRegistration>>>();
   const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
   const adminLoadInFlight = useRef(false);
 
@@ -501,7 +508,31 @@ export function AdminPage() {
 
   const handleMaintenance = async (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => {
     setActionMessage('');
+    if (action === 'send-email') sendEmailMutation.reset();
     setMaintenanceDraft({ registration, action, reason: '' });
+  };
+
+  // EMAIL-OPS-002 Stage 2 — the confirmation send/resend path. Feedback lives in
+  // the modal (state machine), never in the transient page banner. Authoritative
+  // registration state is refreshed only on acknowledge(), after the operator
+  // has seen the backend result.
+  const submitSendEmail = async () => {
+    if (!maintenanceDraft || maintenanceDraft.action !== 'send-email') return;
+    const registrationId = maintenanceDraft.registration.id;
+    await sendEmailMutation.submit(() => maintainAdminRegistration(adminKey, registrationId, 'send-email', ''));
+  };
+
+  const acknowledgeSendEmail = async () => {
+    const registrationId = maintenanceDraft?.registration.id;
+    const updated = sendEmailMutation.state.result?.registration;
+    sendEmailMutation.acknowledge();
+    setMaintenanceDraft(null);
+    if (updated) updateRegistration(updated);
+    if (registrationId) {
+      try { setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registrationId)); }
+      catch { /* detail refresh is best-effort; the list refresh below is authoritative */ }
+    }
+    await loadAdminData();
   };
 
   const submitMaintenance = async () => {
@@ -660,27 +691,35 @@ export function AdminPage() {
         onClose={() => { setSelectedRegistration(null); setRegistrationDetails(null); }}
       />
 
-      {maintenanceDraft && (
+      {maintenanceDraft && maintenanceDraft.action === 'send-email' && (
+        <SendConfirmationEmailModal
+          email={maintenanceDraft.registration.email}
+          fullName={maintenanceDraft.registration.fullName}
+          state={sendEmailMutation.state}
+          onSubmit={() => void submitSendEmail()}
+          onAcknowledge={() => void acknowledgeSendEmail()}
+          onSessionExpired={handleSessionExpired}
+          onClose={() => { sendEmailMutation.reset(); setMaintenanceDraft(null); }}
+        />
+      )}
+
+      {maintenanceDraft && maintenanceDraft.action !== 'send-email' && (
         <ActionModal
-          title={maintenanceDraft.action === 'cancel' ? 'Cancelar inscrição' : maintenanceDraft.action === 'send-email' ? 'Enviar email' : 'Confirmar ação administrativa'}
+          title={maintenanceDraft.action === 'cancel' ? 'Cancelar inscrição' : 'Confirmar ação administrativa'}
           description={maintenanceDraft.action === 'cancel'
             ? `A inscrição de ${maintenanceDraft.registration.fullName} será cancelada e a vaga será liberada.`
-            : maintenanceDraft.action === 'send-email'
-              ? `A confirmação será enviada para ${maintenanceDraft.registration.email}.`
-              : `Confirme a ação para ${maintenanceDraft.registration.fullName}.`}
-          confirmLabel={actionLoading ? 'Processando...' : maintenanceDraft.action === 'cancel' ? 'Cancelar inscrição' : maintenanceDraft.action === 'send-email' ? 'Enviar email' : 'Confirmar'}
+            : `Confirme a ação para ${maintenanceDraft.registration.fullName}.`}
+          confirmLabel={actionLoading ? 'Processando...' : maintenanceDraft.action === 'cancel' ? 'Cancelar inscrição' : 'Confirmar'}
           confirmTone={maintenanceDraft.action === 'cancel' ? 'danger' : 'brand'}
-          confirmDisabled={actionLoading !== '' || (maintenanceDraft.action !== 'send-email' && maintenanceDraft.reason.trim().length < 5)}
+          confirmDisabled={actionLoading !== '' || maintenanceDraft.reason.trim().length < 5}
           onConfirm={() => void submitMaintenance()}
           onClose={() => setMaintenanceDraft(null)}
         >
-          {maintenanceDraft.action !== 'send-email' && (
-            <label className="block text-xs font-bold text-zinc-400">
-              Motivo da ação <span className="font-normal text-zinc-500">(mínimo de 5 caracteres)</span>
-              <textarea value={maintenanceDraft.reason} onChange={(event) => setMaintenanceDraft({ ...maintenanceDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
-              <span className="mt-1 block text-right font-mono text-[10px] text-zinc-500">{maintenanceDraft.reason.trim().length}/5</span>
-            </label>
-          )}
+          <label className="block text-xs font-bold text-zinc-400">
+            Motivo da ação <span className="font-normal text-zinc-500">(mínimo de 5 caracteres)</span>
+            <textarea value={maintenanceDraft.reason} onChange={(event) => setMaintenanceDraft({ ...maintenanceDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
+            <span className="mt-1 block text-right font-mono text-[10px] text-zinc-500">{maintenanceDraft.reason.trim().length}/5</span>
+          </label>
         </ActionModal>
       )}
 
@@ -2730,6 +2769,82 @@ function canAccessNav(role: AdminRole | null, nav: AdminNavKey) {
 
 function EditInput({ label, value, onChange, type = 'text', maxLength }: { label: string; value: string; onChange: (value: string) => void; type?: string; maxLength?: number }) {
   return <label className="text-xs font-bold text-zinc-400">{label}<input type={type} maxLength={maxLength} value={value} onChange={(event) => onChange(event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white" /></label>;
+}
+
+// EMAIL-OPS-002 Stage 2 — confirmation send/resend modal driven by the reusable
+// mutation state machine. Feedback is rendered HERE (in-context), never through
+// the page-level `error` banner that loadAdminData() / the 60s poll clear. 401
+// is an explicit described session-expiry with its own button — never a silent
+// logout mid-action.
+function SendConfirmationEmailModal({
+  email,
+  fullName,
+  state,
+  onSubmit,
+  onAcknowledge,
+  onSessionExpired,
+  onClose,
+}: {
+  email: string;
+  fullName: string;
+  state: AdminMutationState<{ message?: string; registration?: AdminRegistration }>;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onSessionExpired: () => void;
+  onClose: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onClose} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">Enviar email de confirmação</h3>
+            <p className="mt-2 text-sm text-zinc-400">A confirmação de <span className="text-white">{fullName}</span> será enviada para <span className="text-white">{email}</span>.</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {succeeded && (
+          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            {state.successMessage || 'Email de confirmação enviado com sucesso.'}
+          </div>
+        )}
+        {failed && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Não foi possível concluir a ação.'}
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {succeeded ? (
+            <button type="button" onClick={onAcknowledge} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : (
+            <>
+              <button type="button" onClick={onClose} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting}
+                className="flex items-center gap-2 border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting ? 'Enviando...' : failed ? 'Tentar novamente' : 'Enviar email'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ActionModal({
