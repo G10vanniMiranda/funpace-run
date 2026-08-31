@@ -221,12 +221,34 @@ export type AdminSessionRecord = {
 export type AdminUserRecord = {
   id: string;
   email: string;
-  passwordHash: string;
+  // ADMIN-IAM-001 Stage 1: nullable — a pending-invite account has no password yet.
+  passwordHash: string | null;
   role: 'administrator' | 'finance' | 'operation';
+  // ADMIN-IAM-001 Stage 1: human-readable name (mandatory at the IAM API boundary
+  // for invited accounts; null only for the legacy bootstrap row until IAM-5).
+  name?: string | null;
+  // ADMIN-IAM-001 Stage 1: soft references to run-admin-users.id (no FK);
+  // null / 'bootstrap' / 'system' for machine-created rows.
+  createdBy?: string | null;
+  disabledBy?: string | null;
   createdAt: string;
   updatedAt: string;
   lastLoginAt: string | null;
   disabledAt: string | null;
+};
+
+// ADMIN-IAM-001 Stage 1: single-use invite / password-reset tokens. Only the
+// SHA-256 hash is stored; the raw token is never persisted or logged.
+export type AdminAuthTokenRecord = {
+  id: string;
+  userId: string;
+  purpose: 'invite' | 'reset';
+  tokenHash: string;
+  emailSnapshot: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  createdBy: string | null;
+  createdAt: string;
 };
 
 export type PartnershipLeadStatus = 'new' | 'contacted' | 'negotiating' | 'approved' | 'rejected';
@@ -455,6 +477,7 @@ const table = {
   auditLogs: '"run-audit-logs"',
   adminSessions: '"run-admin-sessions"',
   adminUsers: '"run-admin-users"',
+  adminAuthTokens: '"run-admin-auth-tokens"',
   partnershipLeads: '"run-partnership-leads"',
   partners: '"run-partners"',
   partnerAuditLogs: '"run-partner-audit-logs"',
@@ -1172,6 +1195,29 @@ async function ensurePostgresDatabase(client: Queryable) {
     end $$`);
   await client.query(`create index if not exists "run-integration-events_retry_idx" on ${table.integrationEvents}(status, next_attempt_at)`);
   await client.query(`create index if not exists "run-integration-events_entity_idx" on ${table.integrationEvents}(entity_type, entity_id, created_at)`);
+
+  // ADMIN-IAM-001 Stage 1 — individual administrative identity primitives.
+  // Additive and backward-compatible with the currently deployed auth code
+  // (mirrors server/migrations/20260831_admin_iam_primitives.sql).
+  await client.query(`alter table ${table.adminUsers} add column if not exists name text`);
+  await client.query(`alter table ${table.adminUsers} add column if not exists created_by text`);
+  await client.query(`alter table ${table.adminUsers} add column if not exists disabled_by text`);
+  await client.query(`alter table ${table.adminUsers} alter column password_hash drop not null`);
+  await client.query(`create table if not exists ${table.adminAuthTokens} (
+    id text primary key,
+    user_id text not null,
+    purpose text not null check (purpose in ('invite', 'reset')),
+    token_hash text not null check (token_hash ~ '^[0-9a-f]{64}$'),
+    email_snapshot text not null,
+    expires_at text not null,
+    consumed_at text,
+    created_by text,
+    created_at text not null
+  )`);
+  await client.query(`create unique index if not exists "run-admin-auth-tokens_token_hash_idx" on ${table.adminAuthTokens}(token_hash)`);
+  await client.query(`create index if not exists "run-admin-auth-tokens_user_purpose_idx" on ${table.adminAuthTokens}(user_id, purpose)`);
+  await client.query(`create unique index if not exists "run-admin-auth-tokens_one_active_idx" on ${table.adminAuthTokens}(user_id, purpose) where consumed_at is null`);
+  await client.query(`create index if not exists "run-admin-sessions_actor_active_idx" on ${table.adminSessions}(actor) where revoked_at is null`);
 
   const existingEvents = await client.query(`select count(*)::int as count from ${table.events}`);
 
@@ -2802,6 +2848,108 @@ export async function revokeAdminSessionInPostgres(sessionId: string, revokedAt:
      where id = $2`,
     [revokedAt, sessionId],
   );
+}
+
+// ---------------------------------------------------------------------------
+// ADMIN-IAM-001 Stage 1 — individual administrative identity data primitives.
+// No endpoint, no email, no account creation — only the reusable building
+// blocks IAM-2/3 will compose.
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL fragment for "active administrator" (Stage 0 §19): role administrator,
+ * not disabled, invite accepted (password set). Single source of truth so the
+ * last-administrator invariant is never expressed differently in two places.
+ */
+export const ACTIVE_ADMINISTRATOR_SQL =
+  `role = 'administrator' and disabled_at is null and password_hash is not null and btrim(coalesce(password_hash, '')) <> ''`;
+
+async function countActiveAdministrators(client: Queryable): Promise<number> {
+  const result = await client.query(
+    `select count(*)::int as count from ${table.adminUsers} where ${ACTIVE_ADMINISTRATOR_SQL}`,
+  );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+/** Read-only count of active administrators. Not for use inside a mutation guard. */
+export async function countActiveAdministratorsInPostgres(): Promise<number> {
+  await ensurePostgresReady();
+  return countActiveAdministrators(requirePool());
+}
+
+export class LastAdministratorError extends Error {
+  code = 'LAST_ADMIN' as const;
+  constructor(message = 'A operacao deixaria o sistema sem nenhum administrador ativo.') {
+    super(message);
+    this.name = 'LastAdministratorError';
+  }
+}
+
+/**
+ * Run an admin-users mutation under a transaction that:
+ *   1. takes a transaction-scoped advisory lock so concurrent IAM mutations
+ *      serialise (no two callers can each observe themselves as safe);
+ *   2. runs `mutate(client)` — the caller's writes;
+ *   3. re-counts active administrators INSIDE the same transaction;
+ *   4. commits only if `>= 1` active administrator remains, otherwise rolls
+ *      back and throws LastAdministratorError.
+ *
+ * IAM-2 composes disable / role-change / delete on top of this. Concurrency
+ * correctness comes from the advisory lock + the in-transaction re-count; there
+ * is no "read count then update" TOCTOU window.
+ */
+export async function withAdminUsersMutation<T>(
+  mutate: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  await ensurePostgresReady();
+  const client = await requirePool().connect();
+  try {
+    await client.query('begin');
+    await client.query(`select pg_advisory_xact_lock(hashtext('funpace-run-admin-users'))`);
+    const result = await mutate(client);
+    if (await countActiveAdministrators(client) < 1) {
+      await client.query('rollback');
+      throw new LastAdministratorError();
+    }
+    await client.query('commit');
+    return result;
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Revoke every currently-active session for an administrative user. Sessions are
+ * still keyed by `actor` (email) in run-admin-sessions; revocation therefore
+ * takes the email. Idempotent — already-revoked rows keep their original
+ * `revoked_at`. Returns the number of sessions newly revoked.
+ *
+ * TECH DEBT: run-admin-sessions.actor is the email, not run-admin-users.id. A
+ * future migration should carry a stable user_id on the session so revocation,
+ * audit and "my devices" survive an email change. Out of scope for IAM-001
+ * Stage 1 — recorded here.
+ */
+export async function revokeAllAdminSessionsForUserInPostgres(
+  email: string,
+  revokedAt: string = new Date().toISOString(),
+  client?: Queryable,
+): Promise<number> {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return 0;
+  if (!client) {
+    await ensurePostgresReady();
+    client = requirePool();
+  }
+  const result = await client.query(
+    `update ${table.adminSessions}
+        set revoked_at = $1
+      where actor = $2 and revoked_at is null`,
+    [revokedAt, normalizedEmail],
+  );
+  return result.rowCount ?? 0;
 }
 
 export type CancelRegistrationResult =
