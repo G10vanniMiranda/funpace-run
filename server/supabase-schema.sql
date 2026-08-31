@@ -208,12 +208,39 @@ create table if not exists "run-admin-sessions" (
 create table if not exists "run-admin-users" (
   id text primary key,
   email text not null unique,
-  password_hash text not null,
+  -- ADMIN-IAM-001 Stage 1: nullable so a pending-invite account can exist before
+  -- its owner sets a password.
+  password_hash text,
   role text not null check (role in ('administrator', 'finance', 'operation')),
+  -- ADMIN-IAM-001 Stage 1: human-readable name (mandatory at the IAM API boundary
+  -- for invited accounts; NULL only for the legacy bootstrap row until IAM-5).
+  name text,
+  -- ADMIN-IAM-001 Stage 1: soft references to run-admin-users.id (no FK); NULL /
+  -- 'bootstrap' / 'system' for machine-created rows.
+  created_by text,
+  disabled_by text,
   created_at text not null,
   updated_at text not null,
   last_login_at text,
   disabled_at text
+);
+
+-- ADMIN-IAM-001 Stage 1: single-use invite / password-reset tokens. Only the
+-- SHA-256 hash of the high-entropy bearer token is stored; the raw token is
+-- returned once to the issuer and never persisted or logged.
+-- consumed_at = the user completed the flow; revoked_at = the system invalidated
+-- it (replacement issued / account disabled). Kept distinct for audit.
+create table if not exists "run-admin-auth-tokens" (
+  id text primary key,
+  user_id text not null,
+  purpose text not null check (purpose in ('invite', 'reset')),
+  token_hash text not null check (token_hash ~ '^[0-9a-f]{64}$'),
+  email_snapshot text not null,
+  expires_at text not null,
+  consumed_at text,
+  revoked_at text,
+  created_by text,
+  created_at text not null
 );
 
 create table if not exists "run-partnership-leads" (
@@ -351,7 +378,11 @@ create unique index if not exists "run-kit-deliveries_registration_id_idx" on "r
 create index if not exists "run-audit-logs_entity_idx" on "run-audit-logs"(entity_type, entity_id);
 create index if not exists "run-admin-sessions_actor_idx" on "run-admin-sessions"(actor);
 create index if not exists "run-admin-sessions_expires_at_idx" on "run-admin-sessions"(expires_at);
+create index if not exists "run-admin-sessions_actor_active_idx" on "run-admin-sessions"(actor) where revoked_at is null;
 create unique index if not exists "run-admin-users_email_idx" on "run-admin-users"(email);
+create unique index if not exists "run-admin-auth-tokens_token_hash_idx" on "run-admin-auth-tokens"(token_hash);
+create index if not exists "run-admin-auth-tokens_user_purpose_idx" on "run-admin-auth-tokens"(user_id, purpose);
+create unique index if not exists "run-admin-auth-tokens_one_outstanding_idx" on "run-admin-auth-tokens"(user_id, purpose) where consumed_at is null and revoked_at is null;
 create index if not exists "run-partnership-leads_status_idx" on "run-partnership-leads"(status);
 create index if not exists "run-partnership-leads_created_at_idx" on "run-partnership-leads"(created_at);
 create index if not exists "run-partners_status_idx" on "run-partners"(status);
