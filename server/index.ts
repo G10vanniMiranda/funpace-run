@@ -101,6 +101,13 @@ import { buildExecutiveDashboard, buildRegistrationTimeline, detectOperationalAl
 import { buildExecutiveMetrics, financialVisibleForRole } from './executive-metrics.js';
 import { eventContext, resolveEventScope, scopeDatabaseToEvent, type EventScopeErrorCode } from './event-scope.js';
 import { consolidateParticipants, toRegistrationHistory } from './participant-read-model.js';
+import {
+  serializeAdminRegistrationForRole,
+  serializeAdminRegistrationsForRole,
+  serializeRegistrationHistoryForRole,
+  serializeRegistrationTimelineForRole,
+  type RegistrationViewRole,
+} from './registration-visibility.js';
 import { businessDateKey, businessDateKeysEndingToday, businessTodayKey, businessWeekStart } from './business-time.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
 import { calculatePartnerPricing } from './partner-discount.js';
@@ -3145,6 +3152,25 @@ function toAdminRow(database: Database, registration: RegistrationRecord) {
   };
 }
 
+// ADMIN-003 Stage 3: apply the caller's RBAC/PII view to an action payload that
+// carries `{ registration }`. Used on every Inscrições mutation response so an
+// `operation` user can never read financial / gateway / coupon / partner data
+// back out of a check-in / kit / bib / undo call. `list` surface keeps the
+// echoed row consistent with the list the frontend merges it into.
+function withRegistrationView<P>(payload: P, role: RegistrationViewRole, surface: 'list' | 'detail' = 'list'): P {
+  if (payload && typeof payload === 'object' && 'registration' in (payload as Record<string, unknown>)) {
+    const holder = payload as Record<string, unknown>;
+    if (holder.registration && typeof holder.registration === 'object') {
+      holder.registration = serializeAdminRegistrationForRole(
+        holder.registration as Record<string, unknown>,
+        role,
+        surface,
+      );
+    }
+  }
+  return payload;
+}
+
 async function handleAdminPaymentDetails(req: IncomingMessage, res: ServerResponse, registrationId: string) {
   if (!await requireAdmin(req, res, ['administrator', 'finance']) || !requireAdminDatabase(res)) return;
   const database = await transaction((currentDatabase) => currentDatabase, { persist: false, scope: 'admin-registrations' });
@@ -4045,7 +4071,7 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
   const googleSheetSync = result.statusCode === 200
     ? await queueCheckInGoogleSheetSync(registrationId)
     : null;
-  json(res, result.statusCode, result.payload);
+  json(res, result.statusCode, withRegistrationView(result.payload, adminSession.role as RegistrationViewRole));
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
@@ -4117,7 +4143,7 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
   const googleSheetSync = result.statusCode === 200
     ? await queueCheckInGoogleSheetSync(registrationId)
     : null;
-  json(res, result.statusCode, result.payload);
+  json(res, result.statusCode, withRegistrationView(result.payload, adminSession.role as RegistrationViewRole));
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
@@ -4199,7 +4225,7 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
   const googleSheetSync = result.statusCode === 200 && ['undo-check-in', 'undo-kit'].includes(action)
     ? await queueCheckInGoogleSheetSync(registrationId)
     : null;
-  json(res, result.statusCode, result.payload);
+  json(res, result.statusCode, withRegistrationView(result.payload, adminSession.role as RegistrationViewRole));
   if (registrationGoogleSheetSync) await processGoogleSheetSync(registrationGoogleSheetSync.id);
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
@@ -4264,14 +4290,26 @@ async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerR
     const partnerType = (metadata.partnerType || metadata.partner_type || registration.partnerType) as PartnerType | null;
     return { id: `partner:${log.id}`, type: log.action, title: getPartnerAuditEventTitle(log.action, partnerType), occurredAt: log.createdAt, actor: log.userId || 'system', origin: 'partner_audit', severity: /failed|declined|rejected|issue|mismatch/i.test(log.action) ? 'critical' as const : /approved|applied/i.test(log.action) ? 'success' as const : 'info' as const, details: { partnerName: log.partnerName, partnerType, oldData: log.oldData, newData: log.newData, ...metadata } };
   });
+  // ADMIN-003 Stage 3: an `operation` caller gets the minimised detail — no
+  // financial / gateway / coupon / partner fields, e-mail & phone masked,
+  // emergency contact kept (operational purpose). The raw audit-log array and
+  // the payment-event array (IP / user-agent / session / gateway payload / PII
+  // diffs) are withheld entirely; the timeline is filtered to operational
+  // events with only safe detail keys.
+  const role = session.role as RegistrationViewRole;
+  const isOperation = role === 'operation';
+  const timeline = serializeRegistrationTimelineForRole(
+    [...buildRegistrationTimeline(database, registrationId), ...partnerTimeline].sort((left, right) => left.occurredAt.localeCompare(right.occurredAt)),
+    role,
+  );
   json(res, 200, {
-    registration: toAdminRow(database, registration),
-    auditLogs: database.auditLogs.filter((item) => item.entityId === registrationId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    paymentEvents: payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)) : [],
+    registration: serializeAdminRegistrationForRole(toAdminRow(database, registration), role, 'detail'),
+    auditLogs: isOperation ? [] : database.auditLogs.filter((item) => item.entityId === registrationId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    paymentEvents: isOperation ? [] : (payment ? database.paymentEvents.filter((item) => item.paymentId === payment.id).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)) : []),
     partnerAuditLogs,
     partnerHistory: session.role === 'administrator' && registration.partnerId ? { partnerId: registration.partnerId, partnerName: registration.partnerName || '', partnerType: registration.partnerType || 'sports_advisory', partnerLink: registration.partnerLink || '', discountPercentage: registration.discountPercentage || 0, identifiedAt: registration.partnerIdentifiedAt || registration.createdAt, paidAt: registration.paidAt || payment?.paidAt || null, responsibleUser: partnerAuditLogs.find((log) => log.userId)?.userId || null } : null,
-    timeline: [...buildRegistrationTimeline(database, registrationId), ...partnerTimeline].sort((left, right) => left.occurredAt.localeCompare(right.occurredAt)),
-    personHistory,
+    timeline,
+    personHistory: serializeRegistrationHistoryForRole(personHistory, role),
   });
 }
 
@@ -4300,11 +4338,12 @@ async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, r
     database.auditLogs.push(createAuditLog(req, adminSession, { action: 'registration.bib_assigned', entityType: 'registration', entityId: registrationId, payload: { reason, previous, bibNumber }, createdAt: now }));
     return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
   });
-  json(res, result.statusCode, result.payload);
+  json(res, result.statusCode, withRegistrationView(result.payload, adminSession.role as RegistrationViewRole));
 }
 
 async function handleAdminRegistrations(req: IncomingMessage, res: ServerResponse, url: URL) {
-  if (!await requireAdmin(req, res)) {
+  const session = await requireAdmin(req, res);
+  if (!session) {
     return;
   }
 
@@ -4312,6 +4351,10 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  // ADMIN-003 Stage 3: the RBAC/PII view is applied to BOTH the person-centric
+  // (view=people) and the legacy row-centric response, so an `operation` user
+  // cannot recover financial / gateway / coupon / partner data through either.
+  const role = session.role as RegistrationViewRole;
   const requestedPage = Math.max(Number.parseInt(url.searchParams.get('page') || '1', 10) || 1, 1);
 
   // ADMIN-003 Stage 2: `view=people` is the person-centric Inscricoes tab -
@@ -4326,7 +4369,11 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
     if (!eventScope) return;
 
     const { registrations, pagination } = buildParticipantsPage(url, eventScope.scoped);
-    json(res, 200, { registrations, pagination, event: eventScope.context });
+    json(res, 200, {
+      registrations: serializeAdminRegistrationsForRole(registrations, role, 'list'),
+      pagination,
+      event: eventScope.context,
+    });
     return;
   }
 
@@ -4337,7 +4384,10 @@ async function handleAdminRegistrations(req: IncomingMessage, res: ServerRespons
   const total = rows.length;
   const totalPages = Math.max(Math.ceil(total / pageSize), 1);
   const page = Math.min(requestedPage, totalPages);
-  json(res, 200, { registrations: rows.slice((page - 1) * pageSize, page * pageSize), pagination: { page, pageSize, total, totalPages } });
+  json(res, 200, {
+    registrations: serializeAdminRegistrationsForRole(rows.slice((page - 1) * pageSize, page * pageSize), role, 'list'),
+    pagination: { page, pageSize, total, totalPages },
+  });
 }
 
 async function handleAdminGoogleSheetsStatus(req: IncomingMessage, res: ServerResponse) {
@@ -4490,7 +4540,8 @@ async function handleAdminGoogleSheetsRetry(req: IncomingMessage, res: ServerRes
 }
 
 async function handleAdminOperation(req: IncomingMessage, res: ServerResponse, url: URL) {
-  if (!await requireAdmin(req, res, ['administrator', 'operation']) || !requireAdminDatabase(res)) return;
+  const session = await requireAdmin(req, res, ['administrator', 'operation']);
+  if (!session || !requireAdminDatabase(res)) return;
   const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
   const query = (url.searchParams.get('q') || '').trim().toLowerCase();
   const filter = url.searchParams.get('filter') || 'all';
@@ -4499,13 +4550,15 @@ async function handleAdminOperation(req: IncomingMessage, res: ServerResponse, u
     if (filter === 'kit_pending' && row.kitStatus === 'delivered') return false;
     if (filter === 'checkin_pending' && row.checkInStatus === 'checked_in') return false;
     if (filter === 'completed' && !(row.kitStatus === 'delivered' && row.checkInStatus === 'checked_in')) return false;
+    // ADMIN-003 Stage 3: search still runs over the full row (search-data access
+    // != response-data disclosure); the response below is role-minimised.
     if (query && ![row.id, row.fullName, row.email, row.phone, row.cpfMasked, row.bibNumber || ''].some((value) => value.toLowerCase().includes(query))) return false;
     return true;
   }).sort((a, b) => a.fullName.localeCompare(b.fullName, 'pt-BR'));
   const pageSize = Math.min(Math.max(Number(url.searchParams.get('pageSize') || 25), 1), 100);
   const totalPages = Math.max(Math.ceil(rows.length / pageSize), 1); const page = Math.min(Math.max(Number(url.searchParams.get('page') || 1), 1), totalPages);
   json(res, 200, {
-    registrations: rows.slice((page - 1) * pageSize, page * pageSize),
+    registrations: serializeAdminRegistrationsForRole(rows.slice((page - 1) * pageSize, page * pageSize), session.role as RegistrationViewRole, 'list'),
     pagination: { page, pageSize, total: rows.length, totalPages },
     totals: { paid: allPaid.length, kitPending: allPaid.filter((row) => row.kitStatus !== 'delivered').length, checkInPending: allPaid.filter((row) => row.checkInStatus !== 'checked_in').length, completed: allPaid.filter((row) => row.kitStatus === 'delivered' && row.checkInStatus === 'checked_in').length },
   });
@@ -4849,11 +4902,20 @@ export function escapeCsv(value: unknown) {
 }
 
 async function handleAdminRegistrationsCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
-  if (!await requireAdmin(req, res)) {
+  const session = await requireAdmin(req, res);
+  if (!session) {
     return;
   }
 
   if (!requireAdminDatabase(res)) {
+    return;
+  }
+
+  // ADMIN-003 Stage 3: exporting the registrations base is administrator /
+  // finance only. `operation` is refused at the backend (the hidden button is
+  // not the control) with a generic message that leaks nothing.
+  if (session.role === 'operation') {
+    json(res, 403, { message: 'Exportacao de inscricoes nao disponivel para o seu perfil.' });
     return;
   }
 

@@ -33,7 +33,9 @@ test('§53 GET /api/admin/registrations?view=people resolves an event scope then
   assert.match(handler, /resolveDashboardEventScope\(res, fullDatabase, url\)/);
   assert.match(handler, /if \(!eventScope\) return;/);
   assert.match(handler, /buildParticipantsPage\(url, eventScope\.scoped\)/);
-  assert.match(handler, /json\(res, 200, \{ registrations, pagination, event: eventScope\.context \}\)/);
+  // ADMIN-003 Stage 3 wraps the rows in the role-aware serializer; the
+  // pagination + event contract is unchanged.
+  assert.match(handler, /registrations: serializeAdminRegistrationsForRole\(registrations, role, 'list'\),\s*\n\s*pagination,\s*\n\s*event: eventScope\.context,/);
 });
 
 test('§54 no "all events" / silent fallback — the resolver is the dashboard one', () => {
