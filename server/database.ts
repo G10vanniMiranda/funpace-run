@@ -25,6 +25,11 @@ import {
   CONFIRMATION_EMAIL_OUTBOX_LEASE_MS,
   type ConfirmationEmailOutboxRecord,
 } from './confirmation-email-outbox.js';
+import {
+  candidateLifecycleForEvent,
+  deriveLifecycleFromEvents,
+  type ProviderLifecycle,
+} from './email-provider-lifecycle.js';
 
 const { Pool } = pg;
 
@@ -473,6 +478,7 @@ const table = {
   payments: '"run-payments"',
   paymentEvents: '"run-payment-events"',
   emailDeliveries: '"run-email-deliveries"',
+  emailProviderEvents: '"run-email-provider-events"',
   confirmationEmailOutbox: '"run-email-outbox"',
   googleSheetSyncs: '"run-google-sheet-sync"',
   checkIns: '"run-check-ins"',
@@ -808,6 +814,29 @@ async function ensurePostgresDatabase(client: Queryable) {
         or (status = 'failed' and sent_at is null and failed_at is not null and error is not null)
       )
     );
+    create table if not exists ${table.emailProviderEvents} (
+      id text primary key,
+      svix_id text not null,
+      email_id text not null,
+      event_type text not null,
+      provider text not null default 'resend',
+      provider_created_at text not null,
+      received_at text not null,
+      delivery_id text references ${table.emailDeliveries}(id),
+      registration_id text references ${table.registrations}(id),
+      recipient_hash text,
+      reason_category text,
+      reason_detail text,
+      payload_digest text not null,
+      created_at text not null,
+      constraint "run-email-provider-events_svix_id_key" unique (svix_id),
+      constraint "run-email-provider-events_recipient_hash_check" check (recipient_hash is null or recipient_hash ~ '^[0-9a-f]{64}$'),
+      constraint "run-email-provider-events_payload_digest_check" check (payload_digest ~ '^[0-9a-f]{64}$'),
+      constraint "run-email-provider-events_reason_category_check" check (
+        reason_category is null or reason_category in ('accepted', 'delivered', 'delayed', 'hard', 'soft', 'complaint', 'failed', 'suppressed', 'unknown')
+      ),
+      constraint "run-email-provider-events_reason_detail_len_check" check (reason_detail is null or length(reason_detail) <= 500)
+    );
     create table if not exists ${table.confirmationEmailOutbox} (
       id text primary key,
       registration_id text not null references ${table.registrations}(id),
@@ -1038,6 +1067,10 @@ async function ensurePostgresDatabase(client: Queryable) {
     create index if not exists "run-email-deliveries_status_attempted_idx" on ${table.emailDeliveries}(status, attempted_at asc);
     create index if not exists "run-email-outbox_due_idx" on ${table.confirmationEmailOutbox}(next_attempt_at asc) where status = 'pending';
     create index if not exists "run-email-outbox_processing_idx" on ${table.confirmationEmailOutbox}(locked_at asc) where status = 'processing';
+    create index if not exists "run-email-provider-events_email_id_idx" on ${table.emailProviderEvents}(email_id);
+    create index if not exists "run-email-provider-events_delivery_created_idx" on ${table.emailProviderEvents}(delivery_id, provider_created_at asc) where delivery_id is not null;
+    create index if not exists "run-email-provider-events_registration_created_idx" on ${table.emailProviderEvents}(registration_id, provider_created_at asc) where registration_id is not null;
+    create index if not exists "run-email-provider-events_type_received_idx" on ${table.emailProviderEvents}(event_type, received_at asc);
     create index if not exists "run-google-sheet-sync_status_idx" on ${table.googleSheetSyncs}(status);
     create index if not exists "run-google-sheet-sync_entity_idx" on ${table.googleSheetSyncs}(entity_type, entity_id);
     create index if not exists "run-google-sheet-sync_updated_at_idx" on ${table.googleSheetSyncs}(updated_at);
@@ -1062,6 +1095,12 @@ async function ensurePostgresDatabase(client: Queryable) {
 
   await client.query(`alter table ${table.googleSheetSyncs} drop constraint if exists "run-google-sheet-sync_entity_type_check"`);
   await client.query(`alter table ${table.googleSheetSyncs} add constraint "run-google-sheet-sync_entity_type_check" check (entity_type in ('registration', 'payment', 'check_in', 'shirt_summary', 'lot_summary', 'alert', 'partnership', 'email', 'email_delivery', 'remarketing', 'confirmed_payments_projection'))`);
+  // EMAIL-OPS-003 Stage 2 — additive, nullable provider lifecycle on the send-acceptance ledger.
+  await client.query(`alter table ${table.emailDeliveries} add column if not exists provider_lifecycle text`);
+  await client.query(`alter table ${table.emailDeliveries} add column if not exists provider_lifecycle_at text`);
+  await client.query(`alter table ${table.emailDeliveries} add column if not exists provider_lifecycle_reason text`);
+  await client.query(`alter table ${table.emailDeliveries} drop constraint if exists "run-email-deliveries_provider_lifecycle_check"`);
+  await client.query(`alter table ${table.emailDeliveries} add constraint "run-email-deliveries_provider_lifecycle_check" check (provider_lifecycle is null or provider_lifecycle in ('sent', 'delivery_delayed', 'delivered', 'bounced', 'complained', 'failed', 'suppressed'))`);
   await client.query(`alter table ${table.partners} add column if not exists partner_type text`);
   await client.query(`update ${table.partners} set partner_type = 'sports_advisory' where partner_type is null or btrim(partner_type) = ''`);
   await client.query(`alter table ${table.partners} alter column partner_type set default 'sports_advisory'`);
@@ -4262,6 +4301,152 @@ export async function getConfirmationEmailDurableStateInPostgres(
     hasSentDelivery: Number(row.sent_count || 0) > 0,
     legacySentAt: row.legacy_sent_at ? String(row.legacy_sent_at) : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// EMAIL-OPS-003 Stage 2 — provider delivery lifecycle ingestion.
+// ---------------------------------------------------------------------------
+// A NARROW transaction (EVENT-OPS-001 Stage 2B lesson): it touches only
+// run-email-provider-events (one append-only insert) and, when the event
+// correlates, run-email-deliveries (one SELECT ... FOR UPDATE + at most one
+// single-row lifecycle UPDATE). No readPostgresDatabase(scope='all'), no
+// savePostgresDatabase, no funpace-run-write global lock.
+//
+// - Idempotency: unique(svix_id) + ON CONFLICT DO NOTHING. A duplicate provider
+//   delivery is a no-op that still returns success.
+// - Correlation: data.email_id -> run-email-deliveries.provider_message_id.
+//   NEVER the recipient string (Production has shared-email participants).
+// - Derivation: re-fold the whole provider-event history for the delivery
+//   through deriveLifecycleFromEvents (pure, order-independent), then persist
+//   the derived state only if it moved.
+export type ResendWebhookIngestionInput = {
+  svixId: string;
+  emailId: string;
+  eventType: string;
+  providerCreatedAt: string;
+  receivedAt: string;
+  reasonCategory: string | null;
+  reasonDetail: string | null;
+  payloadDigest: string;
+};
+
+export type ResendWebhookIngestionResult = {
+  outcome: 'applied' | 'noop' | 'duplicate' | 'uncorrelated';
+  deliveryId: string | null;
+  registrationId: string | null;
+  previousLifecycle: ProviderLifecycle | null;
+  lifecycle: ProviderLifecycle | null;
+  changed: boolean;
+};
+
+export async function ingestResendWebhookEventInPostgres(
+  input: ResendWebhookIngestionInput,
+): Promise<ResendWebhookIngestionResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) throw new Error(configurationIssue);
+
+  const client = await requirePool().connect();
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const correlation = await client.query(
+      `select id, registration_id, recipient_hash
+       from ${table.emailDeliveries}
+       where provider = 'resend' and provider_message_id = $1
+       limit 1`,
+      [input.emailId],
+    );
+    const deliveryId: string | null = correlation.rows[0]?.id ?? null;
+    const registrationId: string | null = correlation.rows[0]?.registration_id ?? null;
+    const recipientHash: string | null = correlation.rows[0]?.recipient_hash ?? null;
+
+    const inserted = await client.query(
+      `insert into ${table.emailProviderEvents}
+         (id, svix_id, email_id, event_type, provider, provider_created_at, received_at,
+          delivery_id, registration_id, recipient_hash, reason_category, reason_detail, payload_digest, created_at)
+       values ($1, $2, $3, $4, 'resend', $5, $6, $7, $8, $9, $10, $11, $12, $6)
+       on conflict (svix_id) do nothing
+       returning id`,
+      [
+        randomUUID(),
+        input.svixId,
+        input.emailId,
+        input.eventType,
+        input.providerCreatedAt,
+        input.receivedAt,
+        deliveryId,
+        registrationId,
+        recipientHash,
+        input.reasonCategory,
+        input.reasonDetail,
+        input.payloadDigest,
+      ],
+    );
+
+    if (inserted.rowCount === 0) {
+      await client.query('commit');
+      return { outcome: 'duplicate', deliveryId, registrationId, previousLifecycle: null, lifecycle: null, changed: false };
+    }
+
+    if (!deliveryId) {
+      await client.query('commit');
+      return { outcome: 'uncorrelated', deliveryId: null, registrationId: null, previousLifecycle: null, lifecycle: null, changed: false };
+    }
+
+    const delivery = await client.query(
+      `select provider_lifecycle, provider_lifecycle_at from ${table.emailDeliveries} where id = $1 for update`,
+      [deliveryId],
+    );
+    const previousLifecycle = (delivery.rows[0]?.provider_lifecycle ?? null) as ProviderLifecycle | null;
+
+    const history = await client.query(
+      `select event_type, provider_created_at, reason_category
+       from ${table.emailProviderEvents}
+       where delivery_id = $1
+       order by provider_created_at asc, id asc`,
+      [deliveryId],
+    );
+    const derived = deriveLifecycleFromEvents(
+      history.rows.map((row) => ({ eventType: String(row.event_type), providerCreatedAt: String(row.provider_created_at) })),
+    );
+
+    // The reason label follows the event that fixed the current state.
+    const decidingRow = history.rows.find(
+      (row) => candidateLifecycleForEvent(String(row.event_type)) === derived.lifecycle
+        && String(row.provider_created_at) === (derived.lifecycleAt ?? ''),
+    ) ?? [...history.rows].reverse().find(
+      (row) => candidateLifecycleForEvent(String(row.event_type)) === derived.lifecycle,
+    );
+    const derivedReason: string | null = decidingRow?.reason_category ? String(decidingRow.reason_category) : null;
+
+    const changed = derived.lifecycle !== previousLifecycle;
+    if (changed) {
+      await client.query(
+        `update ${table.emailDeliveries}
+         set provider_lifecycle = $2, provider_lifecycle_at = $3, provider_lifecycle_reason = $4
+         where id = $1`,
+        [deliveryId, derived.lifecycle, derived.lifecycleAt, derivedReason],
+      );
+    }
+
+    await client.query('commit');
+    return {
+      outcome: changed ? 'applied' : 'noop',
+      deliveryId,
+      registrationId,
+      previousLifecycle,
+      lifecycle: derived.lifecycle,
+      changed,
+    };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function enqueueGoogleSheetSync(input: GoogleSheetSyncInput): Promise<GoogleSheetSyncRecord> {

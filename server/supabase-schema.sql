@@ -127,11 +127,21 @@ create table if not exists "run-email-deliveries" (
   metadata jsonb not null default '{}'::jsonb check (jsonb_typeof(metadata) = 'object'),
   created_at text not null,
   updated_at text not null,
+  -- EMAIL-OPS-003 Stage 2: derived provider lifecycle. NULL = no signed
+  -- provider event yet (conceptually "accepted only").
+  provider_lifecycle text,
+  provider_lifecycle_at text,
+  provider_lifecycle_reason text,
   constraint "run-email-deliveries_idempotency_key_key" unique (idempotency_key),
   constraint "run-email-deliveries_status_timestamps_check" check (
     (status = 'attempting' and sent_at is null and failed_at is null)
     or (status = 'sent' and sent_at is not null and failed_at is null and error is null and provider_message_id is not null)
     or (status = 'failed' and sent_at is null and failed_at is not null and error is not null)
+  ),
+  constraint "run-email-deliveries_provider_lifecycle_check" check (
+    provider_lifecycle is null or provider_lifecycle in (
+      'sent', 'delivery_delayed', 'delivered', 'bounced', 'complained', 'failed', 'suppressed'
+    )
   )
 );
 
@@ -176,6 +186,51 @@ create index if not exists "run-email-outbox_due_idx"
 create index if not exists "run-email-outbox_processing_idx"
   on "run-email-outbox"(locked_at asc)
   where status = 'processing';
+
+-- EMAIL-OPS-003 Stage 2 - provider delivery lifecycle (append-only history +
+-- derived state on run-email-deliveries). Correlation is by email_id only.
+create table if not exists "run-email-provider-events" (
+  id text primary key,
+  svix_id text not null,
+  email_id text not null,
+  event_type text not null,
+  provider text not null default 'resend',
+  provider_created_at text not null,
+  received_at text not null,
+  delivery_id text references "run-email-deliveries"(id),
+  registration_id text references "run-registrations"(id),
+  recipient_hash text,
+  reason_category text,
+  reason_detail text,
+  payload_digest text not null,
+  created_at text not null,
+  constraint "run-email-provider-events_svix_id_key" unique (svix_id),
+  constraint "run-email-provider-events_recipient_hash_check"
+    check (recipient_hash is null or recipient_hash ~ '^[0-9a-f]{64}$'),
+  constraint "run-email-provider-events_payload_digest_check"
+    check (payload_digest ~ '^[0-9a-f]{64}$'),
+  constraint "run-email-provider-events_reason_category_check" check (
+    reason_category is null or reason_category in (
+      'accepted', 'delivered', 'delayed', 'hard', 'soft', 'complaint', 'failed', 'suppressed', 'unknown'
+    )
+  ),
+  constraint "run-email-provider-events_reason_detail_len_check"
+    check (reason_detail is null or length(reason_detail) <= 500)
+);
+
+create index if not exists "run-email-provider-events_email_id_idx"
+  on "run-email-provider-events"(email_id);
+
+create index if not exists "run-email-provider-events_delivery_created_idx"
+  on "run-email-provider-events"(delivery_id, provider_created_at asc)
+  where delivery_id is not null;
+
+create index if not exists "run-email-provider-events_registration_created_idx"
+  on "run-email-provider-events"(registration_id, provider_created_at asc)
+  where registration_id is not null;
+
+create index if not exists "run-email-provider-events_type_received_idx"
+  on "run-email-provider-events"(event_type, received_at asc);
 
 create table if not exists "run-google-sheet-sync" (
   id text primary key,
