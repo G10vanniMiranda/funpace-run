@@ -41,6 +41,18 @@ export function publicActiveLotPriceCents(state: PublicActiveLotState): number |
   return state.kind === 'ready' ? state.lot.priceCents : null;
 }
 
+export function canRegisterWithPublicActiveLot(state: PublicActiveLotState): boolean {
+  return state.kind === 'ready';
+}
+
+export function publicRegistrationPriceCents(
+  state: PublicActiveLotState,
+  promotionalPriceCents: number | null,
+): number | null {
+  if (state.kind !== 'ready') return null;
+  return promotionalPriceCents ?? state.lot.priceCents;
+}
+
 // Copy for a price-bearing label when the active lot is not resolvable.
 export function publicActiveLotUnavailableLabel(state: PublicActiveLotState): string {
   switch (state.kind) {

@@ -9,7 +9,7 @@ import { ApiError, clearPartnerSession, createRegistration, getPartnerSession, v
 import { getMetaBrowserContext, trackMetaEventOnce } from '../lib/metaPixel';
 import { captureCurrentMarketingAttribution } from '../lib/marketingAttribution';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
-import { publicActiveLotUnavailableLabel } from '../lib/publicActiveLot';
+import { canRegisterWithPublicActiveLot, publicActiveLotUnavailableLabel, publicRegistrationPriceCents } from '../lib/publicActiveLot';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
 import type { Gender, RaceDistance, RegistrationCouponPricing, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
@@ -63,9 +63,10 @@ export function RegistrationSection() {
   const activeLot = activeLotState.kind === 'ready' ? activeLotState.lot : null;
   const lotPriceCents = activeLot?.priceCents ?? null;
   const activeLotUnavailableLabel = publicActiveLotUnavailableLabel(activeLotState);
-  const registrationBaseCents = appliedCoupon?.finalPriceCents ?? partnerContext?.finalPriceCents ?? lotPriceCents;
+  const promotionalPriceCents = appliedCoupon?.finalPriceCents ?? partnerContext?.finalPriceCents ?? null;
+  const registrationBaseCents = publicRegistrationPriceCents(activeLotState, promotionalPriceCents);
   const registrationPrice = (registrationBaseCents ?? 0) / 100;
-  const canRegister = activeLotState.kind !== 'none' && activeLotState.kind !== 'ambiguous';
+  const canRegister = canRegisterWithPublicActiveLot(activeLotState);
   const isSubmitting = status === 'submitting';
   const checkoutSupportUrl = getWhatsAppUrl('Olá, tentei fazer minha inscrição na FunPace Run, mas não consegui abrir o checkout.');
 
@@ -127,6 +128,12 @@ export function RegistrationSection() {
   };
 
   const applyCoupon = async () => {
+    if (!canRegister) {
+      setAppliedCoupon(null);
+      setCouponStatus('error');
+      setCouponMessage('Aguarde a confirmação do lote ativo antes de aplicar o cupom.');
+      return;
+    }
     setCouponStatus('applying');
     setCouponMessage('');
     try {
@@ -182,6 +189,12 @@ export function RegistrationSection() {
     setApiMessage('');
     setRegistrationId('');
     setShowSlowCheckoutHint(false);
+
+    if (!canRegister) {
+      setStatus(null);
+      setApiMessage('Nenhum lote está disponível para inscrição neste momento.');
+      return;
+    }
 
     const validationErrors = validateRegistration(formData);
     setErrors(validationErrors);
@@ -306,7 +319,7 @@ export function RegistrationSection() {
           </h3>
 
           <form onSubmit={handleSubmit} className="space-y-5 sm:space-y-6">
-            {partnerContext && (
+            {partnerContext && canRegister && (
               <div className="border-2 border-black bg-brand/20 p-4 sm:p-5">
                 <div className="flex items-start gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center bg-black text-brand"><Users className="h-5 w-5" /></div>
@@ -334,7 +347,7 @@ export function RegistrationSection() {
                 <TicketPercent className="h-4 w-4" />
                 <label htmlFor="registration-coupon" className="text-[11px] font-black uppercase tracking-widest">Cupom de desconto</label>
               </div>
-              {appliedCoupon ? (
+              {appliedCoupon && canRegister ? (
                 <div className="mt-4">
                   <div className="flex items-start justify-between gap-4">
                     <div>
@@ -364,14 +377,14 @@ export function RegistrationSection() {
                       value={couponInput}
                       onChange={(event) => { setCouponInput(event.target.value); setCouponMessage(''); setCouponStatus(null); }}
                       onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void applyCoupon(); } }}
-                      disabled={Boolean(partnerContext) || couponStatus === 'applying'}
+                      disabled={!canRegister || Boolean(partnerContext) || couponStatus === 'applying'}
                       className={`${inputClass} sm:flex-1`}
                       placeholder="Digite seu cupom"
                     />
                     <button
                       type="button"
                       onClick={() => void applyCoupon()}
-                      disabled={!couponInput.trim() || Boolean(partnerContext) || couponStatus === 'applying'}
+                      disabled={!canRegister || !couponInput.trim() || Boolean(partnerContext) || couponStatus === 'applying'}
                       className="min-h-12 bg-black px-6 text-xs font-black uppercase tracking-widest text-white disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       {couponStatus === 'applying' ? 'Aplicando...' : 'Aplicar'}

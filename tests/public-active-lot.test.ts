@@ -3,11 +3,14 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
+  canRegisterWithPublicActiveLot,
+  publicRegistrationPriceCents,
   publicActiveLotOrNull,
   publicActiveLotPriceCents,
   publicActiveLotUnavailableLabel,
   selectPublicActiveLot,
 } from '../src/lib/publicActiveLot';
+import { createSharedInFlightLoader } from '../src/hooks/usePublicAvailability';
 import type { AvailabilityResponse } from '../src/types/registration';
 
 // EVENT-OPS-001 — the public "current lot" must come from the canonical ACTIVE
@@ -85,6 +88,54 @@ test('malformed API with >1 active lot -> ambiguous (fail safe, no arbitrary pri
   assert.equal(publicActiveLotPriceCents(state), null);
 });
 
+test('registration is enabled only for ready, never for loading/error/none/ambiguous', () => {
+  assert.equal(canRegisterWithPublicActiveLot({ kind: 'loading' }), false);
+  assert.equal(canRegisterWithPublicActiveLot({ kind: 'error' }), false);
+  assert.equal(canRegisterWithPublicActiveLot({ kind: 'none' }), false);
+  assert.equal(canRegisterWithPublicActiveLot({ kind: 'ambiguous' }), false);
+  assert.equal(canRegisterWithPublicActiveLot({ kind: 'ready', lot: LOT3_ACTIVE }), true);
+});
+
+test('coupon or partner price is hidden unless the canonical public lot is ready', () => {
+  for (const state of [
+    { kind: 'loading' },
+    { kind: 'error' },
+    { kind: 'none' },
+    { kind: 'ambiguous' },
+  ] as const) {
+    assert.equal(publicRegistrationPriceCents(state, 10_791), null);
+  }
+  assert.equal(publicRegistrationPriceCents({ kind: 'ready', lot: LOT3_ACTIVE }, 10_791), 10_791);
+  assert.equal(publicRegistrationPriceCents({ kind: 'ready', lot: LOT3_ACTIVE }, null), 11_990);
+});
+
+test('shared availability loader deduplicates only concurrent calls and refreshes after settlement', async () => {
+  let calls = 0;
+  const load = createSharedInFlightLoader(async () => {
+    calls += 1;
+    return calls;
+  });
+
+  const [first, shared] = await Promise.all([load(), load()]);
+  assert.deepEqual([first, shared], [1, 1]);
+  assert.equal(calls, 1);
+
+  assert.equal(await load(), 2);
+  assert.equal(calls, 2);
+});
+
+test('shared availability loader does not cache a rejected request', async () => {
+  let calls = 0;
+  const load = createSharedInFlightLoader(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('temporary failure');
+    return calls;
+  });
+
+  await assert.rejects(load(), /temporary failure/);
+  assert.equal(await load(), 2);
+});
+
 test('sold_out is not active — only status === "active" is the public current lot', () => {
   const soldOut = lot({ id: 'lot-3', name: 'Lote 3', priceCents: 11990, status: 'sold_out' });
   assert.deepEqual(selectPublicActiveLot(avail([soldOut]), false), { kind: 'none' });
@@ -117,13 +168,15 @@ test('H — the registration base price comes from the active lot only (no stati
   assert.match(forms, /const lotPriceCents = activeLot\?\.priceCents \?\? null;/);
   assert.doesNotMatch(forms, /\?\?\s*eventInfo\.currentLotPriceCents/);
   // coupon / partner preview and the "Valor original" line both derive from lotPriceCents
-  assert.match(forms, /registrationBaseCents = appliedCoupon\?\.finalPriceCents \?\? partnerContext\?\.finalPriceCents \?\? lotPriceCents/);
+  assert.match(forms, /registrationBaseCents = publicRegistrationPriceCents\(activeLotState, promotionalPriceCents\)/);
+  assert.match(forms, /appliedCoupon && canRegister \? \(/, 'coupon prices require a ready active lot');
 });
 
-test('§10/§11/§12 — no stale price on loading / error / no-active; submit gated when no lot is open', () => {
+test('§10/§11/§12 — no stale price on loading / error / no-active; submit gated unless ready', () => {
   assert.match(forms, /registrationBaseCents !== null \? \(/, 'price only rendered when a real base exists');
   assert.match(forms, /activeLotUnavailableLabel/, 'a neutral placeholder is shown otherwise');
-  assert.match(forms, /const canRegister = activeLotState\.kind !== 'none' && activeLotState\.kind !== 'ambiguous';/);
+  assert.match(forms, /const canRegister = canRegisterWithPublicActiveLot\(activeLotState\);/);
+  assert.match(forms, /if \(!canRegister\) \{/);
   assert.match(forms, /disabled=\{isSubmitting \|\| !canRegister\}/);
 });
 

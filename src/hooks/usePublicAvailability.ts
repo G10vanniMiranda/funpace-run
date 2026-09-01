@@ -3,26 +3,29 @@ import { getAvailability } from '../lib/api';
 import type { AvailabilityResponse } from '../types/registration';
 import { selectPublicActiveLot, type PublicActiveLotState } from '../lib/publicActiveLot';
 
-// One shared /api/availability request for the whole public page. Hero and
-// RegistrationSection both need the canonical active lot; caching the in-flight
-// promise at module scope means mounting both fires ONE request, not two. This
-// is request de-duplication, not a global store.
-let sharedRequest: Promise<AvailabilityResponse> | null = null;
+export function createSharedInFlightLoader<T>(request: () => Promise<T>): () => Promise<T> {
+  let inFlight: Promise<T> | null = null;
 
-function loadAvailability(): Promise<AvailabilityResponse> {
-  if (!sharedRequest) {
-    sharedRequest = getAvailability().catch((error: unknown) => {
-      sharedRequest = null; // a failed fetch must not be cached — allow a later retry
-      throw error;
-    });
-  }
-  return sharedRequest;
+  return () => {
+    if (inFlight) return inFlight;
+
+    const pending = request();
+    inFlight = pending;
+    void pending.then(
+      () => {
+        if (inFlight === pending) inFlight = null;
+      },
+      () => {
+        if (inFlight === pending) inFlight = null;
+      },
+    );
+    return pending;
+  };
 }
 
-// Test seam: drop the cached request between cases.
-export function __resetPublicAvailabilityCache() {
-  sharedRequest = null;
-}
+// Hero and RegistrationSection share concurrent requests, but a settled
+// response is not retained across a later SPA remount.
+const loadAvailability = createSharedInFlightLoader(getAvailability);
 
 export type PublicAvailability = {
   availability: AvailabilityResponse | null;
