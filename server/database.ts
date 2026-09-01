@@ -4919,6 +4919,136 @@ export async function snapshot() {
   return readPostgresDatabase(requirePool());
 }
 
+/**
+ * ADMIN-UX-HOTFIX-003 — narrow, single-row transactional mutation for
+ * PATCH /api/admin/registrations/:id. Replaces the generic transaction() blob
+ * mechanism (readPostgresDatabase(scope='all') -> in-memory mutate ->
+ * savePostgresDatabase(full database, ~6100 serialized upserts) -> commit, all
+ * under the global 'funpace-run-write' advisory lock) which exceeded the 15s
+ * Admin client timeout for what is logically a one-row payload edit -- the exact
+ * defect class fixed for lot configuration in EVENT-OPS-001 Stage 2B.
+ *
+ * Touches only run-registrations (one row's `payload` jsonb + `updated_at`) and
+ * run-audit-logs (one appended 'registration.updated' row). It does NOT read the
+ * full dataset, acquire pg_advisory_xact_lock('funpace-run-write'), rewrite
+ * other registrations, payments, lots, email tables or audit history, and never
+ * recalculates final_price / original_price / discount / coupon / lot / partner
+ * attribution (those columns are untouched).
+ *
+ * Concurrency: `select ... for update` on the target registration row serialises
+ * two concurrent edits of the SAME registration (deterministic last-writer;
+ * before/after is always computed against the freshest committed payload).
+ * Different registrations proceed fully in parallel -- there is no global lock.
+ * local lock_timeout / statement_timeout keep a contended call well under the
+ * 15s client timeout instead of blocking indefinitely.
+ *
+ * Validation, allowed fields, the reason requirement, the no-op contract
+ * ("Nenhuma alteracao foi informada."), status codes and messages are a
+ * faithful port of the previous in-memory implementation in
+ * handleAdminRegistrationUpdate: the caller supplies already-normalised field
+ * values and a pure `validateMergedPayload` that runs against the fully merged
+ * payload (so unchanged fields are still validated exactly as before).
+ */
+export type RegistrationFieldsUpdateInput = {
+  registrationId: string;
+  reason: string;
+  normalizedChanges: Record<string, unknown>;
+  validateMergedPayload: (payload: RegistrationFormData) => { statusCode: number; message: string } | null;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export async function updateRegistrationFieldsInPostgres(
+  input: RegistrationFieldsUpdateInput,
+): Promise<{ statusCode: number; payload: unknown; changed: boolean }> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await ensurePostgresReady();
+
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const targetResult = await client.query(
+      `select id, payload, updated_at from ${table.registrations} where id = $1 for update`,
+      [input.registrationId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' }, changed: false };
+    }
+
+    const currentPayload = (targetRow.payload || {}) as Record<string, unknown>;
+    const merged: Record<string, unknown> = { ...currentPayload };
+    const before: Record<string, unknown> = {};
+    const after: Record<string, unknown> = {};
+    for (const [field, value] of Object.entries(input.normalizedChanges)) {
+      if (value === undefined) continue;
+      if (value === currentPayload[field]) continue;
+      before[field] = currentPayload[field];
+      after[field] = value;
+      merged[field] = value;
+    }
+
+    // Validation runs against the fully merged payload BEFORE the no-op check —
+    // the exact order of the previous in-memory implementation.
+    const validationError = input.validateMergedPayload(merged as unknown as RegistrationFormData);
+    if (validationError) {
+      await client.query('rollback');
+      return { statusCode: validationError.statusCode, payload: { message: validationError.message }, changed: false };
+    }
+
+    if (!Object.keys(after).length) {
+      await client.query('rollback');
+      return { statusCode: 400, payload: { message: 'Nenhuma alteracao foi informada.' }, changed: false };
+    }
+
+    const now = input.audit.createdAt;
+    await client.query(
+      `update ${table.registrations} set payload = $2::jsonb, updated_at = $3 where id = $1`,
+      [input.registrationId, JSON.stringify(merged), now],
+    );
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'registration.updated', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.registrationId,
+        JSON.stringify({ reason: input.reason, before, after }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        now,
+      ],
+    );
+
+    await client.query('commit');
+    return { statusCode: 200, payload: { registrationId: input.registrationId, updatedAt: now }, changed: true };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function pingDatabase() {
   const configurationIssue = getDatabaseConfigurationIssue();
 
