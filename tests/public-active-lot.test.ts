@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   canRegisterWithPublicActiveLot,
+  publicActiveLotOfferLabel,
   publicRegistrationPriceCents,
   publicActiveLotOrNull,
   publicActiveLotPriceCents,
@@ -109,6 +110,17 @@ test('coupon or partner price is hidden unless the canonical public lot is ready
   assert.equal(publicRegistrationPriceCents({ kind: 'ready', lot: LOT3_ACTIVE }, null), 11_990);
 });
 
+test('offer copy names only the ready active lot and stays neutral otherwise', () => {
+  assert.equal(
+    publicActiveLotOfferLabel({ kind: 'ready', lot: LOT3_ACTIVE }),
+    'Garanta agora sua vaga no Lote 3.',
+  );
+  assert.equal(
+    publicActiveLotOfferLabel({ kind: 'loading' }),
+    'Consulte o lote e o valor disponíveis para sua inscrição.',
+  );
+});
+
 test('shared availability loader deduplicates only concurrent calls and refreshes after settlement', async () => {
   let calls = 0;
   const load = createSharedInFlightLoader(async () => {
@@ -170,6 +182,8 @@ test('H — the registration base price comes from the active lot only (no stati
   // coupon / partner preview and the "Valor original" line both derive from lotPriceCents
   assert.match(forms, /registrationBaseCents = publicRegistrationPriceCents\(activeLotState, promotionalPriceCents\)/);
   assert.match(forms, /appliedCoupon && canRegister \? \(/, 'coupon prices require a ready active lot');
+  assert.match(forms, /publicActiveLotOfferLabel\(activeLotState\)/);
+  assert.doesNotMatch(forms, /segundo lote/i);
 });
 
 test('§10/§11/§12 — no stale price on loading / error / no-active; submit gated unless ready', () => {
