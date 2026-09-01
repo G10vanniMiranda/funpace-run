@@ -14,6 +14,7 @@ import {
   completeConfirmationEmailOutboxInPostgres,
   enqueueConfirmationEmailObligationInPostgres,
   failConfirmationEmailOutboxInPostgres,
+  ingestResendWebhookEventInPostgres,
   getConfirmationEmailDurableStateInPostgres,
   reclaimStaleConfirmationEmailOutboxInPostgres,
   rescheduleConfirmationEmailOutboxInPostgres,
@@ -100,6 +101,13 @@ import { checkInfinitePayPayment, createInfinitePayCheckout, InfinitePayError } 
 import { calculateLotCapacity, selectLotWithAvailability, synchronizeLotProjections } from './lot-capacity.js';
 import { detectLocalReconciliationIssues, generateReconciliationReport } from './payment-reconciliation.js';
 import { isPaymentWebhookTokenValid } from './payment-webhook-auth.js';
+import { readResendWebhookHeaders, verifyResendWebhookSignature } from './resend-webhook-auth.js';
+import {
+  digestWebhookBody,
+  isParticipantActionLifecycle,
+  normalizeResendWebhookEvent,
+  type ProviderLifecycle,
+} from './email-provider-lifecycle.js';
 import { buildRemarketingProjections, summarizeRemarketingProjections } from './remarketing.js';
 import {
   buildCouponCampaignAuditPayload,
@@ -183,6 +191,9 @@ const infinitePayHandle = paymentRuntimeAllowed
   : '';
 const webhookSecret = paymentConfirmationAllowed ? process.env.PAYMENT_WEBHOOK_SECRET || '' : '';
 const cronSecret = isCronExecutionAllowed() ? process.env.CRON_SECRET || '' : '';
+// EMAIL-OPS-003 Stage 2: per-endpoint Svix signing secret (`whsec_...`) for the
+// Resend delivery-lifecycle webhook. Never logged. Absent => fail closed (503).
+const resendWebhookSecret = process.env.RESEND_WEBHOOK_SECRET || '';
 const partnershipWebhookUrl = areOutboundWebhooksAllowed() ? process.env.PARTNERSHIP_WEBHOOK_URL || '' : '';
 const adminApiKey = process.env.ADMIN_API_KEY || 'change-me';
 const adminBootstrapEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
@@ -2428,6 +2439,87 @@ async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse
     message: 'Proposta enviada com sucesso. Nossa equipe entrara em contato em breve.',
   });
   if (partnershipSync) await processGoogleSheetSync(partnershipSync.id);
+}
+
+// EMAIL-OPS-003 Stage 2 — Resend delivery-lifecycle webhook ingestion.
+// Verifies the Svix signature over the RAW body BEFORE parsing, ingests the
+// event through a narrow transaction, and returns fast. It NEVER sends email,
+// never touches payment confirmation, the outbox obligation, run-lots or
+// pricing. A DB hiccup returns non-2xx so Resend retries (5s..10h).
+async function handleResendWebhook(req: IncomingMessage, res: ServerResponse) {
+  if (!usesPostgresDatabase()) {
+    json(res, 503, { message: 'Webhook indisponivel.' });
+    return;
+  }
+
+  // RAW, unparsed body — Svix signs the exact bytes.
+  const rawBody = await readBody(req);
+  const headers = readResendWebhookHeaders(req.headers as Record<string, string | string[] | undefined>);
+  const verification = verifyResendWebhookSignature({ rawBody, headers, secret: resendWebhookSecret });
+
+  if (!verification.ok) {
+    if (verification.reason === 'missing_secret') {
+      console.error(JSON.stringify({ at: new Date().toISOString(), message: 'resend_webhook_secret_missing' }));
+      await recordOperationalAlert({ dedupeKey: 'resend-webhook:secret-missing', severity: 'critical', alertType: 'webhook_failure', title: 'Webhook Resend indisponível', message: 'RESEND_WEBHOOK_SECRET não configurado.', entityType: 'system', entityId: 'resend-webhook' });
+      json(res, 503, { message: 'Webhook indisponivel.' });
+      return;
+    }
+    if (verification.reason === 'missing_headers') {
+      json(res, 401, { message: 'Assinatura ausente.' });
+      return;
+    }
+    // invalid_signature | stale_timestamp — hourly-deduped so a probing burst
+    // raises one incident, not one alert per request.
+    await recordOperationalAlert({ dedupeKey: `resend-webhook:signature:${new Date().toISOString().slice(0, 13)}`, severity: 'warning', alertType: 'webhook_failure', title: 'Assinatura de webhook Resend inválida', message: `Requisição rejeitada (${verification.reason}).`, entityType: 'system', entityId: 'resend-webhook' });
+    json(res, 401, { message: 'Assinatura invalida.' });
+    return;
+  }
+
+  const receivedAt = new Date().toISOString();
+  const payloadDigest = digestWebhookBody(rawBody);
+  const normalized = normalizeResendWebhookEvent(parseJsonBody<unknown>(rawBody));
+
+  if (normalized.kind === 'ignored') {
+    // Verified, but not a lifecycle event we model (opened/clicked/…), or no
+    // email_id. Safe-ack so Resend does not retry the whole webhook system.
+    console.log(JSON.stringify({ at: receivedAt, message: 'resend_webhook_ignored', eventType: normalized.eventType, reason: normalized.reason }));
+    json(res, 200, { ok: true, ignored: normalized.reason });
+    return;
+  }
+
+  let result;
+  try {
+    result = await ingestResendWebhookEventInPostgres({
+      svixId: String(headers.svixId),
+      emailId: normalized.emailId,
+      eventType: normalized.eventType,
+      providerCreatedAt: normalized.providerCreatedAt,
+      receivedAt,
+      reasonCategory: normalized.reasonCategory,
+      reasonDetail: normalized.reasonDetail,
+      payloadDigest,
+    });
+  } catch (error) {
+    // The narrow transaction rolled back — no partial lifecycle mutation.
+    console.error(JSON.stringify({ at: receivedAt, message: 'resend_webhook_ingestion_failed', eventType: normalized.eventType, emailId: normalized.emailId, error: error instanceof Error ? error.message : String(error) }));
+    json(res, 503, { message: 'Reprocessar.' });
+    return;
+  }
+
+  if (result.outcome === 'uncorrelated') {
+    await recordOperationalAlert({ dedupeKey: `resend-webhook:unknown:${normalized.emailId}`, severity: 'warning', alertType: 'email_lifecycle_unknown_message', title: 'Evento Resend sem correspondência', message: `Webhook ${normalized.eventType} para um provider_message_id desconhecido.`, entityType: 'email', entityId: normalized.emailId });
+  } else if (result.outcome === 'applied' && result.registrationId && result.lifecycle && isParticipantActionLifecycle(result.lifecycle as ProviderLifecycle)) {
+    const routes: Record<'bounced' | 'complained' | 'suppressed', { alertType: string; title: string }> = {
+      bounced: { alertType: 'email_lifecycle_bounce', title: 'Retorno de e-mail (bounce)' },
+      complained: { alertType: 'email_lifecycle_complaint', title: 'Reclamação de spam' },
+      suppressed: { alertType: 'email_lifecycle_suppressed', title: 'E-mail suprimido pelo provedor' },
+    };
+    const route = routes[result.lifecycle as 'bounced' | 'complained' | 'suppressed'];
+    await recordOperationalAlert({ dedupeKey: `${route.alertType}:${result.registrationId}`, severity: 'warning', alertType: route.alertType, title: route.title, message: `Uma entrega de confirmação passou para "${result.lifecycle}". Revisar o endereço e, se necessário, reenviar de forma controlada.`, entityType: 'registration', entityId: result.registrationId });
+  }
+
+  console.log(JSON.stringify({ at: receivedAt, message: 'resend_webhook_processed', eventType: normalized.eventType, emailId: normalized.emailId, outcome: result.outcome, previous: result.previousLifecycle, lifecycle: result.lifecycle }));
+  json(res, 200, { ok: true, outcome: result.outcome });
 }
 
 async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
@@ -5435,6 +5527,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
     if (req.method === 'POST' && url.pathname === '/api/webhooks/payment') {
       await handlePaymentWebhook(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/webhooks/resend') {
+      await handleResendWebhook(req, res);
       return;
     }
 
