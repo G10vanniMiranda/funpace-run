@@ -53,6 +53,7 @@ import {
   selectLotForRegistrationNumber,
   transaction,
   updateLotConfigurationInPostgres,
+  updateRegistrationFieldsInPostgres,
   upsertAdminBootstrapInPostgres,
   usesPostgresDatabase,
   type Database,
@@ -4509,33 +4510,51 @@ async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerRe
   if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
   const allowedFields = ['fullName', 'email', 'phone', 'birthDate', 'gender', 'shirtSize', 'emergencyContactName', 'emergencyContactPhone', 'city', 'state', 'team'] as const;
   const changes = body?.changes || {};
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const registration = database.registrations.find((item) => item.id === registrationId);
-    if (!registration) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
-    const before: Record<string, unknown> = {}; const after: Record<string, unknown> = {};
-    for (const field of allowedFields) {
-      if (changes[field] === undefined) continue;
-      let value: unknown = changes[field];
-      if (typeof value === 'string') value = compactText(value, field === 'state' ? 2 : 180);
-      if (field === 'email') value = String(value).toLowerCase();
-      if (field === 'state') value = String(value).toUpperCase();
-      if (value === registration.payload[field]) continue;
-      before[field] = registration.payload[field]; after[field] = value;
-      (registration.payload as unknown as Record<string, unknown>)[field] = value;
-    }
-    if (!String(registration.payload.fullName).trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registration.payload.email)) return { statusCode: 400, payload: { message: 'Nome e email valido sao obrigatorios.' } };
-    if (!['female', 'male'].includes(registration.payload.gender) || !['P', 'M', 'G', 'GG'].includes(registration.payload.shirtSize)) return { statusCode: 400, payload: { message: 'Sexo ou tamanho de camisa invalido.' } };
-    const birthDate = registration.payload.birthDate ? new Date(`${registration.payload.birthDate}T00:00:00`) : null;
-    const emergencyPhoneDigits = onlyDigits(registration.payload.emergencyContactPhone);
-    if (onlyDigits(registration.payload.phone).length < 10 || (emergencyPhoneDigits.length > 0 && emergencyPhoneDigits.length < 10)) return { statusCode: 400, payload: { message: 'Telefones devem conter DDD e numero validos.' } };
-    if (registration.payload.state && !/^[A-Z]{2}$/.test(registration.payload.state)) return { statusCode: 400, payload: { message: 'UF invalida.' } };
-    if (birthDate && (Number.isNaN(birthDate.getTime()) || birthDate > new Date() || birthDate.getFullYear() < new Date().getFullYear() - 100)) return { statusCode: 400, payload: { message: 'Data de nascimento invalida.' } };
-    if (!Object.keys(after).length) return { statusCode: 400, payload: { message: 'Nenhuma alteracao foi informada.' } };
-    const now = new Date().toISOString(); registration.updatedAt = now;
-    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'registration.updated', entityType: 'registration', entityId: registrationId, payload: { reason, before, after }, createdAt: now }));
-    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  // ADMIN-UX-HOTFIX-003: normalise the requested fields exactly as before, then
+  // delegate persistence to a narrow single-row transaction (run-registrations +
+  // run-audit-logs) instead of the generic full-database blob path.
+  const normalizedChanges: Record<string, unknown> = {};
+  for (const field of allowedFields) {
+    if (changes[field] === undefined) continue;
+    let value: unknown = changes[field];
+    if (typeof value === 'string') value = compactText(value, field === 'state' ? 2 : 180);
+    if (field === 'email') value = String(value).toLowerCase();
+    if (field === 'state') value = String(value).toUpperCase();
+    normalizedChanges[field] = value;
+  }
+  // Validation is a faithful port of the previous in-memory checks, run against
+  // the fully merged payload so unchanged fields are still validated.
+  const validateMergedPayload = (payload: RegistrationFormData): { statusCode: number; message: string } | null => {
+    if (!String(payload.fullName).trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payload.email)) return { statusCode: 400, message: 'Nome e email valido sao obrigatorios.' };
+    if (!['female', 'male'].includes(payload.gender) || !['P', 'M', 'G', 'GG'].includes(payload.shirtSize)) return { statusCode: 400, message: 'Sexo ou tamanho de camisa invalido.' };
+    const birthDate = payload.birthDate ? new Date(`${payload.birthDate}T00:00:00`) : null;
+    const emergencyPhoneDigits = onlyDigits(payload.emergencyContactPhone);
+    if (onlyDigits(payload.phone).length < 10 || (emergencyPhoneDigits.length > 0 && emergencyPhoneDigits.length < 10)) return { statusCode: 400, message: 'Telefones devem conter DDD e numero validos.' };
+    if (payload.state && !/^[A-Z]{2}$/.test(payload.state)) return { statusCode: 400, message: 'UF invalida.' };
+    if (birthDate && (Number.isNaN(birthDate.getTime()) || birthDate > new Date() || birthDate.getFullYear() < new Date().getFullYear() - 100)) return { statusCode: 400, message: 'Data de nascimento invalida.' };
+    return null;
+  };
+  const result = await updateRegistrationFieldsInPostgres({
+    registrationId,
+    reason,
+    normalizedChanges,
+    validateMergedPayload,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
   });
-  json(res, result.statusCode, result.payload);
+  if (result.statusCode !== 200) { json(res, result.statusCode, result.payload); return; }
+  // Rebuild the admin row for the response via the lean read-only scope already
+  // used by the maintenance handlers (no advisory lock, no full-blob write).
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const registration = database.registrations.find((item) => item.id === registrationId);
+  if (!registration) { json(res, 200, { registration: null }); return; }
+  json(res, 200, { registration: toAdminRow(database, registration) });
 }
 
 async function handleAdminRegistrationDetails(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
