@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { ArrowRight, Calendar, Clock, MapPin } from 'lucide-react';
 import { eventInfo } from '../config/event';
+import { usePublicAvailability } from '../hooks/usePublicAvailability';
 
 function Countdown() {
   const reducedMotion = useReducedMotion();
@@ -65,6 +66,9 @@ function Countdown() {
 
 export function Hero() {
   const reducedMotion = useReducedMotion();
+  // EVENT-OPS-001: CTA reflects the canonical active lot, never a static name.
+  const { activeLot } = usePublicAvailability();
+  const ctaLotSuffix = activeLot.kind === 'ready' ? ` - ${activeLot.lot.name}` : '';
   const heroItems = [
     { icon: Calendar, label: 'Data', value: eventInfo.dateLabel },
     { icon: Clock, label: 'Horário', value: eventInfo.startTimeLabel },
@@ -115,7 +119,7 @@ export function Hero() {
             href="#register"
             className="premium-button flex min-h-14 w-full items-center justify-center gap-3 bg-brand px-5 py-4 text-center text-xs font-black uppercase tracking-widest text-black transition-colors hover:bg-white sm:w-auto sm:justify-start sm:px-6 sm:text-sm"
           >
-            <span>Garantir inscrição - {eventInfo.currentLot}</span>
+            <span>Garantir inscrição{ctaLotSuffix}</span>
             <ArrowRight className="h-5 w-5 shrink-0" />
           </a>
         </motion.div>

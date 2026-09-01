@@ -19,9 +19,9 @@ export const eventInfo = {
     { value: 'female', label: 'Feminino' },
     { value: 'male', label: 'Masculino' },
   ],
-  currentLot: 'Lote 2',
-  currentLotPriceCents: 9990,
-  currentLotCapacity: 400,
+  // EVENT-OPS-001: the current lot / price / capacity are NOT static config.
+  // They are the canonical ACTIVE lot from /api/availability. See
+  // src/lib/publicActiveLot.ts and src/hooks/usePublicAvailability.ts.
   offerNote: 'Inscrição confirmada somente após pagamento aprovado.',
   kitItems: [
     'Camiseta',
