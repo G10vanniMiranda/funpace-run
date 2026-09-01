@@ -4510,35 +4510,68 @@ async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerRe
   if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
   const allowedFields = ['fullName', 'email', 'phone', 'birthDate', 'gender', 'shirtSize', 'emergencyContactName', 'emergencyContactPhone', 'city', 'state', 'team'] as const;
   const changes = body?.changes || {};
-  // ADMIN-UX-HOTFIX-003: normalise the requested fields exactly as before, then
-  // delegate persistence to a narrow single-row transaction (run-registrations +
-  // run-audit-logs) instead of the generic full-database blob path.
+  // ADMIN-UX-HOTFIX-003: delegate persistence to a narrow single-row transaction
+  // (run-registrations + run-audit-logs) instead of the generic full-database
+  // blob path.
+  //
+  // ADMIN-UX-HOTFIX-004: PATCH — not PUT — semantics. The Admin form submits the
+  // whole editable profile, and toAdminRow maps a blank/absent `state`/`city`/
+  // `team` to `null`; `null` (and `undefined`) means "not provided", so it is
+  // NOT a change — skip it entirely. Without this, `String(null).toUpperCase()`
+  // became the literal "NULL" and the merged-payload validator rejected it with
+  // "UF invalida.", which blocked ~98% of Production registrations (any field
+  // edit failed) since virtually every legacy row has `state = ""`.
   const normalizedChanges: Record<string, unknown> = {};
   for (const field of allowedFields) {
-    if (changes[field] === undefined) continue;
+    if (changes[field] === undefined || changes[field] === null) continue;
     let value: unknown = changes[field];
     if (typeof value === 'string') value = compactText(value, field === 'state' ? 2 : 180);
     if (field === 'email') value = String(value).toLowerCase();
     if (field === 'state') value = String(value).toUpperCase();
     normalizedChanges[field] = value;
   }
-  // Validation is a faithful port of the previous in-memory checks, run against
-  // the fully merged payload so unchanged fields are still validated.
-  const validateMergedPayload = (payload: RegistrationFormData): { statusCode: number; message: string } | null => {
-    if (!String(payload.fullName).trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payload.email)) return { statusCode: 400, message: 'Nome e email valido sao obrigatorios.' };
-    if (!['female', 'male'].includes(payload.gender) || !['P', 'M', 'G', 'GG'].includes(payload.shirtSize)) return { statusCode: 400, message: 'Sexo ou tamanho de camisa invalido.' };
-    const birthDate = payload.birthDate ? new Date(`${payload.birthDate}T00:00:00`) : null;
-    const emergencyPhoneDigits = onlyDigits(payload.emergencyContactPhone);
-    if (onlyDigits(payload.phone).length < 10 || (emergencyPhoneDigits.length > 0 && emergencyPhoneDigits.length < 10)) return { statusCode: 400, message: 'Telefones devem conter DDD e numero validos.' };
-    if (payload.state && !/^[A-Z]{2}$/.test(payload.state)) return { statusCode: 400, message: 'UF invalida.' };
-    if (birthDate && (Number.isNaN(birthDate.getTime()) || birthDate > new Date() || birthDate.getFullYear() < new Date().getFullYear() - 100)) return { statusCode: 400, message: 'Data de nascimento invalida.' };
-    return null;
+  // ADMIN-UX-HOTFIX-004: validate ONLY the fields the operator is actually
+  // changing (the narrow mutation passes each `after` key here), against the
+  // merged payload. Untouched legacy values — a blank UF, an empty birthDate —
+  // never block an independent, valid correction; an EXPLICIT change to any
+  // field still enforces the current rule. Messages are unchanged.
+  const validateChangedField = (
+    field: string,
+    payload: RegistrationFormData,
+  ): { statusCode: number; message: string } | null => {
+    switch (field) {
+      case 'fullName':
+        return String(payload.fullName).trim() ? null : { statusCode: 400, message: 'Nome e email valido sao obrigatorios.' };
+      case 'email':
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payload.email) ? null : { statusCode: 400, message: 'Nome e email valido sao obrigatorios.' };
+      case 'gender':
+        return ['female', 'male'].includes(payload.gender) ? null : { statusCode: 400, message: 'Sexo ou tamanho de camisa invalido.' };
+      case 'shirtSize':
+        return ['P', 'M', 'G', 'GG'].includes(payload.shirtSize) ? null : { statusCode: 400, message: 'Sexo ou tamanho de camisa invalido.' };
+      case 'phone':
+        return onlyDigits(payload.phone).length >= 10 ? null : { statusCode: 400, message: 'Telefones devem conter DDD e numero validos.' };
+      case 'emergencyContactPhone': {
+        const digits = onlyDigits(payload.emergencyContactPhone);
+        return digits.length === 0 || digits.length >= 10 ? null : { statusCode: 400, message: 'Telefones devem conter DDD e numero validos.' };
+      }
+      case 'state':
+        return !payload.state || /^[A-Z]{2}$/.test(payload.state) ? null : { statusCode: 400, message: 'UF invalida.' };
+      case 'birthDate': {
+        if (!payload.birthDate) return null;
+        const birthDate = new Date(`${payload.birthDate}T00:00:00`);
+        return Number.isNaN(birthDate.getTime()) || birthDate > new Date() || birthDate.getFullYear() < new Date().getFullYear() - 100
+          ? { statusCode: 400, message: 'Data de nascimento invalida.' }
+          : null;
+      }
+      default:
+        return null; // city / team / emergencyContactName carry no format rule
+    }
   };
   const result = await updateRegistrationFieldsInPostgres({
     registrationId,
     reason,
     normalizedChanges,
-    validateMergedPayload,
+    validateChangedField,
     audit: {
       actor: adminSession.actor,
       actorRole: adminSession.role,

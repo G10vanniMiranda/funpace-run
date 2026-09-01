@@ -4942,18 +4942,25 @@ export async function snapshot() {
  * local lock_timeout / statement_timeout keep a contended call well under the
  * 15s client timeout instead of blocking indefinitely.
  *
- * Validation, allowed fields, the reason requirement, the no-op contract
- * ("Nenhuma alteracao foi informada."), status codes and messages are a
- * faithful port of the previous in-memory implementation in
- * handleAdminRegistrationUpdate: the caller supplies already-normalised field
- * values and a pure `validateMergedPayload` that runs against the fully merged
- * payload (so unchanged fields are still validated exactly as before).
+ * Allowed fields, the reason requirement, the no-op contract ("Nenhuma
+ * alteracao foi informada."), status codes and messages are a faithful port of
+ * the previous in-memory implementation in handleAdminRegistrationUpdate.
+ *
+ * ADMIN-UX-HOTFIX-004: PATCH — not PUT — validation. The caller supplies
+ * already-normalised field values and a pure `validateChangedField`, which this
+ * function invokes ONCE PER ACTUALLY-CHANGED field against the merged payload.
+ * A legacy value in a field the operator did not touch (e.g. a blank UF) never
+ * blocks an independent, valid correction; an explicit change to any field
+ * still enforces the current rule.
  */
 export type RegistrationFieldsUpdateInput = {
   registrationId: string;
   reason: string;
   normalizedChanges: Record<string, unknown>;
-  validateMergedPayload: (payload: RegistrationFormData) => { statusCode: number; message: string } | null;
+  validateChangedField: (
+    field: string,
+    mergedPayload: RegistrationFormData,
+  ) => { statusCode: number; message: string } | null;
   audit: {
     actor: string;
     actorRole: string | null;
@@ -5003,17 +5010,20 @@ export async function updateRegistrationFieldsInPostgres(
       merged[field] = value;
     }
 
-    // Validation runs against the fully merged payload BEFORE the no-op check —
-    // the exact order of the previous in-memory implementation.
-    const validationError = input.validateMergedPayload(merged as unknown as RegistrationFormData);
-    if (validationError) {
-      await client.query('rollback');
-      return { statusCode: validationError.statusCode, payload: { message: validationError.message }, changed: false };
-    }
-
     if (!Object.keys(after).length) {
       await client.query('rollback');
       return { statusCode: 400, payload: { message: 'Nenhuma alteracao foi informada.' }, changed: false };
+    }
+
+    // ADMIN-UX-HOTFIX-004: validate ONLY the fields being changed, against the
+    // merged payload. Untouched legacy values do not block an independent, valid
+    // correction; an explicit change to a field still enforces the current rule.
+    for (const field of Object.keys(after)) {
+      const validationError = input.validateChangedField(field, merged as unknown as RegistrationFormData);
+      if (validationError) {
+        await client.query('rollback');
+        return { statusCode: validationError.statusCode, payload: { message: validationError.message }, changed: false };
+      }
     }
 
     const now = input.audit.createdAt;
