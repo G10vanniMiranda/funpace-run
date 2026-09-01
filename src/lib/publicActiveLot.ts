@@ -53,6 +53,12 @@ export function publicRegistrationPriceCents(
   return promotionalPriceCents ?? state.lot.priceCents;
 }
 
+export function publicActiveLotOfferLabel(state: PublicActiveLotState): string {
+  return state.kind === 'ready'
+    ? 'Garanta agora sua vaga no ' + state.lot.name + '.'
+    : 'Consulte o lote e o valor disponíveis para sua inscrição.';
+}
+
 // Copy for a price-bearing label when the active lot is not resolvable.
 export function publicActiveLotUnavailableLabel(state: PublicActiveLotState): string {
   switch (state.kind) {

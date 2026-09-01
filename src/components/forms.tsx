@@ -9,7 +9,7 @@ import { ApiError, clearPartnerSession, createRegistration, getPartnerSession, v
 import { getMetaBrowserContext, trackMetaEventOnce } from '../lib/metaPixel';
 import { captureCurrentMarketingAttribution } from '../lib/marketingAttribution';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
-import { canRegisterWithPublicActiveLot, publicActiveLotUnavailableLabel, publicRegistrationPriceCents } from '../lib/publicActiveLot';
+import { canRegisterWithPublicActiveLot, publicActiveLotOfferLabel, publicActiveLotUnavailableLabel, publicRegistrationPriceCents } from '../lib/publicActiveLot';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
 import type { Gender, RaceDistance, RegistrationCouponPricing, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
@@ -63,6 +63,7 @@ export function RegistrationSection() {
   const activeLot = activeLotState.kind === 'ready' ? activeLotState.lot : null;
   const lotPriceCents = activeLot?.priceCents ?? null;
   const activeLotUnavailableLabel = publicActiveLotUnavailableLabel(activeLotState);
+  const activeLotOfferLabel = publicActiveLotOfferLabel(activeLotState);
   const promotionalPriceCents = appliedCoupon?.finalPriceCents ?? partnerContext?.finalPriceCents ?? null;
   const registrationBaseCents = publicRegistrationPriceCents(activeLotState, promotionalPriceCents);
   const registrationPrice = (registrationBaseCents ?? 0) / 100;
@@ -292,7 +293,7 @@ export function RegistrationSection() {
             Não fique <br />para trás.
           </h2>
           <p className="mb-8 max-w-xl text-base font-medium leading-relaxed opacity-80 sm:text-lg md:mb-10 md:text-xl">
-            Garanta agora sua vaga no valor promocional do segundo lote.
+            {activeLotOfferLabel}
           </p>
 
           <div className="mb-6 grid w-full max-w-xl grid-cols-1 gap-3 sm:mb-8">
