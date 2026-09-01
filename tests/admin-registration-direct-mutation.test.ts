@@ -130,7 +130,7 @@ test('no-op contract preserved: value already equal → 400 "Nenhuma alteracao f
   assert.ok(noopAt >= 0 && updateAt > noopAt, 'no-op check precedes the write');
 });
 
-test('business rules preserved: allowed fields, normalisation, reason gate, merged-payload validation', () => {
+test('business rules preserved: allowed fields, normalisation, reason gate, per-changed-field validation', () => {
   const handler = registrationHandler();
   assert.match(handler, /requireAdmin\(req, res, \['administrator'\]\)/, 'administrator only');
   assert.match(handler, /requireAdminDatabase\(res\)/);
@@ -141,7 +141,9 @@ test('business rules preserved: allowed fields, normalisation, reason gate, merg
   assert.match(handler, /compactText\(value, field === 'state' \? 2 : 180\)/, 'string normalisation unchanged');
   assert.match(handler, /if \(field === 'email'\) value = String\(value\)\.toLowerCase\(\)/, 'email lowercased');
   assert.match(handler, /if \(field === 'state'\) value = String\(value\)\.toUpperCase\(\)/, 'state uppercased');
-  // validation messages: faithful port
+  // ADMIN-UX-HOTFIX-004: null (and undefined) are skipped, not stringified to "null"
+  assert.match(handler, /if \(changes\[field\] === undefined \|\| changes\[field\] === null\) continue;/, 'null/undefined incoming values are skipped (not turned into "NULL")');
+  // validation messages: faithful port, now applied per changed field
   assert.match(handler, /Nome e email valido sao obrigatorios\./);
   assert.match(handler, /\/\^\[\^\\s@\]\+@\[\^\\s@\]\+\\\.\[\^\\s@\]\+\$\//, 'same email regex');
   assert.match(handler, /'P', 'M', 'G', 'GG'/, 'same shirt size enum');
@@ -149,7 +151,11 @@ test('business rules preserved: allowed fields, normalisation, reason gate, merg
   assert.match(handler, /Telefones devem conter DDD e numero validos\./);
   assert.match(handler, /UF invalida\./);
   assert.match(handler, /Data de nascimento invalida\./);
-  assert.match(handler, /validateMergedPayload/, 'validation runs against the fully merged payload');
+  assert.match(handler, /validateChangedField/, 'validation is delegated per changed field');
+  // the narrow mutation validates ONLY the actually-changed fields
+  const fn = directMutation();
+  assert.match(fn, /for \(const field of Object\.keys\(after\)\) \{\s*const validationError = input\.validateChangedField\(field, merged/, 'per-changed-field validation loop over `after`');
+  assert.doesNotMatch(fn, /validateMergedPayload/, 'the holistic merged-payload validator is gone');
 });
 
 test('no UNIQUE(email) / shared-email policy intact: no email-uniqueness check anywhere in the path', () => {
