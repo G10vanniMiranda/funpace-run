@@ -4,12 +4,14 @@ import { FaWhatsapp } from 'react-icons/fa';
 import { eventInfo } from '../config/event';
 import { getWhatsAppUrl } from '../config/whatsapp';
 import { usePrivacyConsent } from '../hooks/usePrivacyConsent';
-import { ApiError, clearPartnerSession, createRegistration, getAvailability, getPartnerSession, validateCoupon } from '../lib/api';
+import { usePublicAvailability } from '../hooks/usePublicAvailability';
+import { ApiError, clearPartnerSession, createRegistration, getPartnerSession, validateCoupon } from '../lib/api';
 import { getMetaBrowserContext, trackMetaEventOnce } from '../lib/metaPixel';
 import { captureCurrentMarketingAttribution } from '../lib/marketingAttribution';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
+import { publicActiveLotUnavailableLabel } from '../lib/publicActiveLot';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
-import type { AvailabilityResponse, Gender, RaceDistance, RegistrationCouponPricing, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
+import type { Gender, RaceDistance, RegistrationCouponPricing, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
 import { Reveal } from './premium';
 import { FormField } from './ui/FormField';
@@ -45,7 +47,7 @@ export function RegistrationSection() {
   const [errors, setErrors] = useState<RegistrationErrors>({});
   const [apiMessage, setApiMessage] = useState('');
   const [registrationId, setRegistrationId] = useState('');
-  const [availability, setAvailability] = useState<AvailabilityResponse | null>(null);
+  const { availability, activeLot: activeLotState } = usePublicAvailability();
   const [partnerContext, setPartnerContext] = useState<PublicPartnerContext | null>(null);
   const [clearingPartner, setClearingPartner] = useState(false);
   const [partnerActionMessage, setPartnerActionMessage] = useState('');
@@ -55,33 +57,17 @@ export function RegistrationSection() {
   const [appliedCoupon, setAppliedCoupon] = useState<RegistrationCouponPricing | null>(null);
   const [couponStatus, setCouponStatus] = useState<null | 'applying' | 'error'>(null);
   const [couponMessage, setCouponMessage] = useState('');
-  const activeLot = availability?.lots.find((lot) => lot.name === eventInfo.currentLot)
-    || availability?.lots.find((lot) => lot.status === 'active')
-    || availability?.lots[0];
-  const lotPriceCents = activeLot?.priceCents ?? eventInfo.currentLotPriceCents;
-  const registrationPrice = (appliedCoupon?.finalPriceCents ?? partnerContext?.finalPriceCents ?? lotPriceCents) / 100;
+  // EVENT-OPS-001: the current lot is ONLY the canonical active lot from
+  // /api/availability — never a static name/price, never an inactive lot that
+  // still appears in the list.
+  const activeLot = activeLotState.kind === 'ready' ? activeLotState.lot : null;
+  const lotPriceCents = activeLot?.priceCents ?? null;
+  const activeLotUnavailableLabel = publicActiveLotUnavailableLabel(activeLotState);
+  const registrationBaseCents = appliedCoupon?.finalPriceCents ?? partnerContext?.finalPriceCents ?? lotPriceCents;
+  const registrationPrice = (registrationBaseCents ?? 0) / 100;
+  const canRegister = activeLotState.kind !== 'none' && activeLotState.kind !== 'ambiguous';
   const isSubmitting = status === 'submitting';
   const checkoutSupportUrl = getWhatsAppUrl('Olá, tentei fazer minha inscrição na FunPace Run, mas não consegui abrir o checkout.');
-
-  useEffect(() => {
-    let isMounted = true;
-
-    getAvailability()
-      .then((response) => {
-        if (isMounted) {
-          setAvailability(response);
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          setAvailability(null);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -299,10 +285,16 @@ export function RegistrationSection() {
           <div className="mb-6 grid w-full max-w-xl grid-cols-1 gap-3 sm:mb-8">
             <div className="min-w-0 border border-black/10 bg-black/5 p-3.5 sm:p-4">
               <p className="text-[11px] font-black uppercase tracking-widest opacity-60 sm:text-xs">Valor atual</p>
-              <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
-                {((appliedCoupon?.finalPriceCents ?? partnerContext?.finalPriceCents ?? lotPriceCents) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
-              </p>
-              {(appliedCoupon || partnerContext) && <p className="mt-1 text-xs font-bold opacity-60">Valor original: {((appliedCoupon?.originalPriceCents ?? partnerContext?.originalPriceCents ?? lotPriceCents) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</p>}
+              {registrationBaseCents !== null ? (
+                <>
+                  <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black">
+                    {(registrationBaseCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                  </p>
+                  {(appliedCoupon || partnerContext) && lotPriceCents !== null && <p className="mt-1 text-xs font-bold opacity-60">Valor original: {(lotPriceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</p>}
+                </>
+              ) : (
+                <p className="mt-1 font-mono text-[clamp(1.25rem,6vw,1.5rem)] font-black opacity-60" role="status">{activeLotUnavailableLabel}</p>
+              )}
             </div>
           </div>
 
@@ -310,7 +302,7 @@ export function RegistrationSection() {
 
         <Reveal className="min-w-0 bg-white p-4 pt-7 shadow-2xl sm:p-6 sm:pt-8 md:p-8 md:pt-10 xl:p-12" delay={0.08}>
           <h3 className="mb-7 font-display text-[clamp(1.7rem,7vw,2.65rem)] font-black uppercase leading-[0.95] tracking-tighter md:mb-8">
-            Inscrição - {eventInfo.currentLot}
+            {activeLot ? `Inscrição - ${activeLot.name}` : 'Inscrição'}
           </h3>
 
           <form onSubmit={handleSubmit} className="space-y-5 sm:space-y-6">
@@ -459,7 +451,7 @@ export function RegistrationSection() {
 
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !canRegister}
               aria-busy={isSubmitting}
               className="premium-button group relative mt-4 flex min-h-14 w-full items-center justify-center gap-3 overflow-hidden bg-black p-4 text-center text-xs font-black uppercase tracking-widest text-white transition-colors hover:bg-zinc-800 disabled:opacity-70 sm:justify-between sm:p-6 sm:text-sm"
             >
@@ -479,6 +471,12 @@ export function RegistrationSection() {
                 <ArrowRight className="relative z-10 h-5 w-5 shrink-0 transition-transform group-hover:translate-x-2" />
               )}
             </button>
+
+            {!canRegister && (
+              <StatusMessage tone="info" title="Inscrições indisponíveis">
+                Nenhum lote está aberto para inscrição neste momento. Atualize a página em instantes.
+              </StatusMessage>
+            )}
 
             {status === 'submitting' && showSlowCheckoutHint && (
               <StatusMessage tone="info" title="Checkout em preparo">
