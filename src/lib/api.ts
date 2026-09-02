@@ -8,6 +8,7 @@ import type {
   AdminSystemCheckResponse,
   AdminRegistrationActionResponse,
   AdminRecoverConfirmationEmailResponse,
+  AdminResendHistoricalConfirmationResponse,
   AdminRegistrationEditable,
   AdminRegistrationDetailsResponse,
   AdminPaymentDetailsResponse,
@@ -613,6 +614,15 @@ export function maintainAdminRegistration(adminKey: string, registrationId: stri
 // never sent — the server mails the registration's own canonical email.
 export function recoverAdminConfirmationEmail(adminKey: string, registrationId: string, reason = '') {
   return adminFetch<AdminRecoverConfirmationEmailResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/recover-confirmation-email${toQueryString({ event: currentEventParam() })}`, adminKey, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false,
+  });
+}
+
+// PARTICIPANT-OPS-001 CASE B / Stage B2 — same-recipient historical-confirmation
+// resend. Body carries ONLY a mandatory audit reason; the destination is never
+// sent. Distinct from recoverAdminConfirmationEmail (address-correction flow).
+export function resendAdminHistoricalConfirmation(adminKey: string, registrationId: string, reason: string) {
+  return adminFetch<AdminResendHistoricalConfirmationResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/resend-historical-confirmation${toQueryString({ event: currentEventParam() })}`, adminKey, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false,
   });
 }

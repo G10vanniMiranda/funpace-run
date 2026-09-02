@@ -18,8 +18,12 @@ function slice(src: string, startNeedle: string, endNeedle: string): string {
   return src.slice(a, b);
 }
 
-const handler = strip(slice(idx, 'async function handleAdminRecoverConfirmationEmail(', '\nasync function handleAdminRegistrationUpdate('));
-const snapshotFn = strip(slice(db, 'export async function loadConfirmationRecoverySnapshotInPostgres(', '\nfunction mapIntegrationEvent('));
+// end-needles pinned to the FUNCTION THAT IMMEDIATELY FOLLOWS the Case A code —
+// re-pinned when PARTICIPANT-OPS-001 Case B (#B2) added a sibling handler /
+// snapshot reader directly after these. The slices, assertions and intent are
+// unchanged; only the boundary moved so each test stays scoped to Case A alone.
+const handler = strip(slice(idx, 'async function handleAdminRecoverConfirmationEmail(', '\nasync function handleAdminResendHistoricalConfirmation('));
+const snapshotFn = strip(slice(db, 'export async function loadConfirmationRecoverySnapshotInPostgres(', '\nexport async function loadHistoricalConfirmationResendSnapshotInPostgres('));
 
 // --- Section 3 — RBAC: administrator only ------------------------------------
 test('handler requires an authenticated admin session with role administrator only', () => {
