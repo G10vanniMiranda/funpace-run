@@ -424,6 +424,22 @@ export type AdminRegistrationActionResponse = {
   message?: string;
 };
 
+// PARTICIPANT-OPS-001 CASE A / Stage A2 — controlled confirmation-email recovery.
+// The server decides eligibility; the client only relays the machine outcome.
+export type ConfirmationRecoveryOutcome =
+  | 'RECOVERY_ACCEPTED'
+  | 'ALREADY_RECOVERED'
+  | 'RECOVERY_IN_PROGRESS'
+  | 'NOT_ELIGIBLE'
+  | 'PROVIDER_FAILURE';
+
+export type AdminRecoverConfirmationEmailResponse = {
+  outcome: ConfirmationRecoveryOutcome;
+  reason: string;
+  provider?: string;
+  providerMessageId?: string | null;
+};
+
 export type AdminRegistrationEditable = Pick<AdminRegistration, 'fullName' | 'email' | 'phone' | 'birthDate' | 'gender' | 'shirtSize' | 'emergencyContactName' | 'emergencyContactPhone' | 'city' | 'state' | 'team'>;
 export type AdminTimelineEvent = { id: string; type: string; title: string; occurredAt: string; actor: string; origin: string; severity: 'info' | 'success' | 'warning' | 'critical'; details: Record<string, unknown> };
 export type AdminRegistrationDetailsResponse = {

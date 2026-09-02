@@ -31,6 +31,7 @@ import {
   deriveLifecycleFromEvents,
   type ProviderLifecycle,
 } from './email-provider-lifecycle.js';
+import type { ConfirmationRecoverySnapshot } from './confirmation-recovery.js';
 
 const { Pool } = pg;
 
@@ -5152,6 +5153,67 @@ export async function getRegistrationContactEmailInPostgres(registrationId: stri
   );
   if (result.rows.length === 0) return null;
   return (result.rows[0].email as string | null) ?? null;
+}
+
+/**
+ * PARTICIPANT-OPS-001 CASE A / Stage A2 — read the minimal authoritative state
+ * the pure `assessConfirmationRecovery` needs to decide whether ONE controlled
+ * confirmation-email recovery is eligible. Three narrow SELECTs, no advisory
+ * lock, no `ensurePostgresReady`, no full-dataset read/write, no `transaction()`.
+ * Returns a snapshot with `registration: null` when the id does not exist.
+ */
+export async function loadConfirmationRecoverySnapshotInPostgres(
+  registrationId: string,
+): Promise<ConfirmationRecoverySnapshot> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const pool = requirePool();
+  const registrationResult = await pool.query(
+    `select status, payload->>'email' as canonical_email, confirmation_email_sent_at
+     from ${table.registrations} where id = $1`,
+    [registrationId],
+  );
+  if (registrationResult.rows.length === 0) {
+    return { registrationId, registration: null, confirmationDeliveries: [], outboxObligationStatus: null };
+  }
+  const registrationRow = registrationResult.rows[0];
+
+  const deliveriesResult = await pool.query(
+    `select recipient_hash, status, idempotency_key, context_key, attempted_at
+     from ${table.emailDeliveries}
+     where registration_id = $1 and kind = 'confirmation'`,
+    [registrationId],
+  );
+
+  const outboxResult = await pool.query(
+    `select status from ${table.confirmationEmailOutbox}
+     where registration_id = $1 and email_type = 'confirmation'`,
+    [registrationId],
+  );
+
+  return {
+    registrationId,
+    registration: {
+      status: String(registrationRow.status),
+      canonicalEmail: (registrationRow.canonical_email as string | null) ?? null,
+      legacyConfirmationSentAt: registrationRow.confirmation_email_sent_at
+        ? new Date(registrationRow.confirmation_email_sent_at as string | number | Date).toISOString()
+        : null,
+    },
+    confirmationDeliveries: deliveriesResult.rows.map((row) => ({
+      recipientHash: String(row.recipient_hash),
+      status: row.status as 'attempting' | 'sent' | 'failed',
+      idempotencyKey: String(row.idempotency_key),
+      contextKey: (row.context_key as string | null) ?? null,
+      attemptedAt: row.attempted_at
+        ? new Date(row.attempted_at as string | number | Date).toISOString()
+        : null,
+    })),
+    outboxObligationStatus: outboxResult.rows[0] ? String(outboxResult.rows[0].status) : null,
+  };
 }
 
 function mapIntegrationEvent(row: Record<string, unknown>): IntegrationEventRecord {
