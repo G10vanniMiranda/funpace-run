@@ -55,6 +55,7 @@ import {
   appendAuditLogInPostgres,
   getRegistrationContactEmailInPostgres,
   loadConfirmationRecoverySnapshotInPostgres,
+  loadHistoricalConfirmationResendSnapshotInPostgres,
   updateLotConfigurationInPostgres,
   updateRegistrationFieldsInPostgres,
   upsertAdminBootstrapInPostgres,
@@ -81,6 +82,7 @@ import {
   upsertEmailDeliveryOutboxInMemory,
 } from './email-delivery-history.js';
 import { assessConfirmationRecovery } from './confirmation-recovery.js';
+import { assessHistoricalConfirmationResend } from './historical-confirmation-resend.js';
 import {
   CONFIRMATION_EMAIL_OUTBOX_BATCH_SIZE,
   CONFIRMATION_EMAIL_OUTBOX_DRAIN_BUDGET_MS,
@@ -4646,6 +4648,133 @@ async function handleAdminRecoverConfirmationEmail(req: IncomingMessage, res: Se
   json(res, 502, { outcome: 'PROVIDER_FAILURE', reason: result.error || 'provider_send_failed' });
 }
 
+// PARTICIPANT-OPS-001 CASE B / Stage B2 — SAME-RECIPIENT historical-confirmation
+// resend. A DIFFERENT domain operation from recover-confirmation-email:
+//   * recover-confirmation-email — the canonical email CHANGED; the historical
+//     confirmation went to a DIFFERENT recipient. (Case A — untouched here.)
+//   * this endpoint — the canonical email is UNCHANGED; the only confirmation
+//     evidence for that canonical recipient is a RELEASE-05 backfill
+//     reconstruction (app-asserted, never provider-`delivered`-correlated); the
+//     participant reports non-receipt. (Case B.)
+// It never accepts a destination / force / providerMessageId. The recipient is
+// the registration's own canonical `payload.email`. The send goes through
+// processRegistrationEmail with a SEPARATE semantic context
+// (`historical-confirmation-resend:<id>:<recipientHash>`), so it gets its own
+// idempotency row and the RELEASE-05 historical row is never touched. RBAC:
+// `administrator` only — this deliberately overrides the practical effect of
+// historical confirmation evidence after a support investigation. `reason` is
+// REQUIRED.
+async function handleAdminResendHistoricalConfirmation(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
+
+  // The ONLY accepted field is a mandatory free-text reason for the audit trail.
+  // A destination email is never read from the request body.
+  const body = parseJsonBody<{ reason?: string }>(await readBody(req)) || {};
+  const reason = String(body.reason || '').trim().slice(0, 500);
+  if (reason.length < 10) {
+    json(res, 400, { outcome: 'NOT_ELIGIBLE', reason: 'operator_reason_required' });
+    return;
+  }
+
+  const auditBase = {
+    actor: adminSession.actor,
+    actorRole: adminSession.role,
+    entityType: 'registration' as const,
+    entityId: registrationId,
+    sessionId: adminSession.id,
+    ipAddress: getClientIp(req),
+    userAgent: getUserAgent(req),
+  };
+
+  const snapshot = await loadHistoricalConfirmationResendSnapshotInPostgres(registrationId);
+  const assessment = assessHistoricalConfirmationResend(snapshot);
+
+  await appendAuditLogInPostgres({
+    ...auditBase,
+    action: 'email.confirmation.historical_resend.requested',
+    payload: {
+      reason,
+      verdict: assessment.verdict,
+      assessmentReason: assessment.reason,
+      canonicalRecipientHash: assessment.canonicalRecipientHash,
+      resendContextKey: assessment.resendContextKey,
+      confirmationDeliveryCount: snapshot.confirmationDeliveries.length,
+      deliveryProvenance: snapshot.confirmationDeliveries.map((d) => d.provenance),
+      providerLifecycle: snapshot.confirmationDeliveries.map((d) => d.providerLifecycle),
+    },
+  });
+
+  if (assessment.verdict !== 'ELIGIBLE') {
+    await appendAuditLogInPostgres({
+      ...auditBase,
+      action: 'email.confirmation.historical_resend.skipped',
+      payload: { outcome: assessment.outcome, reason: assessment.reason, resendContextKey: assessment.resendContextKey },
+    });
+    json(res, assessment.httpStatus, { outcome: assessment.outcome, reason: assessment.reason });
+    return;
+  }
+
+  const contextKey = assessment.resendContextKey as string;
+  const result = await processRegistrationEmail(registrationId, { contextKey });
+
+  // A null result means the atomic claim in claimRegistrationEmailInPostgres
+  // declined — a concurrent resend already holds the idempotency row, or one
+  // completed between our assessment and the claim. Re-read and re-classify so
+  // the caller gets ALREADY_RESENT vs RESEND_IN_PROGRESS, never a send.
+  if (result === null) {
+    const recheck = assessHistoricalConfirmationResend(await loadHistoricalConfirmationResendSnapshotInPostgres(registrationId));
+    const outcome = recheck.outcome === 'ALREADY_RESENT' ? 'ALREADY_RESENT' : 'RESEND_IN_PROGRESS';
+    const httpStatus = outcome === 'ALREADY_RESENT' ? 200 : 409;
+    await appendAuditLogInPostgres({
+      ...auditBase,
+      action: 'email.confirmation.historical_resend.skipped',
+      payload: { outcome, reason: recheck.reason || 'claim_declined', resendContextKey: contextKey },
+    });
+    json(res, httpStatus, { outcome, reason: recheck.reason || 'claim_declined' });
+    return;
+  }
+
+  if (result.ok) {
+    await appendAuditLogInPostgres({
+      ...auditBase,
+      action: 'email.confirmation.historical_resend.accepted',
+      payload: {
+        outcome: 'RESEND_ACCEPTED',
+        resendContextKey: contextKey,
+        canonicalRecipientHash: assessment.canonicalRecipientHash,
+        provider: result.provider,
+        providerMessageId: result.providerMessageId || null,
+      },
+    });
+    json(res, 200, { outcome: 'RESEND_ACCEPTED', provider: result.provider, providerMessageId: result.providerMessageId || null });
+    return;
+  }
+
+  // Provider not configured — a deployment/config problem, nothing was sent.
+  if (result.skipped) {
+    await appendAuditLogInPostgres({
+      ...auditBase,
+      action: 'email.confirmation.historical_resend.failed',
+      payload: { outcome: 'PROVIDER_FAILURE', reason: 'email_provider_not_configured', resendContextKey: contextKey },
+    });
+    json(res, 503, { outcome: 'PROVIDER_FAILURE', reason: 'email_provider_not_configured' });
+    return;
+  }
+
+  // Provider was reached and rejected/failed the send. The delivery row is left
+  // as durable failed evidence under its own idempotency key; NO auto-retry
+  // obligation is enqueued — this is a controlled, operator-driven action and
+  // must not silently re-send later without another deliberate request.
+  await appendAuditLogInPostgres({
+    ...auditBase,
+    action: 'email.confirmation.historical_resend.failed',
+    payload: { outcome: 'PROVIDER_FAILURE', reason: result.error || 'provider_send_failed', resendContextKey: contextKey },
+  });
+  json(res, 502, { outcome: 'PROVIDER_FAILURE', reason: result.error || 'provider_send_failed' });
+}
+
 async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
   const adminSession = await requireAdmin(req, res, ['administrator']);
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
@@ -5698,6 +5827,10 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     const adminRegistrationRecoverEmail = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/recover-confirmation-email$/);
     if (req.method === 'POST' && adminRegistrationRecoverEmail) {
       await handleAdminRecoverConfirmationEmail(req, res, decodeURIComponent(adminRegistrationRecoverEmail[1]), url); return;
+    }
+    const adminRegistrationHistoricalResend = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/resend-historical-confirmation$/);
+    if (req.method === 'POST' && adminRegistrationHistoricalResend) {
+      await handleAdminResendHistoricalConfirmation(req, res, decodeURIComponent(adminRegistrationHistoricalResend[1]), url); return;
     }
     const adminRegistrationSheetSync = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/sync-google-sheets$/);
     if (req.method === 'POST' && adminRegistrationSheetSync) { await handleAdminRegistrationGoogleSheetsSync(req, res, decodeURIComponent(adminRegistrationSheetSync[1]), url); return; }

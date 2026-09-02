@@ -32,6 +32,10 @@ import {
   type ProviderLifecycle,
 } from './email-provider-lifecycle.js';
 import type { ConfirmationRecoverySnapshot } from './confirmation-recovery.js';
+import {
+  classifyConfirmationDeliveryProvenance,
+  type HistoricalConfirmationResendSnapshot,
+} from './historical-confirmation-resend.js';
 
 const { Pool } = pg;
 
@@ -5212,6 +5216,96 @@ export async function loadConfirmationRecoverySnapshotInPostgres(
         ? new Date(row.attempted_at as string | number | Date).toISOString()
         : null,
     })),
+    outboxObligationStatus: outboxResult.rows[0] ? String(outboxResult.rows[0].status) : null,
+  };
+}
+
+/**
+ * PARTICIPANT-OPS-001 CASE B / Stage B2 — read the minimal authoritative state
+ * the pure `assessHistoricalConfirmationResend` needs. Narrow read-only SELECTs
+ * (registration, confirmation deliveries, outbox slot, and — per confirmation
+ * delivery — its correlated provider events folded to a single lifecycle). No
+ * advisory lock, no `ensurePostgresReady`, no full-dataset read/write, no
+ * `transaction()`. Returns `registration: null` when the id does not exist.
+ */
+export async function loadHistoricalConfirmationResendSnapshotInPostgres(
+  registrationId: string,
+): Promise<HistoricalConfirmationResendSnapshot> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const pool = requirePool();
+  const registrationResult = await pool.query(
+    `select status, payload->>'email' as canonical_email, confirmation_email_sent_at
+     from ${table.registrations} where id = $1`,
+    [registrationId],
+  );
+  if (registrationResult.rows.length === 0) {
+    return { registrationId, registration: null, confirmationDeliveries: [], outboxObligationStatus: null };
+  }
+  const registrationRow = registrationResult.rows[0];
+
+  const deliveriesResult = await pool.query(
+    `select id, recipient_hash, status, idempotency_key, context_key, attempted_at, metadata
+     from ${table.emailDeliveries}
+     where registration_id = $1 and kind = 'confirmation'`,
+    [registrationId],
+  );
+
+  const outboxResult = await pool.query(
+    `select status from ${table.confirmationEmailOutbox}
+     where registration_id = $1 and email_type = 'confirmation'`,
+    [registrationId],
+  );
+
+  const deliveryIds = deliveriesResult.rows.map((row) => String(row.id));
+  const eventsByDelivery = new Map<string, Array<{ eventType: string; providerCreatedAt: string }>>();
+  if (deliveryIds.length > 0) {
+    const eventsResult = await pool.query(
+      `select delivery_id, event_type, provider_created_at
+       from ${table.emailProviderEvents}
+       where delivery_id = any($1::text[])`,
+      [deliveryIds],
+    );
+    for (const row of eventsResult.rows) {
+      const key = String(row.delivery_id);
+      const list = eventsByDelivery.get(key) ?? [];
+      list.push({ eventType: String(row.event_type), providerCreatedAt: String(row.provider_created_at ?? '') });
+      eventsByDelivery.set(key, list);
+    }
+  }
+
+  return {
+    registrationId,
+    registration: {
+      status: String(registrationRow.status),
+      canonicalEmail: (registrationRow.canonical_email as string | null) ?? null,
+      legacyConfirmationSentAt: registrationRow.confirmation_email_sent_at
+        ? new Date(registrationRow.confirmation_email_sent_at as string | number | Date).toISOString()
+        : null,
+    },
+    confirmationDeliveries: deliveriesResult.rows.map((row) => {
+      const deliveryId = String(row.id);
+      const events = eventsByDelivery.get(deliveryId) ?? [];
+      return {
+        deliveryId,
+        recipientHash: String(row.recipient_hash),
+        status: row.status as 'attempting' | 'sent' | 'failed',
+        idempotencyKey: String(row.idempotency_key),
+        contextKey: (row.context_key as string | null) ?? null,
+        attemptedAt: row.attempted_at
+          ? new Date(row.attempted_at as string | number | Date).toISOString()
+          : null,
+        provenance: classifyConfirmationDeliveryProvenance({
+          id: deliveryId,
+          contextKey: (row.context_key as string | null) ?? null,
+          metadata: row.metadata,
+        }),
+        providerLifecycle: deriveLifecycleFromEvents(events).lifecycle,
+      };
+    }),
     outboxObligationStatus: outboxResult.rows[0] ? String(outboxResult.rows[0].status) : null,
   };
 }

@@ -78,12 +78,13 @@ import {
   logoutAdmin,
   maintainAdminRegistration,
   recoverAdminConfirmationEmail,
+  resendAdminHistoricalConfirmation,
   reconcileAdminPayment,
   updateAdminRegistration,
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -96,6 +97,18 @@ const RECOVERY_OUTCOME_MESSAGE: Record<AdminRecoverConfirmationEmailResponse['ou
   RECOVERY_IN_PROGRESS: 'Já existe uma recuperação em andamento para esta inscrição. Aguarde e recarregue.',
   NOT_ELIGIBLE: 'Esta inscrição não está elegível para recuperação de confirmação.',
   PROVIDER_FAILURE: 'O provedor de e-mail não concluiu o envio. Nenhuma duplicata foi criada.',
+};
+
+// PARTICIPANT-OPS-001 CASE B / Stage B2 — operator-facing copy for each
+// authoritative outcome of
+// POST /api/admin/registrations/:id/resend-historical-confirmation.
+const HISTORICAL_RESEND_OUTCOME_MESSAGE: Record<AdminResendHistoricalConfirmationResponse['outcome'], string> = {
+  RESEND_ACCEPTED: 'Reenvio aceito — uma nova confirmação foi enviada para o mesmo e-mail cadastrado.',
+  ALREADY_RESENT: 'Nada a fazer — este e-mail já recebeu um reenvio de confirmação histórica.',
+  RESEND_IN_PROGRESS: 'Já existe um reenvio em andamento para esta inscrição. Aguarde e recarregue.',
+  NOT_ELIGIBLE: 'Esta inscrição não está elegível para reenvio de confirmação histórica.',
+  PROVIDER_FAILURE: 'O provedor de e-mail não concluiu o envio. Nenhuma duplicata foi criada.',
+  REVIEW_REQUIRED: 'Há evidência de provedor para este envio (entregue, rejeitado ou em trânsito). Requer revisão manual antes de reenviar.',
 };
 
 type AdminFilters = {
@@ -271,6 +284,13 @@ export function AdminPage() {
   const [recoverEmailDraft, setRecoverEmailDraft] = useState<{ registration: AdminRegistration } | null>(null);
   const recoverEmailMutation = useAdminMutation<AdminRecoverConfirmationEmailResponse>(
     (result) => RECOVERY_OUTCOME_MESSAGE[result.outcome] || `Resultado: ${result.outcome} (${result.reason}).`,
+  );
+  // PARTICIPANT-OPS-001 CASE B / Stage B2 — same-recipient resend when the only
+  // confirmation evidence is a historical/backfill reconstruction (no provider
+  // delivery confirmation). Distinct action, distinct modal, mandatory reason.
+  const [historicalResendDraft, setHistoricalResendDraft] = useState<{ registration: AdminRegistration; reason: string } | null>(null);
+  const historicalResendMutation = useAdminMutation<AdminResendHistoricalConfirmationResponse>(
+    (result) => HISTORICAL_RESEND_OUTCOME_MESSAGE[result.outcome] || `Resultado: ${result.outcome} (${result.reason}).`,
   );
   const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
   const adminLoadInFlight = useRef(false);
@@ -581,6 +601,31 @@ export function AdminPage() {
     await loadAdminData();
   };
 
+  // PARTICIPANT-OPS-001 CASE B / Stage B2 — same-recipient historical resend.
+  const openHistoricalResend = (registration: AdminRegistration) => {
+    setActionMessage('');
+    historicalResendMutation.reset();
+    setHistoricalResendDraft({ registration, reason: '' });
+    historicalResendMutation.open();
+  };
+
+  const submitHistoricalResend = async () => {
+    if (!historicalResendDraft || historicalResendDraft.reason.trim().length < 10) return;
+    const { registration, reason } = historicalResendDraft;
+    await historicalResendMutation.submit(() => resendAdminHistoricalConfirmation(adminKey, registration.id, reason.trim()));
+  };
+
+  const acknowledgeHistoricalResend = async () => {
+    const registrationId = historicalResendDraft?.registration.id;
+    historicalResendMutation.acknowledge();
+    setHistoricalResendDraft(null);
+    if (registrationId) {
+      try { setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registrationId)); }
+      catch { /* detail refresh is best-effort; the list refresh below is authoritative */ }
+    }
+    await loadAdminData();
+  };
+
   const submitMaintenance = async () => {
     if (!maintenanceDraft) return;
     const needsReason = maintenanceDraft.action !== 'send-email';
@@ -731,6 +776,7 @@ export function AdminPage() {
         onKitDelivery={handleKitDelivery}
         onMaintenance={handleMaintenance}
         onRecoverConfirmationEmail={openRecoverEmail}
+        onResendHistoricalConfirmation={openHistoricalResend}
         onUpdate={handleRegistrationUpdate}
         details={registrationDetails}
         onAssignBib={handleBibNumber}
@@ -759,6 +805,20 @@ export function AdminPage() {
           onAcknowledge={() => void acknowledgeRecoverEmail()}
           onSessionExpired={handleSessionExpired}
           onClose={() => { recoverEmailMutation.reset(); setRecoverEmailDraft(null); }}
+        />
+      )}
+
+      {historicalResendDraft && (
+        <ResendHistoricalConfirmationModal
+          email={historicalResendDraft.registration.email}
+          fullName={historicalResendDraft.registration.fullName}
+          reason={historicalResendDraft.reason}
+          onReasonChange={(value) => setHistoricalResendDraft((d) => (d ? { ...d, reason: value } : d))}
+          state={historicalResendMutation.state}
+          onSubmit={() => void submitHistoricalResend()}
+          onAcknowledge={() => void acknowledgeHistoricalResend()}
+          onSessionExpired={handleSessionExpired}
+          onClose={() => { historicalResendMutation.reset(); setHistoricalResendDraft(null); }}
         />
       )}
 
@@ -3032,6 +3092,107 @@ function RecoverConfirmationEmailModal({
   );
 }
 
+// PARTICIPANT-OPS-001 CASE B / Stage B2 — SAME-RECIPIENT historical-confirmation
+// resend. Deliberately distinct from RecoverConfirmationEmailModal (Case A):
+// different title, different explanatory copy, a MANDATORY operator reason. Same
+// reusable state machine (idle → confirming → submitting → success | failure,
+// double-submit guarded). Never collects a destination address; renders the
+// authoritative backend outcome verbatim.
+function ResendHistoricalConfirmationModal({
+  email,
+  fullName,
+  reason,
+  onReasonChange,
+  state,
+  onSubmit,
+  onAcknowledge,
+  onSessionExpired,
+  onClose,
+}: {
+  email: string;
+  fullName: string;
+  reason: string;
+  onReasonChange: (value: string) => void;
+  state: AdminMutationState<AdminResendHistoricalConfirmationResponse>;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onSessionExpired: () => void;
+  onClose: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const outcome = state.result?.outcome ?? null;
+  const accepted = outcome === 'RESEND_ACCEPTED';
+  const reasonValid = reason.trim().length >= 10;
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onClose} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">Reenviar confirmação histórica</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              O sistema encontrou apenas um registro histórico de envio para <span className="text-white">{fullName}</span>,
+              sem confirmação independente de entrega pelo provedor. Esta ação cria uma nova tentativa para o mesmo e-mail
+              cadastrado (<span className="text-white">{email}</span>). O registro histórico é preservado como evidência.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {!succeeded && !sessionExpired && (
+          <label className="mt-5 block text-xs font-bold text-zinc-400">
+            Motivo (investigação de suporte) <span className="font-normal text-zinc-500">(mínimo de 10 caracteres)</span>
+            <textarea
+              value={reason}
+              onChange={(event) => onReasonChange(event.target.value)}
+              disabled={submitting}
+              className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white disabled:opacity-60"
+            />
+            <span className="mt-1 block text-right font-mono text-[10px] text-zinc-500">{reason.trim().length}/10</span>
+          </label>
+        )}
+
+        {succeeded && (
+          <div className={`mt-5 border p-3 text-sm ${accepted ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100' : 'border-amber-400/30 bg-amber-400/10 text-amber-100'}`} role="status">
+            {state.successMessage || `Resultado: ${outcome ?? 'desconhecido'}.`}
+          </div>
+        )}
+        {failed && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Não foi possível concluir a ação.'}
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {succeeded ? (
+            <button type="button" onClick={onAcknowledge} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : (
+            <>
+              <button type="button" onClick={onClose} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting || !reasonValid}
+                className="flex items-center gap-2 border border-amber-400/40 px-4 py-3 text-xs font-black uppercase text-amber-200 disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting ? 'Reenviando...' : failed ? 'Tentar novamente' : 'Reenviar confirmação histórica'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ADMIN-UX-HOTFIX-001 — event / distance / lot config save modal on the reusable
 // mutation state machine. One confirm → one PATCH. The submitting / success /
 // failure surface is rendered HERE (durable); the modal never disappears leaving
@@ -3190,6 +3351,7 @@ function AthleteDrawer({
   onKitDelivery,
   onMaintenance,
   onRecoverConfirmationEmail,
+  onResendHistoricalConfirmation,
   onUpdate,
   onAssignBib,
   onClose,
@@ -3202,6 +3364,7 @@ function AthleteDrawer({
   onKitDelivery: (registration: AdminRegistration) => void;
   onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => void;
   onRecoverConfirmationEmail: (registration: AdminRegistration) => void;
+  onResendHistoricalConfirmation: (registration: AdminRegistration) => void;
   onUpdate: (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => Promise<void>;
   onAssignBib: (registration: AdminRegistration) => void;
   onClose: () => void;
@@ -3317,6 +3480,13 @@ function AthleteDrawer({
               server decides eligibility; this button just asks. */}
           {canEditRegistration && registration.status === 'paid' && registration.confirmationEmailSentAt && (
             <button type="button" disabled={actionLoading !== ''} onClick={() => onRecoverConfirmationEmail(registration)} className="border border-amber-400/30 px-3 py-2 text-xs font-black uppercase text-amber-200">Recuperar confirmação</button>
+          )}
+          {/* PARTICIPANT-OPS-001 CASE B / Stage B2 — same-recipient resend when the
+              only confirmation evidence is a historical/backfill reconstruction.
+              The server decides eligibility (backfill-only, provider lifecycle
+              fail-closed); this button just asks. */}
+          {canEditRegistration && registration.status === 'paid' && registration.confirmationEmailSentAt && (
+            <button type="button" disabled={actionLoading !== ''} onClick={() => onResendHistoricalConfirmation(registration)} className="border border-amber-400/20 px-3 py-2 text-xs font-black uppercase text-amber-200/80">Reenviar confirmação histórica</button>
           )}
           {canHandleOperation && registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
           {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}

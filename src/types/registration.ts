@@ -440,6 +440,24 @@ export type AdminRecoverConfirmationEmailResponse = {
   providerMessageId?: string | null;
 };
 
+// PARTICIPANT-OPS-001 CASE B / Stage B2 — same-recipient historical-confirmation
+// resend. A DIFFERENT operation from recovery: the canonical email is unchanged
+// and the only confirmation evidence is a RELEASE-05 backfill reconstruction.
+export type HistoricalConfirmationResendOutcome =
+  | 'RESEND_ACCEPTED'
+  | 'ALREADY_RESENT'
+  | 'RESEND_IN_PROGRESS'
+  | 'NOT_ELIGIBLE'
+  | 'PROVIDER_FAILURE'
+  | 'REVIEW_REQUIRED';
+
+export type AdminResendHistoricalConfirmationResponse = {
+  outcome: HistoricalConfirmationResendOutcome;
+  reason: string;
+  provider?: string;
+  providerMessageId?: string | null;
+};
+
 export type AdminRegistrationEditable = Pick<AdminRegistration, 'fullName' | 'email' | 'phone' | 'birthDate' | 'gender' | 'shirtSize' | 'emergencyContactName' | 'emergencyContactPhone' | 'city' | 'state' | 'team'>;
 export type AdminTimelineEvent = { id: string; type: string; title: string; occurredAt: string; actor: string; origin: string; severity: 'info' | 'success' | 'warning' | 'critical'; details: Record<string, unknown> };
 export type AdminRegistrationDetailsResponse = {
