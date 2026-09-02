@@ -37,6 +37,58 @@ export function deriveSupabaseProjectRef(databaseUrl: string) {
   return refs.size === 1 ? [...refs][0] : null;
 }
 
+/**
+ * PROD-SAFETY-001 — fail-closed guard for RUNTIME lazy bootstrap / auto-migrate
+ * (server/database.ts::ensurePostgresDatabase, reached via ensurePostgresReady
+ * from ~55 DB functions and every persist:true transaction()).
+ *
+ * EVENT-OPS INCIDENT-002: a local, non-Vercel process with DATABASE_AUTO_MIGRATE
+ * =true and DATABASE_URL pointing at Production ran ensurePostgresDatabase ->
+ * ensureConfiguredLots and reverted lot-3 (11990/active) to the seed
+ * (13990/inactive) with no audit, causing a ~2h15m purchase outage.
+ *
+ * Unlike assertMigrationEnvironmentIsolation (the canonical migration runner's
+ * guard, which allows an explicit one-shot authorization), this guard has NO
+ * override: runtime lazy bootstrap must NEVER touch Production. If the target
+ * database is the Production Supabase project — or the resolved app environment
+ * is 'production' against any non-homologation project — throw BEFORE any
+ * DDL/DML. Schema changes to Production go exclusively through
+ * scripts/apply-migrations.mjs.
+ *
+ * The decision is driven by the TARGET DATABASE identity (derived project ref),
+ * not by the presence/absence of VERCEL, NODE_ENV or DATABASE_AUTO_MIGRATE.
+ */
+export function assertRuntimeAutoMigrateAllowed(
+  databaseUrl: string | null | undefined,
+  environment: NodeJS.ProcessEnv = process.env,
+): void {
+  const url = String(databaseUrl || environment.DATABASE_URL || '').trim();
+  if (!url) return; // no Postgres target configured — nothing to protect here
+
+  const actualProjectRef = deriveSupabaseProjectRef(url);
+
+  // Primary, non-bypassable: never auto-bootstrap the Production project.
+  if (actualProjectRef === PRODUCTION_SUPABASE_PROJECT_REF) {
+    throw new Error(
+      'Runtime auto-migrate/bootstrap is refused against the Production database. '
+      + 'Production schema/config changes must go through the canonical migration '
+      + 'tool (scripts/apply-migrations.mjs) with explicit one-shot authorization.',
+    );
+  }
+
+  // Defence in depth: a runtime that resolves to APP_ENV/VERCEL_ENV=production
+  // must not auto-bootstrap any project other than the known homologation one
+  // (covers a mis-set flag on the Vercel Production runtime, or a non-Supabase
+  // Production URL).
+  const appEnvironment = String(environment.APP_ENV || '').trim().toLowerCase()
+    || (environment.VERCEL_ENV === 'production' ? 'production' : '');
+  if (appEnvironment === 'production' && actualProjectRef !== HOMOLOGATION_SUPABASE_PROJECT_REF) {
+    throw new Error(
+      'Runtime auto-migrate/bootstrap is refused when the environment resolves to production.',
+    );
+  }
+}
+
 export function assertMigrationEnvironmentIsolation(
   environment: NodeJS.ProcessEnv = process.env,
 ): MigrationEnvironmentGuard {

@@ -9,6 +9,7 @@ import { selectAvailableLotCandidate } from './lot-capacity.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { calculateCouponPricing, getCouponCampaignAttribution } from './coupons.js';
 import { assertDatabaseEnvironmentIsolation } from './environment.js';
+import { assertRuntimeAutoMigrateAllowed } from './migration-environment.js';
 import { resolveEventScope } from './event-scope.js';
 import {
   EMAIL_DELIVERY_COOLDOWN_MS,
@@ -687,6 +688,10 @@ function requirePool() {
 }
 
 async function ensurePostgresDatabase(client: Queryable) {
+  // PROD-SAFETY-001: fail closed BEFORE the first CREATE/ALTER/INSERT if the
+  // target database is Production (or the environment resolves to production).
+  assertRuntimeAutoMigrateAllowed(databaseUrl);
+
   await client.query(`
     create table if not exists ${table.events} (
       id text primary key,
@@ -1277,6 +1282,10 @@ async function ensurePostgresReady() {
   if (!databaseAutoMigrate) {
     return;
   }
+
+  // PROD-SAFETY-001: refuse before memoising the promise, so a Production target
+  // fails fast and identically on every call (not just the first).
+  assertRuntimeAutoMigrateAllowed(databaseUrl);
 
   if (!postgresReady) {
     postgresReady = ensurePostgresDatabase(requirePool());
@@ -2109,25 +2118,17 @@ export function selectLotForRegistrationNumber<Lot extends LotSelectionCandidate
 }
 
 async function ensureConfiguredLots(client: Queryable) {
+  // PROD-SAFETY-001 / EVENT-OPS INCIDENT-002: this is a FIRST-BOOTSTRAP seed, not
+  // an operational-config reconciler. `on conflict do nothing` guarantees a lot
+  // that already exists is never re-priced / re-activated / re-dated / had its
+  // sold_count reset from the hardcoded `initialDatabase.lots`. Existing
+  // operational lot configuration belongs to the Admin narrow mutation
+  // (updateLotConfigurationInPostgres) and to migrations — never to the seed.
   for (const lot of initialDatabase.lots) {
     await client.query(
       `insert into ${table.lots} (id, event_id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity)
        values ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10)
-       on conflict (id) do update set
-         event_id = excluded.event_id,
-         name = excluded.name,
-         price_cents = excluded.price_cents,
-         capacity = excluded.capacity,
-         status = case
-           when ${table.lots}.status = 'inactive' then ${table.lots}.status
-           when excluded.continues_after_capacity and excluded.status = 'active' then 'active'
-           when ${table.lots}.sold_count >= excluded.capacity then 'sold_out'
-           else excluded.status
-         end,
-         starts_at = excluded.starts_at,
-         ends_at = excluded.ends_at,
-         order_index = excluded.order_index,
-         continues_after_capacity = excluded.continues_after_capacity`,
+       on conflict (id) do nothing`,
       [
         lot.id,
         lot.eventId,
@@ -5083,6 +5084,74 @@ export async function pingDatabase() {
   } finally {
     client.release();
   }
+}
+
+export type AuditLogAppendInput = {
+  actor?: string;
+  actorRole?: string | null;
+  action: string;
+  entityType: string;
+  entityId: string;
+  payload: unknown;
+  sessionId?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  createdAt?: string;
+};
+
+/**
+ * PROD-SAFETY-001 — the narrow, append-only replacement for
+ * `transaction((db) => db.auditLogs.push(entry))` on the Postgres path.
+ *
+ * A single INSERT into run-audit-logs on a pooled connection. It does NOT call
+ * ensurePostgresReady (so it can never trigger runtime auto-migrate / seed), does
+ * NOT readPostgresDatabase or savePostgresDatabase, does NOT acquire the
+ * funpace-run-write advisory lock, and touches no other table. The audit row
+ * shape is identical to createAuditLog / savePostgresDatabase.
+ */
+export async function appendAuditLogInPostgres(entry: AuditLogAppendInput): Promise<void> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  await requirePool().query(
+    `insert into ${table.auditLogs}
+       (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+     values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)`,
+    [
+      randomUUID(),
+      entry.actor ?? 'system',
+      entry.actorRole ?? null,
+      entry.action,
+      entry.entityType,
+      entry.entityId,
+      JSON.stringify(entry.payload ?? {}),
+      entry.sessionId ?? null,
+      entry.ipAddress ?? null,
+      entry.userAgent ?? null,
+      entry.createdAt ?? new Date().toISOString(),
+    ],
+  );
+}
+
+/**
+ * PROD-SAFETY-001 — narrow single-column read used by audit-only paths that
+ * need the recipient contact e-mail for an informational payload without loading
+ * the full dataset. Returns null when the registration does not exist.
+ */
+export async function getRegistrationContactEmailInPostgres(registrationId: string): Promise<string | null> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const result = await requirePool().query(
+    `select payload->>'email' as email from ${table.registrations} where id = $1`,
+    [registrationId],
+  );
+  if (result.rows.length === 0) return null;
+  return (result.rows[0].email as string | null) ?? null;
 }
 
 function mapIntegrationEvent(row: Record<string, unknown>): IntegrationEventRecord {

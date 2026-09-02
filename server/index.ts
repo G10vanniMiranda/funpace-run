@@ -52,6 +52,8 @@ import {
   revokeAdminSessionInPostgres,
   selectLotForRegistrationNumber,
   transaction,
+  appendAuditLogInPostgres,
+  getRegistrationContactEmailInPostgres,
   updateLotConfigurationInPostgres,
   updateRegistrationFieldsInPostgres,
   upsertAdminBootstrapInPostgres,
@@ -1340,27 +1342,46 @@ export async function processRegistrationEmail(registrationId: string, options: 
   const now = new Date().toISOString();
 
   if (!isEmailConfigured()) {
-    await transaction((database) => {
-      const registration = database.registrations.find((item) => item.id === registrationId);
-
-      if (!registration) {
-        return;
+    // PROD-SAFETY-001 / EVENT-OPS INCIDENT-002: this is a pure audit append.
+    // It MUST NOT run through the generic full-blob transaction() — that path
+    // calls ensurePostgresReady (runtime auto-migrate/seed) + savePostgresDatabase
+    // (16-table writeback under the funpace-run-write global lock), which is
+    // exactly what reverted lot-3's operational config from the seed.
+    if (usesPostgresDatabase()) {
+      const email = await getRegistrationContactEmailInPostgres(registrationId);
+      if (email !== null) {
+        await appendAuditLogInPostgres({
+          actor: 'system',
+          action: 'email.confirmation.skipped',
+          entityType: 'registration',
+          entityId: registrationId,
+          payload: { provider, email, reason: 'email provider not configured' },
+          createdAt: now,
+        });
       }
+    } else {
+      await transaction((database) => {
+        const registration = database.registrations.find((item) => item.id === registrationId);
 
-      database.auditLogs.push({
-        id: randomUUID(),
-        actor: 'system',
-        action: 'email.confirmation.skipped',
-        entityType: 'registration',
-        entityId: registration.id,
-        payload: {
-          provider,
-          email: registration.payload.email,
-          reason: 'email provider not configured',
-        },
-        createdAt: now,
+        if (!registration) {
+          return;
+        }
+
+        database.auditLogs.push({
+          id: randomUUID(),
+          actor: 'system',
+          action: 'email.confirmation.skipped',
+          entityType: 'registration',
+          entityId: registration.id,
+          payload: {
+            provider,
+            email: registration.payload.email,
+            reason: 'email provider not configured',
+          },
+          createdAt: now,
+        });
       });
-    }, { scope: 'checkout' });
+    }
 
     console.log(JSON.stringify({
       at: now,
