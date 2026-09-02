@@ -54,6 +54,7 @@ import {
   transaction,
   appendAuditLogInPostgres,
   getRegistrationContactEmailInPostgres,
+  loadConfirmationRecoverySnapshotInPostgres,
   updateLotConfigurationInPostgres,
   updateRegistrationFieldsInPostgres,
   upsertAdminBootstrapInPostgres,
@@ -79,6 +80,7 @@ import {
   isLatestEmailDelivery,
   upsertEmailDeliveryOutboxInMemory,
 } from './email-delivery-history.js';
+import { assessConfirmationRecovery } from './confirmation-recovery.js';
 import {
   CONFIRMATION_EMAIL_OUTBOX_BATCH_SIZE,
   CONFIRMATION_EMAIL_OUTBOX_DRAIN_BUDGET_MS,
@@ -4522,6 +4524,128 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
+// PARTICIPANT-OPS-001 CASE A / Stage A2 — deliberate, single-shot recovery of a
+// confirmation email for ONE registration whose canonical contact address
+// changed AFTER the original confirmation was delivered to a now-incorrect
+// recipient. This is intentionally NOT the `send-email` maintenance action:
+//   * `send-email` is a first-send helper and is suppressed once a confirmation
+//     summary exists (`confirmationEmailSentAt`). It has no notion of "the old
+//     copy went to the wrong person".
+//   * This endpoint never accepts a destination address. The recipient is the
+//     registration's own canonical `payload.email`, loaded server-side. The
+//     browser cannot ask us to mail an arbitrary address, and there is no
+//     `force` flag on the wire — the server derives a semantic recovery context
+//     (`confirmation-recovery:<id>:<recipientHash>`) and decides eligibility.
+//   * RBAC: `administrator` only. `finance` can trigger `send-email` (a benign
+//     first send); a recovery deliberately re-issues mail to a corrected address
+//     after a support investigation and stays with the role that owns
+//     registration data corrections. `operation` never sends mail.
+async function handleAdminRecoverConfirmationEmail(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
+
+  // The ONLY accepted field is a free-text reason for the audit trail. A
+  // destination email is never read from the request body.
+  const body = parseJsonBody<{ reason?: string }>(await readBody(req)) || {};
+  const reason = String(body.reason || '').trim().slice(0, 500);
+
+  const auditBase = {
+    actor: adminSession.actor,
+    actorRole: adminSession.role,
+    entityType: 'registration' as const,
+    entityId: registrationId,
+    sessionId: adminSession.id,
+    ipAddress: getClientIp(req),
+    userAgent: getUserAgent(req),
+  };
+
+  const snapshot = await loadConfirmationRecoverySnapshotInPostgres(registrationId);
+  const assessment = assessConfirmationRecovery(snapshot);
+
+  await appendAuditLogInPostgres({
+    ...auditBase,
+    action: 'email.confirmation.recovery.requested',
+    payload: {
+      reason: reason || null,
+      verdict: assessment.verdict,
+      assessmentReason: assessment.reason,
+      canonicalRecipientHash: assessment.canonicalRecipientHash,
+      recoveryContextKey: assessment.recoveryContextKey,
+      historicalDeliveryCount: snapshot.confirmationDeliveries.length,
+    },
+  });
+
+  if (assessment.verdict !== 'ELIGIBLE') {
+    await appendAuditLogInPostgres({
+      ...auditBase,
+      action: 'email.confirmation.recovery.skipped',
+      payload: { outcome: assessment.outcome, reason: assessment.reason, recoveryContextKey: assessment.recoveryContextKey },
+    });
+    json(res, assessment.httpStatus, { outcome: assessment.outcome, reason: assessment.reason });
+    return;
+  }
+
+  const contextKey = assessment.recoveryContextKey as string;
+  const result = await processRegistrationEmail(registrationId, { contextKey });
+
+  // A null result means the atomic claim in claimRegistrationEmailInPostgres
+  // declined — a concurrent recovery already holds the idempotency row, or one
+  // completed between our assessment and the claim. Re-read and re-classify so
+  // the caller gets ALREADY_RECOVERED vs RECOVERY_IN_PROGRESS, never a send.
+  if (result === null) {
+    const recheck = assessConfirmationRecovery(await loadConfirmationRecoverySnapshotInPostgres(registrationId));
+    const outcome = recheck.outcome === 'ALREADY_RECOVERED' ? 'ALREADY_RECOVERED' : 'RECOVERY_IN_PROGRESS';
+    const httpStatus = outcome === 'ALREADY_RECOVERED' ? 200 : 409;
+    await appendAuditLogInPostgres({
+      ...auditBase,
+      action: 'email.confirmation.recovery.skipped',
+      payload: { outcome, reason: recheck.reason || 'claim_declined', recoveryContextKey: contextKey },
+    });
+    json(res, httpStatus, { outcome, reason: recheck.reason || 'claim_declined' });
+    return;
+  }
+
+  if (result.ok) {
+    await appendAuditLogInPostgres({
+      ...auditBase,
+      action: 'email.confirmation.recovery.accepted',
+      payload: {
+        outcome: 'RECOVERY_ACCEPTED',
+        recoveryContextKey: contextKey,
+        canonicalRecipientHash: assessment.canonicalRecipientHash,
+        provider: result.provider,
+        providerMessageId: result.providerMessageId || null,
+      },
+    });
+    json(res, 200, { outcome: 'RECOVERY_ACCEPTED', provider: result.provider, providerMessageId: result.providerMessageId || null });
+    return;
+  }
+
+  // Provider not configured — a deployment/config problem, not a client error,
+  // and nothing was sent.
+  if (result.skipped) {
+    await appendAuditLogInPostgres({
+      ...auditBase,
+      action: 'email.confirmation.recovery.failed',
+      payload: { outcome: 'PROVIDER_FAILURE', reason: 'email_provider_not_configured', recoveryContextKey: contextKey },
+    });
+    json(res, 503, { outcome: 'PROVIDER_FAILURE', reason: 'email_provider_not_configured' });
+    return;
+  }
+
+  // Provider was reached and rejected/failed the send. The delivery row is left
+  // as durable failed evidence under its own idempotency key; NO auto-retry
+  // obligation is enqueued — a recovery is a controlled, operator-driven action
+  // and must not silently re-send later without another deliberate request.
+  await appendAuditLogInPostgres({
+    ...auditBase,
+    action: 'email.confirmation.recovery.failed',
+    payload: { outcome: 'PROVIDER_FAILURE', reason: result.error || 'provider_send_failed', recoveryContextKey: contextKey },
+  });
+  json(res, 502, { outcome: 'PROVIDER_FAILURE', reason: result.error || 'provider_send_failed' });
+}
+
 async function handleAdminRegistrationUpdate(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
   const adminSession = await requireAdmin(req, res, ['administrator']);
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
@@ -5570,6 +5694,10 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     const adminRegistrationMaintenance = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/(cancel|send-email|undo-check-in|undo-kit)$/);
     if (req.method === 'POST' && adminRegistrationMaintenance) {
       await handleAdminRegistrationMaintenance(req, res, decodeURIComponent(adminRegistrationMaintenance[1]), adminRegistrationMaintenance[2], url); return;
+    }
+    const adminRegistrationRecoverEmail = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/recover-confirmation-email$/);
+    if (req.method === 'POST' && adminRegistrationRecoverEmail) {
+      await handleAdminRecoverConfirmationEmail(req, res, decodeURIComponent(adminRegistrationRecoverEmail[1]), url); return;
     }
     const adminRegistrationSheetSync = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/sync-google-sheets$/);
     if (req.method === 'POST' && adminRegistrationSheetSync) { await handleAdminRegistrationGoogleSheetsSync(req, res, decodeURIComponent(adminRegistrationSheetSync[1]), url); return; }

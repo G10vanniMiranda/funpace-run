@@ -77,14 +77,26 @@ import {
   loginAdmin,
   logoutAdmin,
   maintainAdminRegistration,
+  recoverAdminConfirmationEmail,
   reconcileAdminPayment,
   updateAdminRegistration,
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
+
+// PARTICIPANT-OPS-001 CASE A / Stage A2 — operator-facing copy for each
+// authoritative recovery outcome returned by
+// POST /api/admin/registrations/:id/recover-confirmation-email.
+const RECOVERY_OUTCOME_MESSAGE: Record<AdminRecoverConfirmationEmailResponse['outcome'], string> = {
+  RECOVERY_ACCEPTED: 'Recuperação aceita — uma nova confirmação foi enviada para o e-mail canônico atual.',
+  ALREADY_RECOVERED: 'Nada a fazer — o e-mail canônico atual já recebeu a confirmação.',
+  RECOVERY_IN_PROGRESS: 'Já existe uma recuperação em andamento para esta inscrição. Aguarde e recarregue.',
+  NOT_ELIGIBLE: 'Esta inscrição não está elegível para recuperação de confirmação.',
+  PROVIDER_FAILURE: 'O provedor de e-mail não concluiu o envio. Nenhuma duplicata foi criada.',
+};
 
 type AdminFilters = {
   status: string;
@@ -252,6 +264,14 @@ export function AdminPage() {
   // idle → confirming → submitting → success | failure, with an in-context
   // result that loadAdminData() cannot erase and an explicit 401 path.
   const sendEmailMutation = useAdminMutation<Awaited<ReturnType<typeof maintainAdminRegistration>>>();
+  // PARTICIPANT-OPS-001 CASE A / Stage A2 — deliberate recovery of a confirmation
+  // email whose original copy went to a now-corrected address. Same reusable
+  // state machine (idle → confirming → submitting → success | failure); the
+  // authoritative machine outcome from the server is shown verbatim.
+  const [recoverEmailDraft, setRecoverEmailDraft] = useState<{ registration: AdminRegistration } | null>(null);
+  const recoverEmailMutation = useAdminMutation<AdminRecoverConfirmationEmailResponse>(
+    (result) => RECOVERY_OUTCOME_MESSAGE[result.outcome] || `Resultado: ${result.outcome} (${result.reason}).`,
+  );
   const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
   const adminLoadInFlight = useRef(false);
 
@@ -536,6 +556,31 @@ export function AdminPage() {
     await loadAdminData();
   };
 
+  // PARTICIPANT-OPS-001 CASE A / Stage A2 — confirmation-email recovery.
+  const openRecoverEmail = (registration: AdminRegistration) => {
+    setActionMessage('');
+    recoverEmailMutation.reset();
+    setRecoverEmailDraft({ registration });
+    recoverEmailMutation.open();
+  };
+
+  const submitRecoverEmail = async () => {
+    if (!recoverEmailDraft) return;
+    const registrationId = recoverEmailDraft.registration.id;
+    await recoverEmailMutation.submit(() => recoverAdminConfirmationEmail(adminKey, registrationId));
+  };
+
+  const acknowledgeRecoverEmail = async () => {
+    const registrationId = recoverEmailDraft?.registration.id;
+    recoverEmailMutation.acknowledge();
+    setRecoverEmailDraft(null);
+    if (registrationId) {
+      try { setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registrationId)); }
+      catch { /* detail refresh is best-effort; the list refresh below is authoritative */ }
+    }
+    await loadAdminData();
+  };
+
   const submitMaintenance = async () => {
     if (!maintenanceDraft) return;
     const needsReason = maintenanceDraft.action !== 'send-email';
@@ -685,6 +730,7 @@ export function AdminPage() {
         onCheckIn={handleCheckIn}
         onKitDelivery={handleKitDelivery}
         onMaintenance={handleMaintenance}
+        onRecoverConfirmationEmail={openRecoverEmail}
         onUpdate={handleRegistrationUpdate}
         details={registrationDetails}
         onAssignBib={handleBibNumber}
@@ -701,6 +747,18 @@ export function AdminPage() {
           onAcknowledge={() => void acknowledgeSendEmail()}
           onSessionExpired={handleSessionExpired}
           onClose={() => { sendEmailMutation.reset(); setMaintenanceDraft(null); }}
+        />
+      )}
+
+      {recoverEmailDraft && (
+        <RecoverConfirmationEmailModal
+          email={recoverEmailDraft.registration.email}
+          fullName={recoverEmailDraft.registration.fullName}
+          state={recoverEmailMutation.state}
+          onSubmit={() => void submitRecoverEmail()}
+          onAcknowledge={() => void acknowledgeRecoverEmail()}
+          onSessionExpired={handleSessionExpired}
+          onClose={() => { recoverEmailMutation.reset(); setRecoverEmailDraft(null); }}
         />
       )}
 
@@ -2890,6 +2948,90 @@ function SendConfirmationEmailModal({
   );
 }
 
+// PARTICIPANT-OPS-001 CASE A / Stage A2 — deliberate recovery of a confirmation
+// email whose original copy went to a since-corrected address. Same reusable
+// state machine as the send modal (idle → confirming → submitting → success |
+// failure, double-submit guarded). It never collects a destination address —
+// the server mails the registration's own canonical email — and it renders the
+// authoritative machine outcome (RECOVERY_ACCEPTED / ALREADY_RECOVERED / …)
+// verbatim, so the operator always sees what the backend actually decided.
+function RecoverConfirmationEmailModal({
+  email,
+  fullName,
+  state,
+  onSubmit,
+  onAcknowledge,
+  onSessionExpired,
+  onClose,
+}: {
+  email: string;
+  fullName: string;
+  state: AdminMutationState<AdminRecoverConfirmationEmailResponse>;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onSessionExpired: () => void;
+  onClose: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const outcome = state.result?.outcome ?? null;
+  const accepted = outcome === 'RECOVERY_ACCEPTED';
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onClose} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">Recuperar confirmação</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              Reenvia deliberadamente a confirmação de <span className="text-white">{fullName}</span> para o e-mail canônico
+              atual (<span className="text-white">{email}</span>). O servidor decide se a inscrição está elegível; a cópia
+              histórica é preservada como evidência.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {succeeded && (
+          <div className={`mt-5 border p-3 text-sm ${accepted ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100' : 'border-amber-400/30 bg-amber-400/10 text-amber-100'}`} role="status">
+            {state.successMessage || `Resultado: ${outcome ?? 'desconhecido'}.`}
+          </div>
+        )}
+        {failed && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Não foi possível concluir a ação.'}
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {succeeded ? (
+            <button type="button" onClick={onAcknowledge} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : (
+            <>
+              <button type="button" onClick={onClose} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting}
+                className="flex items-center gap-2 border border-amber-400/40 px-4 py-3 text-xs font-black uppercase text-amber-200 disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting ? 'Recuperando...' : failed ? 'Tentar novamente' : 'Recuperar confirmação'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ADMIN-UX-HOTFIX-001 — event / distance / lot config save modal on the reusable
 // mutation state machine. One confirm → one PATCH. The submitting / success /
 // failure surface is rendered HERE (durable); the modal never disappears leaving
@@ -3047,6 +3189,7 @@ function AthleteDrawer({
   onCheckIn,
   onKitDelivery,
   onMaintenance,
+  onRecoverConfirmationEmail,
   onUpdate,
   onAssignBib,
   onClose,
@@ -3058,6 +3201,7 @@ function AthleteDrawer({
   onCheckIn: (registration: AdminRegistration) => void;
   onKitDelivery: (registration: AdminRegistration) => void;
   onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => void;
+  onRecoverConfirmationEmail: (registration: AdminRegistration) => void;
   onUpdate: (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => Promise<void>;
   onAssignBib: (registration: AdminRegistration) => void;
   onClose: () => void;
@@ -3168,6 +3312,12 @@ function AthleteDrawer({
               ? <button type="button" disabled title="Email de confirmacao ja registrado" className="cursor-not-allowed border border-white/10 px-3 py-2 text-xs font-black uppercase text-zinc-600">Email enviado</button>
               : <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'send-email')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Enviar email</button>
             : <button type="button" disabled title="Disponivel somente apos a confirmacao do pagamento" className="cursor-not-allowed border border-white/10 px-3 py-2 text-xs font-black uppercase text-zinc-600">Email disponivel apos pagamento</button>)}
+          {/* PARTICIPANT-OPS-001 CASE A / Stage A2 — deliberate recovery when the
+              original confirmation went to a since-corrected address. Only the
+              server decides eligibility; this button just asks. */}
+          {canEditRegistration && registration.status === 'paid' && registration.confirmationEmailSentAt && (
+            <button type="button" disabled={actionLoading !== ''} onClick={() => onRecoverConfirmationEmail(registration)} className="border border-amber-400/30 px-3 py-2 text-xs font-black uppercase text-amber-200">Recuperar confirmação</button>
+          )}
           {canHandleOperation && registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
           {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
           {canCancelRegistration && !['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscrição</button>}

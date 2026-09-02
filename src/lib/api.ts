@@ -7,6 +7,7 @@ import type {
   AdminEventConfig,
   AdminSystemCheckResponse,
   AdminRegistrationActionResponse,
+  AdminRecoverConfirmationEmailResponse,
   AdminRegistrationEditable,
   AdminRegistrationDetailsResponse,
   AdminPaymentDetailsResponse,
@@ -603,6 +604,15 @@ export function runAdminSystemCheck(adminKey: string, target: 'email' | 'gateway
 
 export function maintainAdminRegistration(adminKey: string, registrationId: string, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit', reason = '') {
   return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}${toQueryString({ event: currentEventParam() })}`, adminKey, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false,
+  });
+}
+
+// PARTICIPANT-OPS-001 CASE A / Stage A2 — controlled confirmation-email recovery.
+// The body carries ONLY an optional audit reason; the destination address is
+// never sent — the server mails the registration's own canonical email.
+export function recoverAdminConfirmationEmail(adminKey: string, registrationId: string, reason = '') {
+  return adminFetch<AdminRecoverConfirmationEmailResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/recover-confirmation-email${toQueryString({ event: currentEventParam() })}`, adminKey, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false,
   });
 }
