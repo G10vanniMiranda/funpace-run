@@ -41,6 +41,17 @@ import { eventInfo } from '../config/event';
 import { useAdminMutation } from '../hooks/useAdminMutation';
 import type { AdminMutationState } from '../lib/admin-mutation-runtime';
 import { buildLotUpdatePayload } from '../lib/admin-lot-mutation';
+import {
+  PROFILE_EDIT_REASON_MIN_LENGTH,
+  buildProfileEditFormState,
+  canSubmitProfileEdit,
+  describeProfileEditSuccess,
+  diffProfileChanges,
+  hasProfileChanges,
+  isProfileEditReasonValid,
+  type EditableProfileField,
+  type ProfileEditFormState,
+} from '../lib/admin-registration-edit';
 import { PartnersPanel } from '../components/admin/PartnersPanel';
 import QRCode from 'qrcode';
 import {
@@ -84,7 +95,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -293,6 +304,18 @@ export function AdminPage() {
     (result) => HISTORICAL_RESEND_OUTCOME_MESSAGE[result.outcome] || `Resultado: ${result.outcome} (${result.reason}).`,
   );
   const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
+  // ADMIN-UX-RELIABILITY Stage 2 / Wave 1 — the athlete profile edit on the same
+  // reusable state machine (idle → confirming → submitting → success | failure).
+  // The authoritative refetch runs on backend SUCCESS so the drawer shows the
+  // new canonical value while the success message is still visible; a refetch
+  // failure AFTER a committed mutation is a distinct state and NEVER re-issues
+  // the mutation.
+  const editRegistrationMutation = useAdminMutation<AdminRegistrationActionResponse>();
+  const [editRegistrationContext, setEditRegistrationContext] = useState<{
+    before: AdminRegistration;
+    changes: Partial<Pick<AdminRegistrationEditable, EditableProfileField>>;
+    refreshFailed: boolean;
+  } | null>(null);
   const adminLoadInFlight = useRef(false);
 
   // ADMIN-003 Stage 2: on the Inscrições tab the CSV follows the tab —
@@ -636,16 +659,43 @@ export function AdminPage() {
     finally { setActionLoading(''); }
   };
 
-  const handleRegistrationUpdate = async (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => {
-    setActionLoading('edit'); setError('');
+  // ADMIN-UX-RELIABILITY Stage 2 / Wave 1. The form hands up ONLY the dirty
+  // editable fields; the server (`updateRegistrationFieldsInPostgres`,
+  // HOTFIX-003/004) stays authoritative and re-diffs. On backend SUCCESS we
+  // immediately refetch the canonical record so the drawer renders the new
+  // value before the operator acknowledges.
+  const submitRegistrationEdit = async (
+    registration: AdminRegistration,
+    changes: Partial<Pick<AdminRegistrationEditable, EditableProfileField>>,
+    reason: string,
+  ) => {
+    setActionMessage('');
+    setEditRegistrationContext({ before: registration, changes, refreshFailed: false });
+    let response: AdminRegistrationActionResponse | null = null;
+    const ok = await editRegistrationMutation.submit(async () => {
+      response = await updateAdminRegistration(adminKey, registration.id, changes as AdminRegistrationEditable, reason);
+      return response;
+    });
+    if (!ok || !response) return;
     try {
-      const response = await updateAdminRegistration(adminKey, registration.id, changes, reason);
-      updateRegistration(response.registration);
+      if (response.registration) updateRegistration(response.registration);
       setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
       await loadAdminData();
+    } catch {
+      // The mutation committed. The refetch (read-only) did not — this is NOT a
+      // mutation failure and MUST NOT trigger a resubmission.
+      setEditRegistrationContext((current) => (current ? { ...current, refreshFailed: true } : current));
     }
-    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível atualizar a inscrição.'); throw requestError; }
-    finally { setActionLoading(''); }
+  };
+
+  const acknowledgeRegistrationEdit = () => {
+    editRegistrationMutation.acknowledge();
+    setEditRegistrationContext(null);
+  };
+
+  const resetRegistrationEdit = () => {
+    editRegistrationMutation.reset();
+    setEditRegistrationContext(null);
   };
 
   const openRegistration = async (registration: AdminRegistration) => {
@@ -777,7 +827,12 @@ export function AdminPage() {
         onMaintenance={handleMaintenance}
         onRecoverConfirmationEmail={openRecoverEmail}
         onResendHistoricalConfirmation={openHistoricalResend}
-        onUpdate={handleRegistrationUpdate}
+        editState={editRegistrationMutation.state}
+        editContext={editRegistrationContext}
+        onEditSubmit={submitRegistrationEdit}
+        onEditAcknowledge={acknowledgeRegistrationEdit}
+        onEditReset={resetRegistrationEdit}
+        onSessionExpired={handleSessionExpired}
         details={registrationDetails}
         onAssignBib={handleBibNumber}
         adminRole={adminRole}
@@ -2887,49 +2942,164 @@ function RegistrationsPanel({
   );
 }
 
-function RegistrationEditForm({ registration, loading, onSave }: { registration: AdminRegistration; loading: boolean; onSave: (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => Promise<void> }) {
+// ADMIN-UX-RELIABILITY Stage 2 / Wave 1 — reliable athlete profile edit.
+//   * only the editable fields are rendered (Nome / E-mail / Telefone / Sexo /
+//     Tamanho da camisa); the six legacy fields are hidden from the form. Their
+//     DB columns, validators and API acceptance are UNCHANGED — the form just
+//     doesn't touch them.
+//   * dirty-fields-only: the PATCH body carries `changes` = only the fields the
+//     operator actually changed (`diffProfileChanges`); an unchanged form issues
+//     no request at all.
+//   * runs on the reusable `useAdminMutation` state machine: submitting is
+//     visible, the submit is disabled + double-submit-guarded, SUCCESS and
+//     FAILURE are explicit and in-context, and the authoritative refetch has
+//     already run by the time the operator sees SUCCESS (so the drawer shows the
+//     new value). A refetch failure AFTER a committed mutation is a distinct
+//     state and never re-issues the mutation.
+function RegistrationEditForm({
+  registration,
+  state,
+  context,
+  onSubmit,
+  onAcknowledge,
+  onReset,
+  onSessionExpired,
+}: {
+  registration: AdminRegistration;
+  state: AdminMutationState<AdminRegistrationActionResponse>;
+  context: { before: AdminRegistration; changes: Partial<Pick<AdminRegistrationEditable, EditableProfileField>>; refreshFailed: boolean } | null;
+  onSubmit: (registration: AdminRegistration, changes: Partial<Pick<AdminRegistrationEditable, EditableProfileField>>, reason: string) => Promise<void>;
+  onAcknowledge: () => void;
+  onReset: () => void;
+  onSessionExpired: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState('');
-  const [form, setForm] = useState<AdminRegistrationEditable>(() => ({
-    fullName: registration.fullName, email: registration.email, phone: registration.phone, birthDate: registration.birthDate,
-    gender: registration.gender, shirtSize: registration.shirtSize, emergencyContactName: registration.emergencyContactName,
-    emergencyContactPhone: registration.emergencyContactPhone, city: registration.city, state: registration.state, team: registration.team,
-  }));
+  const [form, setForm] = useState<ProfileEditFormState>(() => buildProfileEditFormState(registration));
   useEffect(() => {
-    setForm({
-      fullName: registration.fullName, email: registration.email, phone: registration.phone, birthDate: registration.birthDate,
-      gender: registration.gender, shirtSize: registration.shirtSize, emergencyContactName: registration.emergencyContactName,
-      emergencyContactPhone: registration.emergencyContactPhone, city: registration.city, state: registration.state, team: registration.team,
-    });
+    setForm(buildProfileEditFormState(registration));
   }, [registration.id, registration.updatedAt]);
-  const update = (field: keyof AdminRegistrationEditable, value: string) => setForm((current) => ({ ...current, [field]: value }));
-  if (!open) return <button type="button" onClick={() => setOpen(true)} className="mt-5 w-full border border-white/10 px-4 py-3 text-xs font-black uppercase hover:border-brand hover:text-brand">Editar dados cadastrais</button>;
-  return <div className="mt-5 border border-white/10 bg-black/30 p-4">
-    <div className="mb-4 flex justify-between"><p className="text-xs font-black uppercase text-brand">Editar cadastro</p><button type="button" onClick={() => setOpen(false)}><X className="h-4 w-4" /></button></div>
-    <div className="grid gap-3 sm:grid-cols-2">
-      <EditInput label="Nome" value={form.fullName} onChange={(value) => update('fullName', value)} />
-      <EditInput label="Email" type="email" value={form.email} onChange={(value) => update('email', value)} />
-      <EditInput label="Telefone" value={form.phone} onChange={(value) => update('phone', value)} />
-      <EditInput label="Nascimento" type="date" value={form.birthDate} onChange={(value) => update('birthDate', value)} />
-      <EditInput label="Cidade" value={form.city || ''} onChange={(value) => update('city', value)} />
-      <EditInput label="UF" value={form.state || ''} maxLength={2} onChange={(value) => update('state', value.toUpperCase())} />
-      <EditInput label="Equipe" value={form.team || ''} onChange={(value) => update('team', value)} />
-      <EditInput label="Contato de emergencia" value={form.emergencyContactName} onChange={(value) => update('emergencyContactName', value)} />
-      <EditInput label="Telefone emergencia" value={form.emergencyContactPhone} onChange={(value) => update('emergencyContactPhone', value)} />
-      <label className="text-xs font-bold text-zinc-400">Sexo<select value={form.gender} onChange={(event) => update('gender', event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white"><option value="female">Feminino</option><option value="male">Masculino</option></select></label>
-      <label className="text-xs font-bold text-zinc-400">Camisa<select value={form.shirtSize} onChange={(event) => update('shirtSize', event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white">{eventInfo.shirtSizes.map((size) => <option key={size}>{size}</option>)}</select></label>
+
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const panelOpen = open || state.phase !== 'idle';
+
+  const update = (field: EditableProfileField, value: string) => setForm((current) => ({ ...current, [field]: value }));
+  const changes = diffProfileChanges(registration, form);
+  const dirty = hasProfileChanges(registration, form);
+  const reasonValid = isProfileEditReasonValid(reason);
+  const canSubmit = canSubmitProfileEdit(registration, form, reason) && !submitting;
+
+  const close = () => { onReset(); setForm(buildProfileEditFormState(registration)); setReason(''); setOpen(false); };
+  const conclude = () => { onAcknowledge(); setForm(buildProfileEditFormState(registration)); setReason(''); setOpen(false); };
+
+  if (!panelOpen) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mt-5 w-full border border-white/10 px-4 py-3 text-xs font-black uppercase hover:border-brand hover:text-brand">
+        Editar dados cadastrais
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-5 border border-white/10 bg-black/30 p-4">
+      <div className="mb-4 flex items-center justify-between">
+        <p className="text-xs font-black uppercase text-brand">Editar cadastro</p>
+        <button type="button" aria-label="Fechar edição" disabled={submitting} onClick={close} className="disabled:opacity-30"><X className="h-4 w-4" /></button>
+      </div>
+
+      {!succeeded && !sessionExpired && (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <EditInput label="Nome" value={form.fullName} disabled={submitting} onChange={(value) => update('fullName', value)} />
+            <EditInput label="E-mail" type="email" value={form.email} disabled={submitting} onChange={(value) => update('email', value)} />
+            <EditInput label="Telefone" value={form.phone} disabled={submitting} onChange={(value) => update('phone', value)} />
+            <label className="text-xs font-bold text-zinc-400">Sexo
+              <select value={form.gender} disabled={submitting} onChange={(event) => update('gender', event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white disabled:opacity-60">
+                <option value="female">Feminino</option>
+                <option value="male">Masculino</option>
+              </select>
+            </label>
+            <label className="text-xs font-bold text-zinc-400">Tamanho da camisa
+              <select value={form.shirtSize} disabled={submitting} onChange={(event) => update('shirtSize', event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white disabled:opacity-60">
+                {eventInfo.shirtSizes.map((size) => <option key={size}>{size}</option>)}
+              </select>
+            </label>
+          </div>
+          <label className="mt-3 block text-xs font-bold text-zinc-400" htmlFor="registration-edit-reason">
+            Motivo da alteração <span className="font-normal text-zinc-500">(obrigatório, mínimo de {PROFILE_EDIT_REASON_MIN_LENGTH} caracteres)</span>
+            <textarea
+              id="registration-edit-reason"
+              value={reason}
+              aria-required="true"
+              aria-invalid={reason.length > 0 && !reasonValid}
+              disabled={submitting}
+              onChange={(event) => setReason(event.target.value)}
+              className="mt-1 min-h-20 w-full border border-white/10 bg-black p-3 text-white disabled:opacity-60"
+            />
+          </label>
+          {!dirty && !submitting && (
+            <p className="mt-2 text-[11px] font-bold uppercase tracking-widest text-zinc-500">Nenhuma alteração para salvar.</p>
+          )}
+        </>
+      )}
+
+      {failed && !sessionExpired && (
+        <div className="mt-4 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+          {state.error?.message || 'Não foi possível atualizar a inscrição.'}
+        </div>
+      )}
+      {sessionExpired && (
+        <div className="mt-4 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+          {state.error?.message || 'Sua sessão expirou. A alteração NÃO foi executada. Entre novamente para continuar.'}
+        </div>
+      )}
+
+      {succeeded && (
+        <div className="mt-1 space-y-2" aria-live="polite">
+          <div className="border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            {context ? describeProfileEditSuccess(context.before, context.changes) : 'Dados cadastrais atualizados com sucesso.'}
+          </div>
+          {context?.refreshFailed && (
+            <div className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+              Alteração salva, mas não foi possível atualizar os dados exibidos. Atualize a consulta antes de tentar novamente — não reenvie.
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="mt-4 flex justify-end gap-2">
+        {succeeded ? (
+          <button type="button" onClick={conclude} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+        ) : sessionExpired ? (
+          <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+        ) : (
+          <>
+            <button type="button" onClick={close} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+            <button
+              type="button"
+              disabled={!canSubmit}
+              onClick={() => void onSubmit(registration, changes, reason.trim())}
+              className="flex items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40"
+            >
+              {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+              {submitting ? 'Salvando...' : failed ? 'Tentar novamente' : 'Salvar alterações'}
+            </button>
+          </>
+        )}
+      </div>
     </div>
-    <label className="mt-3 block text-xs font-bold text-zinc-400">Motivo da alteracao<textarea value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1 min-h-20 w-full border border-white/10 bg-black p-3 text-white" /></label>
-    <button type="button" disabled={loading || reason.trim().length < 5} onClick={() => void onSave(registration, form, reason).then(() => { setOpen(false); setReason(''); })} className="mt-3 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40">{loading ? 'Salvando...' : 'Salvar alteracoes'}</button>
-  </div>;
+  );
 }
 
 function canAccessNav(role: AdminRole | null, nav: AdminNavKey) {
   return role ? navPermissions[nav].includes(role) : false;
 }
 
-function EditInput({ label, value, onChange, type = 'text', maxLength }: { label: string; value: string; onChange: (value: string) => void; type?: string; maxLength?: number }) {
-  return <label className="text-xs font-bold text-zinc-400">{label}<input type={type} maxLength={maxLength} value={value} onChange={(event) => onChange(event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white" /></label>;
+function EditInput({ label, value, onChange, type = 'text', maxLength, disabled }: { label: string; value: string; onChange: (value: string) => void; type?: string; maxLength?: number; disabled?: boolean }) {
+  return <label className="text-xs font-bold text-zinc-400">{label}<input type={type} maxLength={maxLength} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white disabled:opacity-60" /></label>;
 }
 
 // EMAIL-OPS-002 Stage 2 — confirmation send/resend modal driven by the reusable
@@ -3352,7 +3522,12 @@ function AthleteDrawer({
   onMaintenance,
   onRecoverConfirmationEmail,
   onResendHistoricalConfirmation,
-  onUpdate,
+  editState,
+  editContext,
+  onEditSubmit,
+  onEditAcknowledge,
+  onEditReset,
+  onSessionExpired,
   onAssignBib,
   onClose,
 }: {
@@ -3365,7 +3540,12 @@ function AthleteDrawer({
   onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => void;
   onRecoverConfirmationEmail: (registration: AdminRegistration) => void;
   onResendHistoricalConfirmation: (registration: AdminRegistration) => void;
-  onUpdate: (registration: AdminRegistration, changes: AdminRegistrationEditable, reason: string) => Promise<void>;
+  editState: AdminMutationState<AdminRegistrationActionResponse>;
+  editContext: { before: AdminRegistration; changes: Partial<Pick<AdminRegistrationEditable, EditableProfileField>>; refreshFailed: boolean } | null;
+  onEditSubmit: (registration: AdminRegistration, changes: Partial<Pick<AdminRegistrationEditable, EditableProfileField>>, reason: string) => Promise<void>;
+  onEditAcknowledge: () => void;
+  onEditReset: () => void;
+  onSessionExpired: () => void;
   onAssignBib: (registration: AdminRegistration) => void;
   onClose: () => void;
 }) {
@@ -3414,13 +3594,26 @@ function AthleteDrawer({
           <Detail label="Estado" value={registration.state || 'Não coletado'} />
           <Detail label="Equipe" value={registration.team || 'Não coletada'} />
           <Detail label="Distancia" value={registration.distance} />
-          <Detail label="Lote" value={registration.lot} />
+          <Detail label="Lote" value={registration.lot || 'Não informado'} />
+          {/* ADMIN-UX-RELIABILITY Stage 2 / Wave 1 — shirt size is now visible
+              without entering edit mode (closes Stage 1 UX-2). */}
+          <Detail label="Tamanho da camisa" value={registration.shirtSize || 'Não informado'} />
           <Detail label="Numero de peito" value={registration.bibNumber || 'A definir'} />
           <Detail label="Contato emergencia" value={registration.emergencyContactName} />
           <Detail label="Telefone emergencia" value={registration.emergencyContactPhone} />
         </div>
 
-        {canEditRegistration && <RegistrationEditForm registration={registration} loading={actionLoading === 'edit'} onSave={onUpdate} />}
+        {canEditRegistration && (
+          <RegistrationEditForm
+            registration={registration}
+            state={editState}
+            context={editContext}
+            onSubmit={onEditSubmit}
+            onAcknowledge={onEditAcknowledge}
+            onReset={onEditReset}
+            onSessionExpired={onSessionExpired}
+          />
+        )}
         {canAssignBib && <button type="button" disabled={actionLoading !== ''} onClick={() => onAssignBib(registration)} className="mt-3 w-full border border-brand/30 px-4 py-3 text-xs font-black uppercase text-brand">{registration.bibNumber ? 'Alterar numero de peito' : 'Atribuir numero de peito'}</button>}
 
         <div className="mt-5 grid gap-4 sm:grid-cols-[160px_1fr]">
