@@ -51,12 +51,18 @@ test('§45 /api/admin/operation (alternate row endpoint) also minimises for oper
 });
 
 test('§49 every drawer mutation echoes a role-minimised row', () => {
-  for (const fn of ['handleAdminCheckIn', 'handleAdminKitDelivery', 'handleAdminBibNumber']) {
+  for (const fn of ['handleAdminCheckIn', 'handleAdminKitDelivery']) {
     const body = block(server, `async function ${fn}(`, '\nasync function ');
     assert.match(body, /withRegistrationView\(result\.payload, adminSession\.role as RegistrationViewRole\)/, `${fn} minimises its response`);
   }
   const maintenance = block(server, 'async function handleAdminRegistrationMaintenance(', '\nasync function ');
   assert.match(maintenance, /withRegistrationView\(result\.payload, adminSession\.role as RegistrationViewRole\)/);
+  // ADMIN-UX-RELIABILITY Wave 2A — handleAdminBibNumber was rewritten onto the
+  // narrow setRegistrationBibInPostgres primitive; its 200 body is a locally
+  // built { ok, outcome, message, registration } object, still passed through
+  // withRegistrationView so the `registration` row is role-minimised.
+  const bib = block(server, 'async function handleAdminBibNumber(', '\nasync function ');
+  assert.match(bib, /withRegistrationView\(payload, adminSession\.role as RegistrationViewRole\)/, 'handleAdminBibNumber minimises its response');
 });
 
 test('§29/§48 registrations.csv is a backend 403 for operation — the button is not the control', () => {

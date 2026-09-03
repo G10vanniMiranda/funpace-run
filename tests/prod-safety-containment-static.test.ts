@@ -114,7 +114,13 @@ test('no generic persist:true transaction() whose callback ONLY pushes to auditL
 // Wave 3 migrates these to narrow repository functions; this number must only
 // ever DECREASE. A new full-blob writer must be justified + reviewed, then the
 // baseline lowered deliberately.
-const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 22, 'server/database.ts': 2 };
+//
+// ADMIN-UX-RELIABILITY Wave 2A: 22 -> 21. handleAdminBibNumber no longer wraps
+// the bib assignment in a generic full-blob transaction(); it delegates to the
+// narrow setRegistrationBibInPostgres primitive (server/database.ts). The bib
+// operation's only remaining transaction() call is the read-only
+// `persist: false` refetch, which is not a full-blob writer.
+const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 21, 'server/database.ts': 2 };
 
 function countFullBlobWriters(src: string): number {
   const lines = src.split('\n');

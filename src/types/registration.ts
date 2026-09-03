@@ -424,6 +424,25 @@ export type AdminRegistrationActionResponse = {
   message?: string;
 };
 
+// ADMIN-UX-RELIABILITY Wave 2A — Admin bib assignment. The server is the single
+// authority: it either changes the one row (BIB_UPDATED), recognises the request
+// as already-applied (BIB_UNCHANGED, HTTP 200, no audit noise), or rejects it.
+// BIB_CONFLICT / NOT_ELIGIBLE / NOT_FOUND arrive as HTTP errors (409/409/404)
+// carrying `code`; only the two success outcomes are decoded into this shape.
+export type AdminBibNumberOutcome =
+  | 'BIB_UPDATED'
+  | 'BIB_UNCHANGED'
+  | 'BIB_CONFLICT'
+  | 'NOT_ELIGIBLE'
+  | 'NOT_FOUND';
+
+export type AdminBibNumberResponse = {
+  ok: boolean;
+  outcome: Extract<AdminBibNumberOutcome, 'BIB_UPDATED' | 'BIB_UNCHANGED'>;
+  message: string;
+  registration: AdminRegistration;
+};
+
 // PARTICIPANT-OPS-001 CASE A / Stage A2 — controlled confirmation-email recovery.
 // The server decides eligibility; the client only relays the machine outcome.
 export type ConfirmationRecoveryOutcome =
