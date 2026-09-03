@@ -7,6 +7,7 @@ import type {
   AdminEventConfig,
   AdminSystemCheckResponse,
   AdminRegistrationActionResponse,
+  AdminBibNumberResponse,
   AdminRecoverConfirmationEmailResponse,
   AdminResendHistoricalConfirmationResponse,
   AdminRegistrationEditable,
@@ -637,9 +638,12 @@ export function getAdminRegistrationDetails(adminKey: string, registrationId: st
   return adminFetch<AdminRegistrationDetailsResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}${toQueryString({ event: currentEventParam() })}`, adminKey);
 }
 
+// ADMIN-UX-RELIABILITY Wave 2A — narrow, reliable bib assignment. `retry: false`
+// is explicit (and already the adminFetch default): an ambiguous POST is never
+// silently replayed — the caller performs a read-only verification instead.
 export function assignAdminBibNumber(adminKey: string, registrationId: string, bibNumber: string, reason: string) {
-  return adminFetch<AdminRegistrationActionResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/bib-number${toQueryString({ event: currentEventParam() })}`, adminKey, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bibNumber, reason }),
+  return adminFetch<AdminBibNumberResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/bib-number${toQueryString({ event: currentEventParam() })}`, adminKey, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bibNumber, reason }), retry: false,
   });
 }
 

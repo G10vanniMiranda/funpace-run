@@ -95,7 +95,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -121,6 +121,14 @@ const HISTORICAL_RESEND_OUTCOME_MESSAGE: Record<AdminResendHistoricalConfirmatio
   PROVIDER_FAILURE: 'O provedor de e-mail não concluiu o envio. Nenhuma duplicata foi criada.',
   REVIEW_REQUIRED: 'Há evidência de provedor para este envio (entregue, rejeitado ou em trânsito). Requer revisão manual antes de reenviar.',
 };
+
+// ADMIN-UX-RELIABILITY Wave 2A — client-side mirror of the server's bib rules
+// (server/index.ts handleAdminBibNumber). The server stays authoritative; this
+// only keeps the confirm button honest and avoids a doomed round-trip.
+const BIB_NUMBER_PATTERN = /^[A-Z0-9-]{1,20}$/;
+const BIB_REASON_MIN_LENGTH = 5;
+const normalizeBibNumber = (value: string) => value.trim().toUpperCase();
+const isBibNumberShapeValid = (value: string) => BIB_NUMBER_PATTERN.test(normalizeBibNumber(value));
 
 type AdminFilters = {
   status: string;
@@ -303,7 +311,22 @@ export function AdminPage() {
   const historicalResendMutation = useAdminMutation<AdminResendHistoricalConfirmationResponse>(
     (result) => HISTORICAL_RESEND_OUTCOME_MESSAGE[result.outcome] || `Resultado: ${result.outcome} (${result.reason}).`,
   );
+  // ADMIN-UX-RELIABILITY Wave 2A — the Admin bib assignment on the same reusable
+  // state machine (idle → confirming → submitting → success | failure). `bibDraft`
+  // holds the operator's editable input for the confirming step; `bibContext`
+  // records what was actually submitted so SUCCESS can render the canonical
+  // outcome, and — on an ambiguous network/timeout failure — the result of a
+  // READ-ONLY verification (never an automatic resend). A refetch failure AFTER a
+  // committed BIB_UPDATED is a distinct state that also never re-issues.
+  const bibMutation = useAdminMutation<AdminBibNumberResponse>((result) => result.message);
   const [bibDraft, setBibDraft] = useState<{ registration: AdminRegistration; bibNumber: string; reason: string } | null>(null);
+  const [bibContext, setBibContext] = useState<{
+    before: AdminRegistration;
+    requested: string;
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'unknown' | 'unreachable' | null;
+    canonical: string | null;
+  } | null>(null);
   // ADMIN-UX-RELIABILITY Stage 2 / Wave 1 — the athlete profile edit on the same
   // reusable state machine (idle → confirming → submitting → success | failure).
   // The authoritative refetch runs on backend SUCCESS so the drawer shows the
@@ -703,18 +726,88 @@ export function AdminPage() {
     try { setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id)); } catch { /* resumo continua disponivel */ }
   };
 
-  const handleBibNumber = async (registration: AdminRegistration) => {
+  const handleBibNumber = (registration: AdminRegistration) => {
+    bibMutation.reset();
+    setBibContext(null);
     setBibDraft({ registration, bibNumber: registration.bibNumber || '', reason: '' });
+    bibMutation.open();
   };
 
+  // ADMIN-UX-RELIABILITY Wave 2A — mirror the server's minimum client-side
+  // (server stays authoritative): canonical bib is [A-Z0-9-]{1,20}, reason ≥ 5.
+  const canSubmitBibNumber = (draft: { bibNumber: string; reason: string }) =>
+    isBibNumberShapeValid(draft.bibNumber) && draft.reason.trim().length >= BIB_REASON_MIN_LENGTH;
+
   const submitBibNumber = async () => {
-    if (!bibDraft) return;
-    if (!bibDraft.bibNumber.trim()) return;
-    if (bibDraft.reason.trim().length < 5) { setError('Informe um motivo com pelo menos 5 caracteres.'); return; }
-    setActionLoading('bib');
-    try { const response = await assignAdminBibNumber(adminKey, bibDraft.registration.id, bibDraft.bibNumber, bibDraft.reason); updateRegistration(response.registration); setRegistrationDetails(await getAdminRegistrationDetails(adminKey, bibDraft.registration.id)); setBibDraft(null); }
-    catch (requestError) { setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível atribuir o número de peito.'); }
-    finally { setActionLoading(''); }
+    if (!bibDraft || !canSubmitBibNumber(bibDraft)) return;
+    const before = bibDraft.registration;
+    const requested = normalizeBibNumber(bibDraft.bibNumber);
+    const reason = bibDraft.reason.trim();
+    setActionMessage('');
+    setBibContext({ before, requested, refreshFailed: false, verification: null, canonical: before.bibNumber || null });
+
+    let response: AdminBibNumberResponse | null = null;
+    let caught: unknown = null;
+    const ok = await bibMutation.submit(async () => {
+      try {
+        response = await assignAdminBibNumber(adminKey, before.id, requested, reason);
+        return response;
+      } catch (requestError) {
+        caught = requestError;
+        throw requestError;
+      }
+    });
+
+    if (ok && response) {
+      // BIB_UPDATED or BIB_UNCHANGED — both HTTP 200. Refetch the canonical
+      // record so the drawer renders the new bib + the "Atribuir → Alterar"
+      // label BEFORE the operator concludes.
+      try {
+        updateRegistration(response.registration);
+        setRegistrationDetails(await getAdminRegistrationDetails(adminKey, before.id));
+        await loadAdminData();
+      } catch {
+        // §27 — the mutation committed; only the read-only refresh failed. This
+        // is NOT a mutation failure and MUST NOT trigger a resubmission.
+        setBibContext((current) => (current ? { ...current, refreshFailed: true } : current));
+      }
+      return;
+    }
+
+    // §26 — a timeout / bare network failure leaves the commit state unprovable.
+    // Never encourage a resend: run a READ-ONLY verification and classify.
+    //   canonical == requested  → effectively applied (no resend)
+    //   canonical == previous   → not applied (safe retry state)
+    //   canonical == other      → UNKNOWN, operator must review before acting
+    const ambiguous = caught instanceof TypeError
+      || (caught instanceof ApiError && (caught.code === 'timeout' || caught.code === 'network_error'));
+    if (!ambiguous) return;
+    try {
+      const details = await getAdminRegistrationDetails(adminKey, before.id);
+      const canonical = details.registration.bibNumber || null;
+      const verification = canonical === requested
+        ? 'confirmed' as const
+        : canonical === (before.bibNumber || null)
+          ? 'not-applied' as const
+          : 'unknown' as const;
+      updateRegistration(details.registration);
+      setRegistrationDetails(details);
+      setBibContext((current) => (current ? { ...current, verification, canonical } : current));
+    } catch {
+      setBibContext((current) => (current ? { ...current, verification: 'unreachable' } : current));
+    }
+  };
+
+  const acknowledgeBibNumber = () => {
+    bibMutation.acknowledge();
+    setBibDraft(null);
+    setBibContext(null);
+  };
+
+  const resetBibNumber = () => {
+    bibMutation.reset();
+    setBibDraft(null);
+    setBibContext(null);
   };
 
   if (authChecking) return <main className="flex min-h-screen items-center justify-center bg-black text-brand"><Loader2 className="h-8 w-8 animate-spin" /></main>;
@@ -898,20 +991,17 @@ export function AdminPage() {
       )}
 
       {bibDraft && (
-        <ActionModal
-          title="Atribuir número de peito"
-          description={`Defina o número de peito de ${bibDraft.registration.fullName} e registre o motivo da alteração.`}
-          confirmLabel={actionLoading === 'bib' ? 'Salvando...' : 'Salvar número de peito'}
-          confirmDisabled={actionLoading === 'bib' || !bibDraft.bibNumber.trim() || bibDraft.reason.trim().length < 5}
-          onConfirm={() => void submitBibNumber()}
-          onClose={() => setBibDraft(null)}
-        >
-          <EditInput label="Número de peito" value={bibDraft.bibNumber} onChange={(value) => setBibDraft({ ...bibDraft, bibNumber: value.toUpperCase() })} />
-          <label className="block text-xs font-bold text-zinc-400">
-            Motivo da atribuição
-            <textarea value={bibDraft.reason} onChange={(event) => setBibDraft({ ...bibDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
-          </label>
-        </ActionModal>
+        <BibNumberModal
+          draft={bibDraft}
+          state={bibMutation.state}
+          context={bibContext}
+          canSubmit={canSubmitBibNumber(bibDraft)}
+          onDraftChange={setBibDraft}
+          onSubmit={() => void submitBibNumber()}
+          onAcknowledge={acknowledgeBibNumber}
+          onReset={resetBibNumber}
+          onSessionExpired={handleSessionExpired}
+        />
       )}
     </main>
   );
@@ -3354,6 +3444,192 @@ function ResendHistoricalConfirmationModal({
               >
                 {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
                 {submitting ? 'Reenviando...' : failed ? 'Tentar novamente' : 'Reenviar confirmação histórica'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ADMIN-UX-RELIABILITY Wave 2A — reliable Admin bib assignment.
+//   * distinct intent: "Atribuir" when unassigned, "Alterar" when replacing an
+//     existing number (which is stated explicitly before submit);
+//   * the reusable state machine: submitting is visible, submit is disabled +
+//     double-submit-guarded, SUCCESS (BIB_UPDATED) and the informational
+//     BIB_UNCHANGED are explicit and in-context, and the authoritative refetch
+//     has already run by the time the operator sees SUCCESS;
+//   * BIB_CONFLICT is an explicit conflict that keeps the edit available and is
+//     never auto-retried;
+//   * a timeout / bare network failure runs a READ-ONLY verification (parent)
+//     and this modal renders its verdict — applied / not applied / unknown —
+//     without ever offering an automatic resend;
+//   * a refetch failure AFTER a committed BIB_UPDATED is its own message and also
+//     never re-issues the mutation.
+function BibNumberModal({
+  draft,
+  state,
+  context,
+  canSubmit,
+  onDraftChange,
+  onSubmit,
+  onAcknowledge,
+  onReset,
+  onSessionExpired,
+}: {
+  draft: { registration: AdminRegistration; bibNumber: string; reason: string };
+  state: AdminMutationState<AdminBibNumberResponse>;
+  context: {
+    before: AdminRegistration;
+    requested: string;
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'unknown' | 'unreachable' | null;
+    canonical: string | null;
+  } | null;
+  canSubmit: boolean;
+  onDraftChange: (draft: { registration: AdminRegistration; bibNumber: string; reason: string }) => void;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onReset: () => void;
+  onSessionExpired: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const businessCode = state.error?.businessCode ?? '';
+  const isConflict = failed && (businessCode === 'BIB_CONFLICT' || (!businessCode && state.error?.kind === 'conflict'));
+  const verification = context?.verification ?? null;
+  const outcome = state.result?.outcome ?? null;
+
+  const currentBib = draft.registration.bibNumber || null;
+  const isReplacement = Boolean(currentBib);
+  const nextBib = normalizeBibNumber(draft.bibNumber);
+  const shapeValid = isBibNumberShapeValid(draft.bibNumber);
+  const reasonValid = draft.reason.trim().length >= BIB_REASON_MIN_LENGTH;
+
+  // The editable form is kept whenever a retry is still meaningful. It is hidden
+  // once the change is done (success), once the session must be renewed, and
+  // once a verification has determined the result is applied or indeterminate.
+  const showForm = !succeeded && !sessionExpired
+    && verification !== 'confirmed' && verification !== 'unknown' && verification !== 'unreachable';
+  // A single "Concluir" replaces the submit affordance when nothing else should
+  // be sent: an acknowledged success, or a verified-applied ambiguous failure.
+  const concludeOnly = succeeded || verification === 'confirmed';
+  const reviewOnly = verification === 'unknown' || verification === 'unreachable';
+
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onReset} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">{isReplacement ? 'Alterar número de peito' : 'Atribuir número de peito'}</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              {isReplacement ? 'Substitui o' : 'Define o'} número de peito de <span className="text-white">{draft.registration.fullName}</span>.
+              Número atual: <span className="text-white">{currentBib || 'Não atribuído'}</span>.
+            </p>
+          </div>
+          <button type="button" onClick={onReset} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {showForm && (
+          <div className="mt-5 space-y-3">
+            <EditInput label="Novo número de peito" value={draft.bibNumber} disabled={submitting} onChange={(value) => onDraftChange({ ...draft, bibNumber: value.toUpperCase() })} />
+            {draft.bibNumber.trim().length > 0 && !shapeValid && (
+              <p className="text-[11px] font-bold uppercase tracking-widest text-amber-300">Use até 20 caracteres: letras, números ou hífen.</p>
+            )}
+            <label className="block text-xs font-bold text-zinc-400">
+              Motivo <span className="font-normal text-zinc-500">(obrigatório, mínimo de {BIB_REASON_MIN_LENGTH} caracteres)</span>
+              <textarea
+                value={draft.reason}
+                aria-required="true"
+                aria-invalid={draft.reason.length > 0 && !reasonValid}
+                disabled={submitting}
+                onChange={(event) => onDraftChange({ ...draft, reason: event.target.value })}
+                className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white disabled:opacity-60"
+              />
+            </label>
+            {isReplacement && shapeValid && nextBib !== currentBib && (
+              <p className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+                Esta ação substituirá o número de peito atual (<span className="font-black">{currentBib}</span>) por <span className="font-black">{nextBib}</span>.
+              </p>
+            )}
+          </div>
+        )}
+
+        {succeeded && outcome === 'BIB_UPDATED' && (
+          <div className="mt-5 space-y-2" aria-live="polite">
+            <div className="border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+              {state.successMessage || `Número de peito atualizado para ${context?.requested ?? nextBib}.`}
+            </div>
+            {context?.refreshFailed && (
+              <div className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+                Número de peito salvo, mas não foi possível atualizar os dados exibidos. Atualize antes de tentar novamente — não reenvie.
+              </div>
+            )}
+          </div>
+        )}
+        {succeeded && outcome === 'BIB_UNCHANGED' && (
+          <div className="mt-5 border border-white/15 bg-white/5 p-3 text-sm text-zinc-200" role="status" aria-live="polite">
+            {state.successMessage || `O número de peito já estava definido como ${context?.requested ?? nextBib}.`}
+          </div>
+        )}
+
+        {failed && !sessionExpired && verification === null && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {isConflict
+              ? 'Este número de peito já está vinculado a outra inscrição.'
+              : state.error?.message || 'Não foi possível atualizar o número de peito.'}
+          </div>
+        )}
+        {sessionExpired && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Sua sessão expirou. A alteração NÃO foi executada. Entre novamente para continuar.'}
+          </div>
+        )}
+        {verification === 'confirmed' && (
+          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            A conexão falhou, mas a verificação confirmou que o número de peito foi alterado para {context?.requested ?? nextBib}. Não reenvie.
+          </div>
+        )}
+        {verification === 'not-applied' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            A conexão falhou e a verificação mostra que a alteração NÃO foi aplicada (o número segue como {context?.canonical || 'Não atribuído'}). Você pode tentar novamente.
+          </div>
+        )}
+        {verification === 'unknown' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Estado indefinido: o número de peito está como {context?.canonical || 'Não atribuído'}, diferente do anterior e do solicitado. Revise a inscrição antes de qualquer nova ação.
+          </div>
+        )}
+        {verification === 'unreachable' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Não foi possível confirmar se a alteração foi aplicada. Recarregue e verifique a inscrição antes de repetir a ação.
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {concludeOnly ? (
+            <button type="button" onClick={succeeded ? onAcknowledge : onReset} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : reviewOnly ? (
+            <button type="button" onClick={onReset} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300">Fechar</button>
+          ) : (
+            <>
+              <button type="button" onClick={onReset} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting || !canSubmit}
+                className="flex items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting ? 'Salvando...' : (failed || verification === 'not-applied') ? 'Tentar novamente' : 'Salvar número de peito'}
               </button>
             </>
           )}

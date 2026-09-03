@@ -11,6 +11,7 @@ import { calculateCouponPricing, getCouponCampaignAttribution } from './coupons.
 import { assertDatabaseEnvironmentIsolation } from './environment.js';
 import { assertRuntimeAutoMigrateAllowed } from './migration-environment.js';
 import { resolveEventScope } from './event-scope.js';
+import { validateBibAssignment } from './admin-guards.js';
 import {
   EMAIL_DELIVERY_COOLDOWN_MS,
   buildLegacyEmailSummaryPatch,
@@ -4923,6 +4924,184 @@ export async function snapshot() {
   }
 
   return readPostgresDatabase(requirePool());
+}
+
+/**
+ * ADMIN-UX-RELIABILITY Wave 2A — narrow, single-row transactional mutation for
+ * POST /api/admin/registrations/:id/bib-number. Replaces the generic
+ * transaction() blob mechanism (readPostgresDatabase(scope='all') -> in-memory
+ * mutate -> savePostgresDatabase(full database) -> commit, all under the global
+ * 'funpace-run-write' advisory lock) which is the same defect class fixed for lot
+ * configuration (EVENT-OPS-001) and the athlete profile edit (ADMIN-UX-HOTFIX-003)
+ * for what is logically a one-column update.
+ *
+ * Touches ONLY run-registrations (one row's `bib_number` + `updated_at`) and
+ * run-audit-logs (one appended 'registration.bib_assigned' row, and only when the
+ * bib actually changes). It never reads the full dataset, never acquires
+ * pg_advisory_xact_lock('funpace-run-write'), never calls savePostgresDatabase /
+ * ensureConfiguredLots / ensurePostgresReady, and writes zero unrelated tables.
+ *
+ * Concurrency:
+ *  - `select ... for update of r` on the target registration row serialises two
+ *    concurrent bib writes for the SAME registration; before/after is always
+ *    computed against the freshest committed value, so neither side is lost.
+ *  - the partial unique index `run-registrations_event_bib_idx (event_id,
+ *    bib_number) where bib_number is not null` is the FINAL authority for the
+ *    cross-registration race: two registrations in the same event racing for the
+ *    same bib -> exactly one UPDATE commits, the other gets SQLSTATE 23505 which
+ *    this function maps to the semantic `conflict` outcome. The application
+ *    pre-check (`isBibTaken`) only improves the common-case message.
+ *  - the index is event-scoped, so the same bib number may legitimately exist in
+ *    two different events; no global bib uniqueness is introduced.
+ *  - local lock_timeout / statement_timeout keep a contended call well under the
+ *    15s Admin client timeout instead of blocking indefinitely.
+ *
+ * No-op contract (§9): if the canonical current bib already equals the requested
+ * bib, NOTHING is written (no UPDATE, no audit row) and the result is `unchanged`
+ * -> the handler returns HTTP 200 BIB_UNCHANGED. Safe under repeated requests.
+ *
+ * Validation (registration/event/lot state) and the audit payload shape
+ * ({ reason, previous, bibNumber }) are a faithful port of the previous in-memory
+ * implementation in handleAdminBibNumber; the audit event name is unchanged.
+ */
+export type RegistrationBibUpdateInput = {
+  registrationId: string;
+  nextBibNumber: string;
+  reason: string;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type RegistrationBibUpdateResult =
+  | { status: 'not_found' }
+  | { status: 'not_eligible'; message: string }
+  | { status: 'conflict'; message: string }
+  | { status: 'unchanged'; bibNumber: string }
+  | { status: 'ok'; previous: string | null; bibNumber: string };
+
+/** The codebase's SQLSTATE-23505 pattern (cf. isPartnerSlugConflict): a unique
+ *  violation raised by the event-scoped partial bib index. The bib UPDATE only
+ *  ever writes `bib_number`, so a 23505 on that statement can only be the bib
+ *  index; the constraint-name check keeps it explicit. */
+function isBibNumberUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: string; constraint?: string };
+  if (candidate.code !== '23505') return false;
+  return !candidate.constraint || candidate.constraint === 'run-registrations_event_bib_idx';
+}
+
+export async function setRegistrationBibInPostgres(
+  input: RegistrationBibUpdateInput,
+): Promise<RegistrationBibUpdateResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const targetResult = await client.query(
+      `select r.id, r.status, r.event_id, r.bib_number,
+              e.status as event_status, l.status as lot_status
+         from ${table.registrations} r
+         join ${table.events} e on e.id = r.event_id
+         left join ${table.lots} l on l.id = r.lot_id
+        where r.id = $1
+        for update of r`,
+      [input.registrationId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { status: 'not_found' };
+    }
+
+    const previous: string | null = targetRow.bib_number ?? null;
+    const nextBibNumber = input.nextBibNumber;
+
+    // §9 — idempotent no-op: the canonical bib already IS the requested value.
+    // No UPDATE, no audit row; the handler answers 200 BIB_UNCHANGED.
+    if (previous === nextBibNumber) {
+      await client.query('rollback');
+      return { status: 'unchanged', bibNumber: nextBibNumber };
+    }
+
+    const takenResult = await client.query(
+      `select 1 from ${table.registrations}
+        where event_id = $1 and bib_number = $2 and id <> $3
+        limit 1`,
+      [targetRow.event_id, nextBibNumber, input.registrationId],
+    );
+
+    const guardMessage = validateBibAssignment({
+      registrationStatus: String(targetRow.status),
+      eventStatus: targetRow.event_status ? String(targetRow.event_status) : null,
+      lotStatus: targetRow.lot_status ? String(targetRow.lot_status) : null,
+      currentBibNumber: previous,
+      nextBibNumber,
+      isBibTaken: takenResult.rows.length > 0,
+    });
+    if (guardMessage) {
+      await client.query('rollback');
+      if (guardMessage === 'Numero de peito ja utilizado neste evento.') {
+        return { status: 'conflict', message: guardMessage };
+      }
+      if (guardMessage === 'Este numero de peito ja esta atribuido para a inscricao.') {
+        // Unreachable — the no-op check above already returned. Kept defensive.
+        return { status: 'unchanged', bibNumber: nextBibNumber };
+      }
+      return { status: 'not_eligible', message: guardMessage };
+    }
+
+    try {
+      await client.query(
+        `update ${table.registrations} set bib_number = $2, updated_at = $3 where id = $1`,
+        [input.registrationId, nextBibNumber, input.audit.createdAt],
+      );
+    } catch (error) {
+      if (isBibNumberUniqueViolation(error)) {
+        await client.query('rollback').catch(() => undefined);
+        return { status: 'conflict', message: 'Numero de peito ja utilizado neste evento.' };
+      }
+      throw error;
+    }
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'registration.bib_assigned', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.registrationId,
+        JSON.stringify({ reason: input.reason, previous, bibNumber: nextBibNumber }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { status: 'ok', previous, bibNumber: nextBibNumber };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**

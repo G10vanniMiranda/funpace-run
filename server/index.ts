@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { pathToFileURL } from 'node:url';
 import { validateRegistration } from '../src/lib/validation.js';
 import type { CreateRegistrationResponse, MarketingAttributionTouch, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
-import { canUndoCheckIn, canUndoKit, getCheckInConflictMessage, getKitConflictMessage, validateBibAssignment } from './admin-guards.js';
+import { canUndoCheckIn, canUndoKit, getCheckInConflictMessage, getKitConflictMessage } from './admin-guards.js';
 import {
   attachCheckoutToPaymentInPostgres,
   cancelRegistrationInPostgres,
@@ -56,6 +56,7 @@ import {
   getRegistrationContactEmailInPostgres,
   loadConfirmationRecoverySnapshotInPostgres,
   loadHistoricalConfirmationResendSnapshotInPostgres,
+  setRegistrationBibInPostgres,
   updateLotConfigurationInPostgres,
   updateRegistrationFieldsInPostgres,
   upsertAdminBootstrapInPostgres,
@@ -4916,25 +4917,45 @@ async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, r
   const body = parseJsonBody<{ bibNumber?: string; reason?: string }>(await readBody(req));
   const bibNumber = compactText(body?.bibNumber, 20).toUpperCase(); const reason = body?.reason?.trim() || '';
   if (!/^[A-Z0-9-]{1,20}$/.test(bibNumber) || reason.length < 5) { json(res, 400, { message: 'Numero de peito invalido ou motivo insuficiente.' }); return; }
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const registration = database.registrations.find((item) => item.id === registrationId);
-    if (!registration) return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
-    const event = database.events.find((item) => item.id === registration.eventId);
-    const lot = database.lots.find((item) => item.id === registration.lotId);
-    const bibAssignmentError = validateBibAssignment({
-      registrationStatus: registration.status,
-      eventStatus: event?.status || null,
-      lotStatus: lot?.status || null,
-      currentBibNumber: registration.bibNumber || null,
-      nextBibNumber: bibNumber,
-      isBibTaken: database.registrations.some((item) => item.eventId === registration.eventId && item.id !== registrationId && item.bibNumber === bibNumber),
-    });
-    if (bibAssignmentError) return { statusCode: 409, payload: { message: bibAssignmentError } };
-    const previous = registration.bibNumber || null; const now = new Date().toISOString(); registration.bibNumber = bibNumber; registration.updatedAt = now;
-    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'registration.bib_assigned', entityType: 'registration', entityId: registrationId, payload: { reason, previous, bibNumber }, createdAt: now }));
-    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+
+  // ADMIN-UX-RELIABILITY Wave 2A — the Admin bib mutation is a narrow, single-row
+  // PostgreSQL primitive (setRegistrationBibInPostgres): `select ... for update`
+  // on the one registration row, the event-scoped partial unique index as the
+  // FINAL cross-registration concurrency authority (23505 -> BIB_CONFLICT), and
+  // one appended 'registration.bib_assigned' audit row IFF the bib actually
+  // changes. It never routes through the generic full-blob transaction() /
+  // savePostgresDatabase / 'funpace-run-write' path. requireAdminDatabase() above
+  // already 503s when the process is not in Postgres mode, so there is no
+  // JSON-mode fallback to keep here.
+  const outcome = await setRegistrationBibInPostgres({
+    registrationId,
+    nextBibNumber: bibNumber,
+    reason,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
   });
-  json(res, result.statusCode, withRegistrationView(result.payload, adminSession.role as RegistrationViewRole));
+
+  if (outcome.status === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  if (outcome.status === 'not_eligible') { json(res, 409, { message: outcome.message, code: 'NOT_ELIGIBLE' }); return; }
+  if (outcome.status === 'conflict') {
+    // §11 — never leak the other participant's identity.
+    json(res, 409, { message: 'Este número de peito já está vinculado a outra inscrição.', code: 'BIB_CONFLICT' });
+    return;
+  }
+
+  const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId);
+  if (!refreshedRegistration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  const payload = outcome.status === 'unchanged'
+    ? { ok: true, outcome: 'BIB_UNCHANGED' as const, message: `O número de peito já estava definido como ${bibNumber}.`, registration: toAdminRow(refreshed, refreshedRegistration) }
+    : { ok: true, outcome: 'BIB_UPDATED' as const, message: `Número de peito atualizado para ${bibNumber}.`, registration: toAdminRow(refreshed, refreshedRegistration) };
+  json(res, 200, withRegistrationView(payload, adminSession.role as RegistrationViewRole));
 }
 
 async function handleAdminRegistrations(req: IncomingMessage, res: ServerResponse, url: URL) {
