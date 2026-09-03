@@ -32,7 +32,8 @@ function bibHandler(): string {
 
 function bibPrimitive(): string {
   const start = serverDatabase.indexOf('export type RegistrationBibUpdateInput = {');
-  const end = serverDatabase.indexOf('\nexport type RegistrationFieldsUpdateInput = {');
+  // stop before the ADMIN-UX-RELIABILITY Wave 2B check-in primitives that follow
+  const end = serverDatabase.indexOf('ADMIN-UX-RELIABILITY Wave 2B', start);
   assert.ok(start >= 0 && end > start, 'setRegistrationBibInPostgres block located');
   return serverDatabase.slice(start, end);
 }

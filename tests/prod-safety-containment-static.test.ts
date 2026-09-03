@@ -120,7 +120,16 @@ test('no generic persist:true transaction() whose callback ONLY pushes to auditL
 // narrow setRegistrationBibInPostgres primitive (server/database.ts). The bib
 // operation's only remaining transaction() call is the read-only
 // `persist: false` refetch, which is not a full-blob writer.
-const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 21, 'server/database.ts': 2 };
+//
+// ADMIN-UX-RELIABILITY Wave 2B: 21 -> 20. handleAdminCheckIn delegates to the
+// narrow checkInRegistrationInPostgres primitive and no longer wraps check-in in
+// a generic full-blob transaction(). The undo-check-in branch of
+// handleAdminRegistrationMaintenance also delegates (to
+// undoRegistrationCheckInInPostgres), but that handler's generic transaction()
+// LINE stays counted — it still serves undo-kit (Wave 2C) and the cancel
+// JSON-mode fallback. So this wave removes exactly one independent writer
+// (check-in); the 20 -> 19 decrement lands with Wave 2C.
+const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 20, 'server/database.ts': 2 };
 
 function countFullBlobWriters(src: string): number {
   const lines = src.split('\n');

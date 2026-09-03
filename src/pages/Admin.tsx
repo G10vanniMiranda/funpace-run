@@ -58,6 +58,7 @@ import {
   type AdminSession,
   ApiError,
   checkInAdminRegistration,
+  undoAdminRegistrationCheckIn,
   deliverAdminKit,
   getAdminAuditLogs,
   getAdminAuditLogsCsvUrl,
@@ -95,7 +96,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminCheckInResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -326,6 +327,25 @@ export function AdminPage() {
     refreshFailed: boolean;
     verification: 'confirmed' | 'not-applied' | 'unknown' | 'unreachable' | null;
     canonical: string | null;
+  } | null>(null);
+  // ADMIN-UX-RELIABILITY Wave 2B — check-in / undo-check-in on the same reusable
+  // state machine. `checkInDraft.mode` selects the operation; `checkInContext`
+  // records the intended transition so SUCCESS renders the canonical state and —
+  // on an ambiguous network/timeout failure — the result of a READ-ONLY
+  // verification (never an automatic resend). PG-2 (an active kit delivery blocks
+  // undo-check-in) is enforced server-side; the modal disables/explains it too.
+  const checkInMutation = useAdminMutation<AdminCheckInResponse>((result) => result.message);
+  const [checkInDraft, setCheckInDraft] = useState<{
+    registration: AdminRegistration;
+    mode: 'check-in' | 'undo';
+    notes: string;
+    reason: string;
+  } | null>(null);
+  const [checkInContext, setCheckInContext] = useState<{
+    before: AdminRegistration;
+    mode: 'check-in' | 'undo';
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'blocked-by-kit' | 'unknown' | 'unreachable' | null;
   } | null>(null);
   // ADMIN-UX-RELIABILITY Stage 2 / Wave 1 — the athlete profile edit on the same
   // reusable state machine (idle → confirming → submitting → success | failure).
@@ -561,20 +581,97 @@ export function AdminPage() {
     setRegistrationDetails((current) => current ? { ...current, registration } : current);
   };
 
-  const handleCheckIn = async (registration: AdminRegistration) => {
-    setActionLoading('check-in');
-    setError('');
+  // ADMIN-UX-RELIABILITY Wave 2B — check-in and undo-check-in on `useAdminMutation`.
+  const openCheckIn = (registration: AdminRegistration) => {
+    checkInMutation.reset();
+    setCheckInContext(null);
+    setCheckInDraft({ registration, mode: 'check-in', notes: '', reason: '' });
+    checkInMutation.open();
+  };
+  const openUndoCheckIn = (registration: AdminRegistration) => {
+    checkInMutation.reset();
+    setCheckInContext(null);
+    setCheckInDraft({ registration, mode: 'undo', notes: '', reason: '' });
+    checkInMutation.open();
+  };
 
-    try {
-      const response = await checkInAdminRegistration(adminKey, registration.id);
-      updateRegistration(response.registration);
-      setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
-      await loadAdminData();
-    } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível registrar o check-in.');
-    } finally {
-      setActionLoading('');
+  const canSubmitCheckIn = (draft: { mode: 'check-in' | 'undo'; reason: string; registration: AdminRegistration }) =>
+    draft.mode === 'check-in'
+      ? true
+      : draft.reason.trim().length >= 5 && draft.registration.kitStatus !== 'delivered';
+
+  const submitCheckIn = async () => {
+    if (!checkInDraft || !canSubmitCheckIn(checkInDraft)) return;
+    const before = checkInDraft.registration;
+    const mode = checkInDraft.mode;
+    const notes = checkInDraft.notes.trim();
+    const reason = checkInDraft.reason.trim();
+    setActionMessage('');
+    setCheckInContext({ before, mode, refreshFailed: false, verification: null });
+
+    let response: AdminCheckInResponse | null = null;
+    let caught: unknown = null;
+    const ok = await checkInMutation.submit(async () => {
+      try {
+        response = mode === 'check-in'
+          ? await checkInAdminRegistration(adminKey, before.id, notes)
+          : await undoAdminRegistrationCheckIn(adminKey, before.id, reason);
+        return response;
+      } catch (requestError) {
+        caught = requestError;
+        throw requestError;
+      }
+    });
+
+    if (ok && response) {
+      try {
+        updateRegistration(response.registration);
+        setRegistrationDetails(await getAdminRegistrationDetails(adminKey, before.id));
+        await loadAdminData();
+      } catch {
+        // §28 — the mutation committed; only the read-only refresh failed. NOT a
+        // mutation failure, MUST NOT trigger a resubmission.
+        setCheckInContext((current) => (current ? { ...current, refreshFailed: true } : current));
+      }
+      return;
     }
+
+    // §26 / §27 — a timeout / bare network failure leaves the commit state
+    // unprovable. Never encourage a resend: run a READ-ONLY verification.
+    const ambiguous = caught instanceof TypeError
+      || (caught instanceof ApiError && (caught.code === 'timeout' || caught.code === 'network_error'));
+    if (!ambiguous) return;
+    try {
+      const details = await getAdminRegistrationDetails(adminKey, before.id);
+      const checkedIn = details.registration.checkInStatus === 'checked_in';
+      const kitDelivered = details.registration.kitStatus === 'delivered';
+      let verification: 'confirmed' | 'not-applied' | 'blocked-by-kit' | 'unknown';
+      if (mode === 'check-in') {
+        verification = checkedIn ? 'confirmed' : 'not-applied';
+      } else if (!checkedIn) {
+        verification = 'confirmed';
+      } else if (kitDelivered) {
+        verification = 'blocked-by-kit';
+      } else {
+        verification = 'not-applied';
+      }
+      updateRegistration(details.registration);
+      setRegistrationDetails(details);
+      setCheckInContext((current) => (current ? { ...current, verification } : current));
+    } catch {
+      setCheckInContext((current) => (current ? { ...current, verification: 'unreachable' } : current));
+    }
+  };
+
+  const acknowledgeCheckIn = () => {
+    checkInMutation.acknowledge();
+    setCheckInDraft(null);
+    setCheckInContext(null);
+  };
+  const resetCheckIn = () => {
+    checkInMutation.reset();
+    setCheckInDraft(null);
+    setCheckInContext(null);
   };
 
   const handleKitDelivery = async (registration: AdminRegistration) => {
@@ -915,7 +1012,8 @@ export function AdminPage() {
       <AthleteDrawer
         registration={selectedRegistration}
         actionLoading={actionLoading}
-        onCheckIn={handleCheckIn}
+        onCheckIn={openCheckIn}
+        onUndoCheckIn={openUndoCheckIn}
         onKitDelivery={handleKitDelivery}
         onMaintenance={handleMaintenance}
         onRecoverConfirmationEmail={openRecoverEmail}
@@ -1000,6 +1098,20 @@ export function AdminPage() {
           onSubmit={() => void submitBibNumber()}
           onAcknowledge={acknowledgeBibNumber}
           onReset={resetBibNumber}
+          onSessionExpired={handleSessionExpired}
+        />
+      )}
+
+      {checkInDraft && (
+        <CheckInModal
+          draft={checkInDraft}
+          state={checkInMutation.state}
+          context={checkInContext}
+          canSubmit={canSubmitCheckIn(checkInDraft)}
+          onDraftChange={setCheckInDraft}
+          onSubmit={() => void submitCheckIn()}
+          onAcknowledge={acknowledgeCheckIn}
+          onReset={resetCheckIn}
           onSessionExpired={handleSessionExpired}
         />
       )}
@@ -3639,6 +3751,205 @@ function BibNumberModal({
   );
 }
 
+// ADMIN-UX-RELIABILITY Wave 2B — reliable check-in / undo-check-in.
+//   * `mode` selects the operation; the confirming step always shows the
+//     canonical current check-in state;
+//   * the reusable state machine: submitting visible, submit disabled +
+//     double-submit-guarded, CHECK_IN_ACCEPTED / CHECK_IN_REVERTED explicit,
+//     ALREADY_CHECKED_IN / ALREADY_NOT_CHECKED_IN informational (not errors),
+//     the authoritative refetch has already run by the time SUCCESS shows;
+//   * PG-2: an active kit delivery blocks undo-check-in — the modal explains it
+//     up front AND surfaces the server's KIT_DELIVERY_BLOCKS_CHECK_IN_UNDO 409;
+//   * a timeout / bare network failure runs a READ-ONLY verification (parent)
+//     and this modal renders its verdict — applied / not applied / blocked by
+//     kit / unknown — without ever offering an automatic resend;
+//   * a refetch failure AFTER a committed transition is its own message and also
+//     never re-issues the mutation.
+function CheckInModal({
+  draft,
+  state,
+  context,
+  canSubmit,
+  onDraftChange,
+  onSubmit,
+  onAcknowledge,
+  onReset,
+  onSessionExpired,
+}: {
+  draft: { registration: AdminRegistration; mode: 'check-in' | 'undo'; notes: string; reason: string };
+  state: AdminMutationState<AdminCheckInResponse>;
+  context: {
+    before: AdminRegistration;
+    mode: 'check-in' | 'undo';
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'blocked-by-kit' | 'unknown' | 'unreachable' | null;
+  } | null;
+  canSubmit: boolean;
+  onDraftChange: (draft: { registration: AdminRegistration; mode: 'check-in' | 'undo'; notes: string; reason: string }) => void;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onReset: () => void;
+  onSessionExpired: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const businessCode = state.error?.businessCode ?? '';
+  const isKitBlock = failed && businessCode === 'KIT_DELIVERY_BLOCKS_CHECK_IN_UNDO';
+  const notEligible = failed && businessCode === 'NOT_ELIGIBLE';
+  const verification = context?.verification ?? null;
+  const outcome = state.result?.outcome ?? null;
+
+  const reg = draft.registration;
+  const isUndo = draft.mode === 'undo';
+  const kitDelivered = reg.kitStatus === 'delivered';
+  const checkedInLabel = reg.checkInStatus === 'checked_in'
+    ? `Realizado${reg.checkInBy ? ` por ${reg.checkInBy}` : ''}${reg.checkInAt ? ` em ${dateTimeFormatter.format(new Date(reg.checkInAt))}` : ''}`
+    : 'Não realizado';
+  const reasonValid = draft.reason.trim().length >= 5;
+
+  // The PG-2 block: known before submit (kit already delivered) or surfaced by
+  // the server / the ambiguous-commit verification.
+  const kitBlocked = (isUndo && kitDelivered) || isKitBlock || verification === 'blocked-by-kit';
+  const showForm = !succeeded && !sessionExpired && !kitBlocked
+    && verification !== 'confirmed' && verification !== 'unknown' && verification !== 'unreachable';
+  const concludeOnly = succeeded || verification === 'confirmed';
+  const reviewOnly = kitBlocked || verification === 'unknown' || verification === 'unreachable';
+
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onReset} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">{isUndo ? 'Desfazer check-in' : 'Registrar check-in'}</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              {isUndo ? 'Remove o' : 'Registra o'} check-in de <span className="text-white">{reg.fullName}</span>.
+              Check-in atual: <span className="text-white">{checkedInLabel}</span>.
+            </p>
+          </div>
+          <button type="button" onClick={onReset} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {kitBlocked && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            O check-in não pode ser desfeito enquanto a entrega do kit estiver registrada. Desfaça primeiro a entrega do kit.
+          </div>
+        )}
+
+        {showForm && (
+          <div className="mt-5 space-y-3">
+            {isUndo ? (
+              <label className="block text-xs font-bold text-zinc-400">
+                Motivo <span className="font-normal text-zinc-500">(obrigatório, mínimo de 5 caracteres)</span>
+                <textarea
+                  value={draft.reason}
+                  aria-required="true"
+                  aria-invalid={draft.reason.length > 0 && !reasonValid}
+                  disabled={submitting}
+                  onChange={(event) => onDraftChange({ ...draft, reason: event.target.value })}
+                  className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white disabled:opacity-60"
+                />
+              </label>
+            ) : (
+              <label className="block text-xs font-bold text-zinc-400">
+                Observações <span className="font-normal text-zinc-500">(opcional)</span>
+                <input
+                  value={draft.notes}
+                  disabled={submitting}
+                  onChange={(event) => onDraftChange({ ...draft, notes: event.target.value })}
+                  className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white disabled:opacity-60"
+                />
+              </label>
+            )}
+          </div>
+        )}
+
+        {succeeded && (outcome === 'CHECK_IN_ACCEPTED' || outcome === 'CHECK_IN_REVERTED') && (
+          <div className="mt-5 space-y-2" aria-live="polite">
+            <div className="border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+              {state.successMessage || (outcome === 'CHECK_IN_REVERTED' ? 'Check-in desfeito.' : 'Check-in registrado.')}
+            </div>
+            {context?.refreshFailed && (
+              <div className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+                Operação salva, mas não foi possível atualizar os dados exibidos. Atualize antes de tentar novamente — não reenvie.
+              </div>
+            )}
+          </div>
+        )}
+        {succeeded && (outcome === 'ALREADY_CHECKED_IN' || outcome === 'ALREADY_NOT_CHECKED_IN') && (
+          <div className="mt-5 border border-white/15 bg-white/5 p-3 text-sm text-zinc-200" role="status" aria-live="polite">
+            {state.successMessage || (outcome === 'ALREADY_CHECKED_IN' ? 'Check-in já estava registrado.' : 'Não existe check-in registrado para desfazer.')}
+          </div>
+        )}
+
+        {failed && !sessionExpired && !isKitBlock && verification === null && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {notEligible
+              ? (state.error?.message || 'Check-in permitido apenas para inscrições pagas.')
+              : (state.error?.message || 'Não foi possível concluir a ação de check-in.')}
+          </div>
+        )}
+        {sessionExpired && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Sua sessão expirou. A ação NÃO foi executada. Entre novamente para continuar.'}
+          </div>
+        )}
+        {verification === 'confirmed' && (
+          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            A conexão falhou, mas a verificação confirmou que o check-in foi {isUndo ? 'desfeito' : 'registrado'}. Não reenvie.
+          </div>
+        )}
+        {verification === 'not-applied' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            A conexão falhou e a verificação mostra que a ação NÃO foi aplicada. Você pode tentar novamente.
+          </div>
+        )}
+        {verification === 'unknown' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Estado indefinido após a falha de conexão. Revise a inscrição antes de qualquer nova ação.
+          </div>
+        )}
+        {verification === 'unreachable' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Não foi possível confirmar se a ação foi aplicada. Recarregue e verifique a inscrição antes de repetir.
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {concludeOnly ? (
+            <button type="button" onClick={succeeded ? onAcknowledge : onReset} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : reviewOnly ? (
+            <button type="button" onClick={onReset} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300">Fechar</button>
+          ) : (
+            <>
+              <button type="button" onClick={onReset} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting || !canSubmit}
+                className="flex items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting
+                  ? 'Salvando...'
+                  : (failed || verification === 'not-applied')
+                    ? 'Tentar novamente'
+                    : isUndo ? 'Desfazer check-in' : 'Registrar check-in'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ADMIN-UX-HOTFIX-001 — event / distance / lot config save modal on the reusable
 // mutation state machine. One confirm → one PATCH. The submitting / success /
 // failure surface is rendered HERE (durable); the modal never disappears leaving
@@ -3794,6 +4105,7 @@ function AthleteDrawer({
   actionLoading,
   adminRole,
   onCheckIn,
+  onUndoCheckIn,
   onKitDelivery,
   onMaintenance,
   onRecoverConfirmationEmail,
@@ -3812,6 +4124,7 @@ function AthleteDrawer({
   actionLoading: string;
   adminRole: AdminRole | null;
   onCheckIn: (registration: AdminRegistration) => void;
+  onUndoCheckIn: (registration: AdminRegistration) => void;
   onKitDelivery: (registration: AdminRegistration) => void;
   onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => void;
   onRecoverConfirmationEmail: (registration: AdminRegistration) => void;
@@ -3957,7 +4270,17 @@ function AthleteDrawer({
           {canEditRegistration && registration.status === 'paid' && registration.confirmationEmailSentAt && (
             <button type="button" disabled={actionLoading !== ''} onClick={() => onResendHistoricalConfirmation(registration)} className="border border-amber-400/20 px-3 py-2 text-xs font-black uppercase text-amber-200/80">Reenviar confirmação histórica</button>
           )}
-          {canHandleOperation && registration.checkInStatus === 'checked_in' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-check-in')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer check-in</button>}
+          {canHandleOperation && registration.checkInStatus === 'checked_in' && (
+            <button
+              type="button"
+              disabled={actionLoading !== '' || registration.kitStatus === 'delivered'}
+              title={registration.kitStatus === 'delivered' ? 'O check-in não pode ser desfeito enquanto a entrega do kit estiver registrada. Desfaça primeiro a entrega do kit.' : undefined}
+              onClick={() => onUndoCheckIn(registration)}
+              className="border border-white/10 px-3 py-2 text-xs font-black uppercase disabled:cursor-not-allowed disabled:text-zinc-600"
+            >
+              Desfazer check-in
+            </button>
+          )}
           {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
           {canCancelRegistration && !['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscrição</button>}
         </div>

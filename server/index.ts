@@ -56,7 +56,9 @@ import {
   getRegistrationContactEmailInPostgres,
   loadConfirmationRecoverySnapshotInPostgres,
   loadHistoricalConfirmationResendSnapshotInPostgres,
+  checkInRegistrationInPostgres,
   setRegistrationBibInPostgres,
+  undoRegistrationCheckInInPostgres,
   updateLotConfigurationInPostgres,
   updateRegistrationFieldsInPostgres,
   upsertAdminBootstrapInPostgres,
@@ -4304,58 +4306,55 @@ async function handleAdminCheckIn(req: IncomingMessage, res: ServerResponse, reg
   if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
 
   const rawBody = await readBody(req);
-  const payload = parseJsonBody<AdminActionRequest>(rawBody) || {};
-  const actor = adminSession.actor;
-  const now = new Date().toISOString();
+  const body = parseJsonBody<AdminActionRequest>(rawBody) || {};
+  const notes = body.notes?.trim() || null;
 
-  const result = await transaction((database) => {
-    const registration = database.registrations.find((item) => item.id === registrationId);
-
-    if (!registration) {
-      return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
-    }
-
-    if (registration.status !== 'paid') {
-      return { statusCode: 409, payload: { message: 'Check-in permitido apenas para inscricoes pagas.' } };
-    }
-
-    const existing = database.checkIns.find((item) => item.registrationId === registration.id);
-
-    if (existing) {
-      return {
-        statusCode: 409,
-        payload: {
-          message: getCheckInConflictMessage({ actor: existing.checkedInBy || null, at: existing.checkedInAt || null }),
-          registration: toAdminRow(database, registration),
-        },
-      };
-    } else {
-      database.checkIns.push({
-        id: randomUUID(),
-        registrationId: registration.id,
-        status: 'checked_in',
-        checkedInAt: now,
-        checkedInBy: actor,
-        notes: payload.notes?.trim() || null,
-      });
-    }
-
-    database.auditLogs.push(createAuditLog(req, adminSession, {
-      actor,
-      action: 'registration.check_in',
-      entityType: 'registration',
-      entityId: registration.id,
-      payload: { notes: payload.notes?.trim() || null },
-      createdAt: now,
-    }));
-
-    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  // ADMIN-UX-RELIABILITY Wave 2B — check-in is a narrow, single-row PostgreSQL
+  // primitive (checkInRegistrationInPostgres): `select ... for update of r` on
+  // the one registration row (cross-wave lock order), one INSERT into
+  // run-check-ins iff not already checked in, one appended 'registration.check_in'
+  // audit row. It never routes through the generic full-blob transaction() /
+  // savePostgresDatabase / 'funpace-run-write' path. requireAdminDatabase() above
+  // already 503s outside Postgres mode, so there is no JSON-mode fallback here.
+  const outcome = await checkInRegistrationInPostgres({
+    registrationId,
+    notes,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
   });
 
-  const googleSheetSync = result.statusCode === 200
-    ? await queueCheckInGoogleSheetSync(registrationId)
-    : null;
-  json(res, result.statusCode, withRegistrationView(result.payload, adminSession.role as RegistrationViewRole));
+  if (outcome.status === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  if (outcome.status === 'not_eligible') { json(res, 409, { message: outcome.message, code: 'NOT_ELIGIBLE' }); return; }
+
+  const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId);
+  if (!refreshedRegistration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  const registrationRow = toAdminRow(refreshed, refreshedRegistration);
+
+  if (outcome.status === 'already_checked_in') {
+    // §12 — idempotent: no INSERT, no audit, HTTP 200.
+    json(res, 200, withRegistrationView({
+      ok: true,
+      outcome: 'ALREADY_CHECKED_IN' as const,
+      message: getCheckInConflictMessage({ actor: outcome.checkedInBy || null, at: outcome.checkedInAt || null }),
+      registration: registrationRow,
+    }, adminSession.role as RegistrationViewRole));
+    return;
+  }
+
+  const googleSheetSync = await queueCheckInGoogleSheetSync(registrationId);
+  json(res, 200, withRegistrationView({
+    ok: true,
+    outcome: 'CHECK_IN_ACCEPTED' as const,
+    message: 'Check-in registrado.',
+    registration: registrationRow,
+  }, adminSession.role as RegistrationViewRole));
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
@@ -4489,6 +4488,61 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
     const googleSheetSync = await queueRegistrationGoogleSheetSync(registrationId);
     json(res, 200, { registration: toAdminRow(refreshed, refreshedRegistration), message: 'Inscricao cancelada com sucesso.' });
     if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
+    return;
+  }
+  if (action === 'undo-check-in' && usesPostgresDatabase()) {
+    // ADMIN-UX-RELIABILITY Wave 2B — undo-check-in is a narrow PostgreSQL
+    // primitive (undoRegistrationCheckInInPostgres): `select ... for update of r`
+    // then read run-check-ins then read run-kit-deliveries (cross-wave lock
+    // order), the PG-2 guard (an active kit delivery blocks the undo), a real
+    // physical DELETE from run-check-ins (the legacy full-blob path was
+    // upsert-only and never deleted the side row), and one narrow
+    // 'registration.undo-check-in' audit row iff the row is actually removed. It
+    // does NOT route through the generic transaction() / savePostgresDatabase /
+    // 'funpace-run-write' path. undo-kit and the cancel JSON-mode fallback keep
+    // the generic block below (Wave 2C migrates undo-kit).
+    const undoOutcome = await undoRegistrationCheckInInPostgres({
+      registrationId,
+      reason,
+      audit: {
+        actor: adminSession.actor,
+        actorRole: adminSession.role,
+        sessionId: adminSession.id,
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req),
+        createdAt: new Date().toISOString(),
+      },
+    });
+    if (undoOutcome.status === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+    if (undoOutcome.status === 'kit_delivery_blocks_undo') {
+      json(res, 409, {
+        message: 'O check-in não pode ser desfeito enquanto a entrega do kit estiver registrada. Desfaça primeiro a entrega do kit.',
+        code: 'KIT_DELIVERY_BLOCKS_CHECK_IN_UNDO',
+      });
+      return;
+    }
+    const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+    const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId);
+    if (!refreshedRegistration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+    const registrationRow = toAdminRow(refreshed, refreshedRegistration);
+    if (undoOutcome.status === 'already_not_checked_in') {
+      // §13 — idempotent: no DELETE, no audit, HTTP 200.
+      json(res, 200, withRegistrationView({
+        ok: true,
+        outcome: 'ALREADY_NOT_CHECKED_IN' as const,
+        message: 'Não existe check-in registrado para desfazer.',
+        registration: registrationRow,
+      }, adminSession.role as RegistrationViewRole));
+      return;
+    }
+    const undoGoogleSheetSync = await queueCheckInGoogleSheetSync(registrationId);
+    json(res, 200, withRegistrationView({
+      ok: true,
+      outcome: 'CHECK_IN_REVERTED' as const,
+      message: 'Check-in desfeito.',
+      registration: registrationRow,
+    }, adminSession.role as RegistrationViewRole));
+    if (undoGoogleSheetSync) await processGoogleSheetSync(undoGoogleSheetSync.id);
     return;
   }
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {

@@ -8,6 +8,7 @@ import type {
   AdminSystemCheckResponse,
   AdminRegistrationActionResponse,
   AdminBibNumberResponse,
+  AdminCheckInResponse,
   AdminRecoverConfirmationEmailResponse,
   AdminResendHistoricalConfirmationResponse,
   AdminRegistrationEditable,
@@ -586,8 +587,24 @@ function postAdminRegistrationAction(adminKey: string, registrationId: string, a
   );
 }
 
+// ADMIN-UX-RELIABILITY Wave 2B — check-in / undo-check-in run the narrow
+// PostgreSQL primitives and return the machine-outcome contract. `retry: false`
+// is explicit (also the adminFetch default): an ambiguous POST is never silently
+// replayed — the caller performs a read-only verification instead.
 export function checkInAdminRegistration(adminKey: string, registrationId: string, notes = '') {
-  return postAdminRegistrationAction(adminKey, registrationId, 'check-in', notes);
+  return adminFetch<AdminCheckInResponse>(
+    `/api/admin/registrations/${encodeURIComponent(registrationId)}/check-in${toQueryString({ event: currentEventParam() })}`,
+    adminKey,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes }), retry: false },
+  );
+}
+
+export function undoAdminRegistrationCheckIn(adminKey: string, registrationId: string, reason: string) {
+  return adminFetch<AdminCheckInResponse>(
+    `/api/admin/registrations/${encodeURIComponent(registrationId)}/undo-check-in${toQueryString({ event: currentEventParam() })}`,
+    adminKey,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false },
+  );
 }
 
 export function deliverAdminKit(adminKey: string, registrationId: string, notes = '') {

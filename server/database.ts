@@ -5105,6 +5105,291 @@ export async function setRegistrationBibInPostgres(
 }
 
 /**
+ * ADMIN-UX-RELIABILITY Wave 2B — narrow PostgreSQL mutations for the on-site
+ * check-in flow (POST /api/admin/registrations/:id/check-in and the
+ * undo-check-in branch of POST /api/admin/registrations/:id/undo-check-in).
+ *
+ * They replace the generic full-blob transaction() path
+ * (readPostgresDatabase(scope='all') -> in-memory mutate ->
+ * savePostgresDatabase(17-table upsert) -> commit, under
+ * pg_advisory_xact_lock('funpace-run-write')) for a logical one-row
+ * INSERT/DELETE + one audit row. Same defect class as EVENT-OPS-001 (lot
+ * config), ADMIN-UX-HOTFIX-003 (profile edit) and ADMIN-UX-RELIABILITY Wave 2A
+ * (bib).
+ *
+ * INTENTIONAL BUGFIX: savePostgresDatabase is upsert-only and there is no DELETE
+ * for run-check-ins anywhere in the legacy path, so the legacy undo-check-in
+ * appended a 'registration.undo-check-in' audit row while LEAVING the
+ * run-check-ins side row in place (dormant in Production: 0 check-ins ever).
+ * undoRegistrationCheckInInPostgres performs the real physical DELETE.
+ *
+ * PG-2 (Human Product Gate, APPROVED): an active kit delivery blocks
+ * undo-check-in server-side. Target invariant KIT_DELIVERED => CHECKED_IN; the
+ * state NOT_CHECKED_IN + KIT_DELIVERED must never be produced.
+ *
+ * CROSS-WAVE LOCK ORDER (binding on Wave 2C): always
+ *   1. run-registrations  -- SELECT ... FOR UPDATE OF r  (the serialisation point)
+ *   2. run-check-ins
+ *   3. run-kit-deliveries  -- read-only here; the PG-2 guard runs under the
+ *      already-held registration row lock, so a plain SELECT is sufficient.
+ * Never lock a child table before run-registrations; never hold both child
+ * locks in opposing orders. Total order run-registrations -> run-check-ins ->
+ * run-kit-deliveries is deadlock-free.
+ *
+ * Concurrency: `select ... for update of r` on the registration row serialises
+ * two concurrent check-in / undo / mixed requests for the SAME registration; the
+ * unique index run-check-ins_registration_id_idx is the belt-and-braces backstop
+ * for a lost same-registration race (23505 -> ALREADY_CHECKED_IN). Different
+ * registrations run fully in parallel (no global lock). local lock_timeout /
+ * statement_timeout bound a contended call well under the 15s Admin timeout.
+ *
+ * Neither primitive calls transaction() / savePostgresDatabase() /
+ * ensureConfiguredLots() / ensurePostgresReady() / the funpace-run-write
+ * advisory lock.
+ */
+
+/** SQLSTATE-23505 classifier for the one-check-in-per-registration unique index
+ *  (cf. isBibNumberUniqueViolation / isPartnerSlugConflict). The check-in INSERT
+ *  only ever writes run-check-ins, so a 23505 there can only be this index. */
+function isCheckInRegistrationUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: string; constraint?: string };
+  if (candidate.code !== '23505') return false;
+  return !candidate.constraint || candidate.constraint === 'run-check-ins_registration_id_idx';
+}
+
+export type RegistrationCheckInInput = {
+  registrationId: string;
+  notes: string | null;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type RegistrationCheckInResult =
+  | { status: 'not_found' }
+  | { status: 'not_eligible'; message: string }
+  | { status: 'already_checked_in'; checkedInAt: string; checkedInBy: string }
+  | { status: 'ok'; checkInId: string; checkedInAt: string };
+
+export async function checkInRegistrationInPostgres(
+  input: RegistrationCheckInInput,
+): Promise<RegistrationCheckInResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    // 1. cross-wave lock order: the registration row is the serialisation point.
+    const targetResult = await client.query(
+      `select r.id, r.status from ${table.registrations} r where r.id = $1 for update of r`,
+      [input.registrationId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { status: 'not_found' };
+    }
+    // Eligibility — a faithful port of handleAdminCheckIn: paid registrations only.
+    if (targetRow.status !== 'paid') {
+      await client.query('rollback');
+      return { status: 'not_eligible', message: 'Check-in permitido apenas para inscricoes pagas.' };
+    }
+
+    // 2. canonical check-in state.
+    const existing = await client.query(
+      `select id, checked_in_at, checked_in_by from ${table.checkIns} where registration_id = $1`,
+      [input.registrationId],
+    );
+    if (existing.rows[0]) {
+      // §12 idempotent no-op: 200 ALREADY_CHECKED_IN, no INSERT, no audit.
+      await client.query('rollback');
+      return {
+        status: 'already_checked_in',
+        checkedInAt: String(existing.rows[0].checked_in_at),
+        checkedInBy: String(existing.rows[0].checked_in_by),
+      };
+    }
+
+    const checkInId = randomUUID();
+    try {
+      await client.query(
+        `insert into ${table.checkIns} (id, registration_id, status, checked_in_at, checked_in_by, notes)
+         values ($1, $2, 'checked_in', $3, $4, $5)`,
+        [checkInId, input.registrationId, input.audit.createdAt, input.audit.actor, input.notes],
+      );
+    } catch (error) {
+      // Belt & braces: the `for update of r` lock already serialises same-reg
+      // check-ins, so this only fires on an unexpected concurrent inserter.
+      if (isCheckInRegistrationUniqueViolation(error)) {
+        await client.query('rollback').catch(() => undefined);
+        const race = await requirePool().query(
+          `select checked_in_at, checked_in_by from ${table.checkIns} where registration_id = $1`,
+          [input.registrationId],
+        );
+        const row = race.rows[0];
+        return {
+          status: 'already_checked_in',
+          checkedInAt: row ? String(row.checked_in_at) : input.audit.createdAt,
+          checkedInBy: row ? String(row.checked_in_by) : input.audit.actor,
+        };
+      }
+      throw error;
+    }
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'registration.check_in', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.registrationId,
+        JSON.stringify({ notes: input.notes }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { status: 'ok', checkInId, checkedInAt: input.audit.createdAt };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export type RegistrationCheckInUndoInput = {
+  registrationId: string;
+  reason: string;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type RegistrationCheckInUndoResult =
+  | { status: 'not_found' }
+  | { status: 'already_not_checked_in' }
+  | { status: 'kit_delivery_blocks_undo'; kitDeliveredAt: string; kitDeliveredBy: string }
+  | { status: 'ok'; previousCheckedInAt: string; previousCheckedInBy: string };
+
+export async function undoRegistrationCheckInInPostgres(
+  input: RegistrationCheckInUndoInput,
+): Promise<RegistrationCheckInUndoResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    // 1. cross-wave lock order — registration row FIRST.
+    const targetResult = await client.query(
+      `select r.id from ${table.registrations} r where r.id = $1 for update of r`,
+      [input.registrationId],
+    );
+    if (!targetResult.rows[0]) {
+      await client.query('rollback');
+      return { status: 'not_found' };
+    }
+
+    // 2. canonical check-in state.
+    const checkIn = await client.query(
+      `select id, checked_in_at, checked_in_by from ${table.checkIns} where registration_id = $1`,
+      [input.registrationId],
+    );
+    if (!checkIn.rows[0]) {
+      // §13 idempotent no-op: 200 ALREADY_NOT_CHECKED_IN, no DELETE, no audit.
+      await client.query('rollback');
+      return { status: 'already_not_checked_in' };
+    }
+
+    // 3. PG-2 guard — active kit delivery blocks the undo. Read-only under the
+    //    already-held registration row lock (cross-wave lock order step 3).
+    const kit = await client.query(
+      `select id, delivered_at, delivered_by from ${table.kitDeliveries} where registration_id = $1`,
+      [input.registrationId],
+    );
+    if (kit.rows[0]) {
+      await client.query('rollback');
+      return {
+        status: 'kit_delivery_blocks_undo',
+        kitDeliveredAt: String(kit.rows[0].delivered_at),
+        kitDeliveredBy: String(kit.rows[0].delivered_by),
+      };
+    }
+
+    // The physical DELETE the legacy upsert-only path never performed.
+    const deleted = await client.query(
+      `delete from ${table.checkIns} where registration_id = $1 returning id`,
+      [input.registrationId],
+    );
+    if (deleted.rowCount !== 1) {
+      // Serialised by the registration row lock this is unreachable; kept as a
+      // defensive guarantee that we only audit an actual deletion.
+      await client.query('rollback');
+      return { status: 'already_not_checked_in' };
+    }
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'registration.undo-check-in', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.registrationId,
+        JSON.stringify({ reason: input.reason }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return {
+      status: 'ok',
+      previousCheckedInAt: String(checkIn.rows[0].checked_in_at),
+      previousCheckedInBy: String(checkIn.rows[0].checked_in_by),
+    };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * ADMIN-UX-HOTFIX-003 — narrow, single-row transactional mutation for
  * PATCH /api/admin/registrations/:id. Replaces the generic transaction() blob
  * mechanism (readPostgresDatabase(scope='all') -> in-memory mutate ->
