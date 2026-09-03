@@ -443,6 +443,32 @@ export type AdminBibNumberResponse = {
   registration: AdminRegistration;
 };
 
+// ADMIN-UX-RELIABILITY Wave 2B — Admin check-in / undo-check-in. The server is
+// the single authority for the on-site state (row existence in run-check-ins).
+// CHECK_IN_ACCEPTED / ALREADY_CHECKED_IN / CHECK_IN_REVERTED /
+// ALREADY_NOT_CHECKED_IN are HTTP 200 (the ALREADY_* pair is an idempotent no-op:
+// no write, no audit). KIT_DELIVERY_BLOCKS_CHECK_IN_UNDO (PG-2) / NOT_ELIGIBLE
+// arrive as HTTP 409 and NOT_FOUND as 404, each carrying `code`; only the four
+// 200 outcomes are decoded into this shape.
+export type AdminCheckInOutcome =
+  | 'CHECK_IN_ACCEPTED'
+  | 'ALREADY_CHECKED_IN'
+  | 'CHECK_IN_REVERTED'
+  | 'ALREADY_NOT_CHECKED_IN'
+  | 'KIT_DELIVERY_BLOCKS_CHECK_IN_UNDO'
+  | 'NOT_ELIGIBLE'
+  | 'NOT_FOUND';
+
+export type AdminCheckInResponse = {
+  ok: boolean;
+  outcome: Extract<
+    AdminCheckInOutcome,
+    'CHECK_IN_ACCEPTED' | 'ALREADY_CHECKED_IN' | 'CHECK_IN_REVERTED' | 'ALREADY_NOT_CHECKED_IN'
+  >;
+  message: string;
+  registration: AdminRegistration;
+};
+
 // PARTICIPANT-OPS-001 CASE A / Stage A2 — controlled confirmation-email recovery.
 // The server decides eligibility; the client only relays the machine outcome.
 export type ConfirmationRecoveryOutcome =
