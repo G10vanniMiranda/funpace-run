@@ -51,20 +51,20 @@ test('§45 /api/admin/operation (alternate row endpoint) also minimises for oper
 });
 
 test('§49 every drawer mutation echoes a role-minimised row', () => {
-  for (const fn of ['handleAdminKitDelivery']) {
-    const body = block(server, `async function ${fn}(`, '\nasync function ');
-    assert.match(body, /withRegistrationView\(result\.payload, adminSession\.role as RegistrationViewRole\)/, `${fn} minimises its response`);
-  }
   const maintenance = block(server, 'async function handleAdminRegistrationMaintenance(', '\nasync function ');
+  // the generic maintenance writer (cancel JSON fallback) still role-minimises
   assert.match(maintenance, /withRegistrationView\(result\.payload, adminSession\.role as RegistrationViewRole\)/);
-  // ADMIN-UX-RELIABILITY Wave 2B — handleAdminCheckIn and the undo-check-in
-  // branch of handleAdminRegistrationMaintenance were rewritten onto the narrow
-  // check-in primitives; their 200 bodies are locally built
+  // ADMIN-UX-RELIABILITY Wave 2B/2C — handleAdminCheckIn, handleAdminKitDelivery
+  // and the undo-check-in / undo-kit branches of handleAdminRegistrationMaintenance
+  // were rewritten onto the narrow primitives; their 200 bodies are locally built
   // { ok, outcome, message, registration } objects, still passed through
   // withRegistrationView so the `registration` row is role-minimised.
   const checkIn = block(server, 'async function handleAdminCheckIn(', '\nasync function ');
   assert.match(checkIn, /withRegistrationView\(\{\s*\n\s*ok: true,/, 'handleAdminCheckIn minimises its response');
+  const kit = block(server, 'async function handleAdminKitDelivery(', '\nasync function ');
+  assert.match(kit, /withRegistrationView\(\{\s*\n\s*ok: true,/, 'handleAdminKitDelivery minimises its response');
   assert.match(maintenance, /withRegistrationView\(\{[\s\S]*?outcome: 'CHECK_IN_REVERTED' as const/, 'undo-check-in branch minimises its response');
+  assert.match(maintenance, /withRegistrationView\(\{[\s\S]*?outcome: 'KIT_DELIVERY_REVERTED' as const/, 'undo-kit branch minimises its response');
   // ADMIN-UX-RELIABILITY Wave 2A — handleAdminBibNumber was rewritten onto the
   // narrow setRegistrationBibInPostgres primitive; its 200 body is a locally
   // built { ok, outcome, message, registration } object, still passed through

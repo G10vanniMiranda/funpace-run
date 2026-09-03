@@ -9,6 +9,7 @@ import type {
   AdminRegistrationActionResponse,
   AdminBibNumberResponse,
   AdminCheckInResponse,
+  AdminKitResponse,
   AdminRecoverConfirmationEmailResponse,
   AdminResendHistoricalConfirmationResponse,
   AdminRegistrationEditable,
@@ -573,24 +574,11 @@ export function runAdminPartnerConsistency(adminKey: string) {
   return adminFetch<{ runId: string; checkedAt: string; issues: number }>('/api/admin/partner-consistency/run', adminKey, { method: 'POST', retry: false });
 }
 
-function postAdminRegistrationAction(adminKey: string, registrationId: string, action: 'check-in' | 'kit', notes = '') {
-  return adminFetch<AdminRegistrationActionResponse>(
-    `/api/admin/registrations/${encodeURIComponent(registrationId)}/${action}${toQueryString({ event: currentEventParam() })}`,
-    adminKey,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ notes }),
-    },
-  );
-}
-
-// ADMIN-UX-RELIABILITY Wave 2B — check-in / undo-check-in run the narrow
-// PostgreSQL primitives and return the machine-outcome contract. `retry: false`
-// is explicit (also the adminFetch default): an ambiguous POST is never silently
-// replayed — the caller performs a read-only verification instead.
+// ADMIN-UX-RELIABILITY Wave 2B / 2C — check-in, undo-check-in, kit delivery and
+// undo-kit run the narrow PostgreSQL primitives and return the machine-outcome
+// contract. `retry: false` is explicit (also the adminFetch default): an
+// ambiguous POST is never silently replayed — the caller performs a read-only
+// verification instead.
 export function checkInAdminRegistration(adminKey: string, registrationId: string, notes = '') {
   return adminFetch<AdminCheckInResponse>(
     `/api/admin/registrations/${encodeURIComponent(registrationId)}/check-in${toQueryString({ event: currentEventParam() })}`,
@@ -608,7 +596,19 @@ export function undoAdminRegistrationCheckIn(adminKey: string, registrationId: s
 }
 
 export function deliverAdminKit(adminKey: string, registrationId: string, notes = '') {
-  return postAdminRegistrationAction(adminKey, registrationId, 'kit', notes);
+  return adminFetch<AdminKitResponse>(
+    `/api/admin/registrations/${encodeURIComponent(registrationId)}/kit${toQueryString({ event: currentEventParam() })}`,
+    adminKey,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes }), retry: false },
+  );
+}
+
+export function undoAdminRegistrationKitDelivery(adminKey: string, registrationId: string, reason: string) {
+  return adminFetch<AdminKitResponse>(
+    `/api/admin/registrations/${encodeURIComponent(registrationId)}/undo-kit${toQueryString({ event: currentEventParam() })}`,
+    adminKey,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }), retry: false },
+  );
 }
 
 export function getAdminOperation(adminKey: string, filters: Record<string, string>) {
