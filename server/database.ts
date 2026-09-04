@@ -3077,6 +3077,385 @@ export async function applyNonPaidPaymentWebhookInPostgres(
   }
 }
 
+// ADMIN-UX-RELIABILITY Wave 3C — moved from server/index.ts (verbatim, no
+// behavior change) so linkOrphanPaymentInPostgres below can normalize an
+// orphan event's stored payload without a database.ts -> index.ts circular
+// import. Re-exported from index.ts under the same names so every existing
+// caller/test is unaffected.
+export function findFirstValue(payload: unknown, keys: string[], depth = 0): unknown {
+  if (!payload || typeof payload !== 'object' || depth > 4) {
+    return undefined;
+  }
+
+  const record = payload as Record<string, unknown>;
+
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null && record[key] !== '') {
+      return record[key];
+    }
+  }
+
+  for (const value of Object.values(record)) {
+    const found = findFirstValue(value, keys, depth + 1);
+
+    if (found !== undefined && found !== null && found !== '') {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+export function toStringValue(value: unknown) {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    ? String(value).trim()
+    : '';
+}
+
+function toNumberValue(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number(value.replace(',', '.'));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function normalizeGatewayAmount(value: unknown) {
+  const parsed = toNumberValue(value);
+
+  if (parsed === null) {
+    return null;
+  }
+
+  return Number.isInteger(parsed) ? parsed : Math.round(parsed * 100);
+}
+
+export function toPaymentProviderStatus(event: {
+  status?: string;
+  paid?: boolean;
+  amount?: number | string;
+  paid_amount?: number | string;
+  settledAt?: string;
+} | null): RegistrationStatus {
+  if (!event) {
+    return 'pending_payment';
+  }
+
+  const status = String(event.status || '').trim().toLowerCase();
+  const paidStatuses = new Set(['paid', 'approved', 'confirmed', 'completed', 'captured', 'settled', 'success', 'succeeded', 'received', 'recebido']);
+  const failedStatuses = new Set(['payment_failed', 'failed', 'declined', 'denied', 'refused', 'rejected']);
+  const cancelledStatuses = new Set(['cancelled', 'canceled', 'voided']);
+
+  if (paidStatuses.has(status) || event.paid === true) {
+    return 'paid';
+  }
+
+  const amount = normalizeGatewayAmount(event.amount);
+  const paidAmount = normalizeGatewayAmount(event.paid_amount);
+
+  if (amount !== null && paidAmount !== null && paidAmount >= amount) {
+    return 'paid';
+  }
+
+  if (String(event.settledAt || '').trim()) {
+    return 'paid';
+  }
+
+  if (cancelledStatuses.has(status)) {
+    return 'cancelled';
+  }
+
+  if (status === 'refunded') {
+    return 'refunded';
+  }
+
+  if (status === 'expired') {
+    return 'expired';
+  }
+
+  if (failedStatuses.has(status)) {
+    return 'payment_failed';
+  }
+
+  return 'pending_payment';
+}
+
+export type NormalizedPaymentWebhook = {
+  registrationId: string;
+  providerEventId: string;
+  providerTransactionId: string;
+  providerPaymentId: string;
+  eventType: string;
+  gatewayStatus: string;
+  paymentMethod: string;
+  amountCents: number | null;
+  paidAmountCents: number | null;
+  receiptUrl: string;
+  nextStatus: RegistrationStatus;
+};
+
+export function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWebhook | null {
+  if (!rawEvent || typeof rawEvent !== 'object') {
+    return null;
+  }
+
+  const registrationId = toStringValue(findFirstValue(rawEvent, [
+    'registrationId',
+    'registration_id',
+    'order_nsu',
+    'orderNsu',
+    'order_id',
+    'orderId',
+    'external_id',
+    'externalId',
+    'reference_id',
+    'referenceId',
+  ]));
+  const providerTransactionId = toStringValue(findFirstValue(rawEvent, [
+    'transaction_nsu',
+    'transactionNsu',
+    'transaction_id',
+    'transactionId',
+    'transaction_uuid',
+    'payment_id',
+    'paymentId',
+  ]));
+  const providerPaymentId = toStringValue(findFirstValue(rawEvent, [
+    'invoice_slug',
+    'invoiceSlug',
+    'slug',
+    'checkout_slug',
+    'checkoutSlug',
+    'invoice_id',
+    'invoiceId',
+    'link_id',
+    'linkId',
+  ]));
+  const providerEventId = toStringValue(findFirstValue(rawEvent, [
+    'providerEventId',
+    'event_id',
+    'eventId',
+    'id',
+  ])) || providerTransactionId || providerPaymentId;
+  const eventType = toStringValue(findFirstValue(rawEvent, ['eventType', 'event_type', 'type'])) || 'infinitepay.payment_status_changed';
+  const gatewayStatus = toStringValue(findFirstValue(rawEvent, ['status', 'payment_status', 'paymentStatus', 'transaction_status', 'transactionStatus', 'invoice_status', 'invoiceStatus']));
+  const amountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['amount', 'amount_cents', 'amountCents', 'total_amount', 'totalAmount', 'value']));
+  const paidAmountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['paid_amount', 'paidAmount', 'paid_amount_cents', 'received_amount', 'receivedAmount']));
+  const paidValue = findFirstValue(rawEvent, ['paid', 'is_paid', 'isPaid']);
+  const settledAt = toStringValue(findFirstValue(rawEvent, ['paid_at', 'paidAt', 'received_at', 'receivedAt', 'settled_at', 'settledAt']));
+  const paid = paidValue === true || String(paidValue).toLowerCase() === 'true';
+  const nextStatus = toPaymentProviderStatus({
+    status: gatewayStatus,
+    paid,
+    amount: amountCents ?? undefined,
+    paid_amount: paidAmountCents ?? undefined,
+    settledAt,
+  });
+
+  return {
+    registrationId,
+    providerEventId,
+    providerTransactionId,
+    providerPaymentId,
+    eventType,
+    gatewayStatus,
+    paymentMethod: toStringValue(findFirstValue(rawEvent, ['payment_method', 'paymentMethod', 'method', 'payment_type', 'paymentType', 'capture_method'])),
+    amountCents,
+    paidAmountCents,
+    receiptUrl: toStringValue(findFirstValue(rawEvent, ['receipt_url', 'receiptUrl'])),
+    nextStatus,
+  };
+}
+
+function isGatewayTransactionUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: string; constraint?: string };
+  if (candidate.code !== '23505') return false;
+  return !candidate.constraint || candidate.constraint === 'run-payments_gateway_transaction_idx';
+}
+
+export type OrphanPaymentLinkInput = {
+  eventId: string;
+  registrationId: string;
+  reason: string;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type OrphanPaymentLinkOutcome =
+  | 'ORPHAN_LINKED'
+  | 'ORPHAN_ALREADY_LINKED_HERE'
+  | 'ORPHAN_ALREADY_CLAIMED'
+  | 'AMOUNT_MISMATCH'
+  | 'GATEWAY_CONFLICT'
+  | 'ORPHAN_NOT_FOUND'
+  | 'TARGET_NOT_FOUND';
+
+export type OrphanPaymentLinkResult = {
+  statusCode: number;
+  payload: unknown;
+  outcome: OrphanPaymentLinkOutcome;
+};
+
+/**
+ * ADMIN-UX-RELIABILITY Wave 3C — narrow, single-row transactional replacement
+ * for the Admin orphan-payment-link action (previously a generic
+ * transaction(cb, {scope:'checkout'}) with no row lock on either the target
+ * registration/payment or the orphan event itself, relying only on the
+ * global 'funpace-run-write' advisory lock for accidental serialization).
+ *
+ * Stage 1 forensic finding, preserved exactly: orphan-link is evidence
+ * association, NOT payment confirmation. It never touches
+ * registration.status, paid_at, or any run-lots field — those remain the
+ * exclusive responsibility of confirmPaymentInPostgres (via the separate,
+ * untouched, Admin "reconcile" action). This primitive touches only
+ * run-payment-events (one row: event_type, payment_id), run-payments (one
+ * row: gateway_status, gateway_transaction_id, gateway_payload, updated_at)
+ * and run-audit-logs (one insert).
+ *
+ * Lock order is IDENTICAL to confirmPaymentInPostgres's and
+ * applyNonPaidPaymentWebhookInPostgres's (funpace-run-registration-lot ->
+ * funpace-run-payment-confirmation), so orphan-link is finally serialized
+ * against both webhook paths for the same registration/payment row. The
+ * target registration+payment row group is locked BEFORE the orphan event
+ * row, consistently on every call regardless of which specific event/
+ * registration IDs are involved — this fixed order (not one derived from the
+ * input values) is what makes concurrent calls deadlock-free.
+ *
+ * Idempotency: relinking the SAME orphan to the SAME target is a read-only
+ * no-op (ORPHAN_ALREADY_LINKED_HERE, zero writes, zero audit). Attempting to
+ * link an event already linked elsewhere is a real conflict
+ * (ORPHAN_ALREADY_CLAIMED, 409). A run-payments_gateway_transaction_idx
+ * violation (two payments claiming the same gateway_transaction_id) is
+ * caught and classified (GATEWAY_CONFLICT, 409) instead of leaking a raw
+ * Postgres error.
+ */
+export async function linkOrphanPaymentInPostgres(
+  input: OrphanPaymentLinkInput,
+): Promise<OrphanPaymentLinkResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+  const now = new Date().toISOString();
+
+  try {
+    await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-payment-confirmation'))");
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const targetResult = await client.query(
+      `select registration.id as registration_id, registration.amount_cents,
+              payment.id as payment_id, payment.gateway_status, payment.gateway_transaction_id
+       from ${table.registrations} registration
+       join ${table.payments} payment on payment.registration_id = registration.id
+       where registration.id = $1
+       for update of registration, payment`,
+      [input.registrationId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { statusCode: 404, payload: { message: 'Inscricao ou pagamento nao encontrado.' }, outcome: 'TARGET_NOT_FOUND' };
+    }
+
+    const eventResult = await client.query(
+      `select id, payment_id, provider_event_id, event_type, payload
+       from ${table.paymentEvents} where id = $1
+       for update`,
+      [input.eventId],
+    );
+    const eventRow = eventResult.rows[0];
+    if (!eventRow) {
+      await client.query('rollback');
+      return { statusCode: 404, payload: { message: 'Evento orfao nao encontrado.' }, outcome: 'ORPHAN_NOT_FOUND' };
+    }
+    if (eventRow.event_type !== 'infinitepay.orphan') {
+      await client.query('rollback');
+      if (eventRow.payment_id === targetRow.payment_id) {
+        return { statusCode: 200, payload: { ok: true }, outcome: 'ORPHAN_ALREADY_LINKED_HERE' };
+      }
+      return { statusCode: 409, payload: { message: 'Este evento ja foi vinculado a outra inscricao.' }, outcome: 'ORPHAN_ALREADY_CLAIMED' };
+    }
+
+    const normalized = normalizePaymentWebhook(eventRow.payload);
+    if (normalized && normalized.amountCents !== null && normalized.amountCents !== Number(targetRow.amount_cents)) {
+      await client.query('rollback');
+      return { statusCode: 409, payload: { message: 'O valor do evento diverge da inscricao informada.' }, outcome: 'AMOUNT_MISMATCH' };
+    }
+
+    const before = { gatewayStatus: targetRow.gateway_status, gatewayTransactionId: targetRow.gateway_transaction_id };
+    const gatewayStatus = normalized?.gatewayStatus || targetRow.gateway_status;
+    const gatewayTransactionId = normalized?.providerTransactionId || targetRow.gateway_transaction_id;
+
+    try {
+      await client.query(
+        `update ${table.payments}
+         set gateway_status = $1, gateway_transaction_id = $2, gateway_payload = $3, updated_at = $4
+         where id = $5`,
+        [gatewayStatus, gatewayTransactionId, eventRow.payload, now, targetRow.payment_id],
+      );
+    } catch (error) {
+      if (isGatewayTransactionUniqueViolation(error)) {
+        await client.query('rollback').catch(() => undefined);
+        return { statusCode: 409, payload: { message: 'Esta transacao do gateway ja esta associada a outro pagamento.' }, outcome: 'GATEWAY_CONFLICT' };
+      }
+      throw error;
+    }
+
+    await client.query(
+      `update ${table.paymentEvents} set event_type = 'infinitepay.orphan_linked', payment_id = $1 where id = $2`,
+      [targetRow.payment_id, input.eventId],
+    );
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'payment.orphan_linked', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.registrationId,
+        JSON.stringify({
+          reason: input.reason,
+          eventId: input.eventId,
+          providerEventId: eventRow.provider_event_id,
+          before,
+          after: { gatewayStatus, gatewayTransactionId },
+        }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { statusCode: 200, payload: { ok: true }, outcome: 'ORPHAN_LINKED' };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function markPaymentCreationFailedInPostgres(registrationId: string) {
   const client = await requirePool().connect();
 

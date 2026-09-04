@@ -26,7 +26,11 @@ function webhookHandler(): string {
 
 function nonPaidMutation(): string {
   const start = serverDatabase.indexOf('export async function applyNonPaidPaymentWebhookInPostgres(');
-  const end = serverDatabase.indexOf('export async function markPaymentCreationFailedInPostgres(');
+  // ADMIN-UX-RELIABILITY Wave 3C inserted its own moved normalization helpers
+  // and the linkOrphanPaymentInPostgres primitive directly after this
+  // function (before markPaymentCreationFailedInPostgres) — pin the slice end
+  // to that wave-unique marker so it never grows to swallow them.
+  const end = serverDatabase.indexOf('// ADMIN-UX-RELIABILITY Wave 3C');
   assert.ok(start >= 0 && end > start, 'applyNonPaidPaymentWebhookInPostgres located');
   return serverDatabase.slice(start, end);
 }

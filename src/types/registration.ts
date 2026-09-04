@@ -626,6 +626,27 @@ export type AdminPaymentEvent = { id: string; paymentId: string; providerEventId
 export type AdminPaymentDetailsResponse = { payment: AdminRegistration; gatewayPayload: unknown; events: AdminPaymentEvent[] };
 export type AdminPaymentsResponse = { payments: AdminRegistration[]; pagination: { page: number; pageSize: number; total: number; totalPages: number }; orphanEvents: AdminPaymentEvent[] };
 
+// ADMIN-UX-RELIABILITY Wave 3C — Admin orphan-payment linking. Evidence
+// association only (Stage 1 forensic: never a payment confirmation) — the
+// server either links the event (ORPHAN_LINKED), recognises the request as
+// already-applied to this exact target (ORPHAN_ALREADY_LINKED_HERE, HTTP
+// 200, no audit noise), or rejects it. AMOUNT_MISMATCH / ORPHAN_ALREADY_CLAIMED
+// / GATEWAY_CONFLICT / ORPHAN_NOT_FOUND / TARGET_NOT_FOUND arrive as HTTP
+// errors (409/409/409/404/404) carrying `outcome`.
+export type AdminOrphanLinkOutcome =
+  | 'ORPHAN_LINKED'
+  | 'ORPHAN_ALREADY_LINKED_HERE'
+  | 'ORPHAN_ALREADY_CLAIMED'
+  | 'AMOUNT_MISMATCH'
+  | 'GATEWAY_CONFLICT'
+  | 'ORPHAN_NOT_FOUND'
+  | 'TARGET_NOT_FOUND';
+
+export type AdminOrphanLinkResponse = {
+  ok: boolean;
+  outcome: Extract<AdminOrphanLinkOutcome, 'ORPHAN_LINKED' | 'ORPHAN_ALREADY_LINKED_HERE'>;
+};
+
 export type AdminAuditLog = {
   id: string;
   actor: string;

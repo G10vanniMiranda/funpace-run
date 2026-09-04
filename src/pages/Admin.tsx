@@ -97,7 +97,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminCheckInResponse, AdminKitResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminCheckInResponse, AdminKitResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminOrphanLinkResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -1634,6 +1634,18 @@ function PaymentControlPanel({
   const [paymentPagination, setPaymentPagination] = useState({ page: 1, pageSize: 25, total: 0, totalPages: 1 });
   const [paymentFilters, setPaymentFilters] = useState({ q: '', method: '', dateFrom: '', dateTo: '', page: '1', pageSize: '25' });
   const [orphanDraft, setOrphanDraft] = useState<{ event: AdminPaymentEvent; registrationId: string; reason: string } | null>(null);
+  // ADMIN-UX-RELIABILITY Wave 3C — orphan-link on the established
+  // useAdminMutation reliability contract (idle → confirming → submitting →
+  // success | failure), including ambiguous-commit read-only verification
+  // and a distinct committed-but-refresh-failed state. Stage 1 forensic:
+  // linking is evidence association only, never a payment confirmation.
+  const orphanMutation = useAdminMutation<AdminOrphanLinkResponse>();
+  const [orphanContext, setOrphanContext] = useState<{
+    event: AdminPaymentEvent;
+    requestedRegistrationId: string;
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'conflict' | 'unknown' | 'unreachable' | null;
+  } | null>(null);
   const paid = registrations.filter((registration) => registration.status === 'paid');
   const pending = registrations.filter((registration) => registration.status === 'pending_payment');
   const failed = registrations.filter((registration) => ['payment_failed', 'expired', 'cancelled', 'refunded'].includes(registration.status));
@@ -1652,14 +1664,83 @@ function PaymentControlPanel({
       const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = 'funpace-run-pagamentos.csv'; link.click(); URL.revokeObjectURL(url);
     } catch (error) { setActionError(error instanceof Error ? error.message : 'Não foi possível exportar pagamentos.'); }
   };
-  const linkOrphan = async (event: AdminPaymentEvent) => {
+  const linkOrphan = (event: AdminPaymentEvent) => {
+    orphanMutation.reset();
+    setOrphanContext(null);
     setOrphanDraft({ event, registrationId: '', reason: '' });
+    orphanMutation.open();
   };
 
-  const submitOrphanLink = async () => {
-    if (!orphanDraft?.registrationId.trim() || orphanDraft.reason.trim().length < 5) { setActionError('Informe a inscrição e um motivo com pelo menos 5 caracteres.'); return; }
-    try { await linkAdminOrphanPayment(adminKey, orphanDraft.event.id, orphanDraft.registrationId, orphanDraft.reason); setOrphanEvents((current) => current.filter((item) => item.id !== orphanDraft.event.id)); setOrphanDraft(null); await onRefreshAdminData(); }
-    catch (error) { setActionError(error instanceof ApiError ? error.message : 'Não foi possível vincular o evento.'); }
+  const refreshOrphanEvents = async () => {
+    const status = filter === 'pending' ? 'pending_payment' : filter === 'all' ? '' : filter;
+    const refreshed = await getAdminPayments(adminKey, { ...paymentFilters, status });
+    setPaymentRows(refreshed.payments);
+    setPaymentPagination(refreshed.pagination);
+    setOrphanEvents(refreshed.orphanEvents);
+    return refreshed;
+  };
+
+  // ADMIN-UX-RELIABILITY Wave 3C — one confirm → exactly one PATCH. On a
+  // timeout/network failure, a READ-ONLY verification classifies the result
+  // instead of leaving the operator to guess or blindly resend.
+  const submitOrphanLink = () => {
+    const draft = orphanDraft;
+    if (!draft) return;
+    setOrphanContext({ event: draft.event, requestedRegistrationId: draft.registrationId, refreshFailed: false, verification: null });
+    let caught: unknown = null;
+    void orphanMutation.submit(async () => {
+      try {
+        if (!draft.registrationId.trim() || draft.reason.trim().length < 5) {
+          throw new ApiError('Informe a inscrição e um motivo com pelo menos 5 caracteres.', { code: 'validation', businessCode: 'ORPHAN_LINK_INVALID' });
+        }
+        return await linkAdminOrphanPayment(adminKey, draft.event.id, draft.registrationId, draft.reason);
+      } catch (requestError) {
+        caught = requestError;
+        throw requestError;
+      }
+    }).then(async (ok) => {
+      if (ok) {
+        try {
+          await refreshOrphanEvents();
+        } catch {
+          // §19 — the mutation committed; only the read-only refresh failed.
+          // This is NOT a mutation failure and MUST NOT trigger a resubmission.
+          setOrphanContext((current) => (current ? { ...current, refreshFailed: true } : current));
+        }
+        return;
+      }
+      // §15 — a timeout / bare network failure leaves the commit state
+      // unprovable. Never encourage a resend: run a READ-ONLY verification.
+      const ambiguous = caught instanceof TypeError
+        || (caught instanceof ApiError && (caught.code === 'timeout' || caught.code === 'network_error'));
+      if (!ambiguous) return;
+      try {
+        const targetDetails = await getAdminPaymentDetails(adminKey, draft.registrationId);
+        const linkedHere = targetDetails.events.some((item) => item.id === draft.event.id);
+        if (linkedHere) {
+          setOrphanEvents((current) => current.filter((item) => item.id !== draft.event.id));
+          setOrphanContext((current) => (current ? { ...current, verification: 'confirmed' } : current));
+          return;
+        }
+        const refreshed = await refreshOrphanEvents();
+        const stillOrphan = refreshed.orphanEvents.some((item) => item.id === draft.event.id);
+        setOrphanContext((current) => (current ? { ...current, verification: stillOrphan ? 'not-applied' : 'conflict' } : current));
+      } catch {
+        setOrphanContext((current) => (current ? { ...current, verification: 'unreachable' } : current));
+      }
+    });
+  };
+
+  const acknowledgeOrphanLink = () => {
+    orphanMutation.acknowledge();
+    setOrphanDraft(null);
+    setOrphanContext(null);
+  };
+
+  const closeOrphanLink = () => {
+    orphanMutation.reset();
+    setOrphanDraft(null);
+    setOrphanContext(null);
   };
 
   const openDetails = async (registration: AdminRegistration) => {
@@ -1780,21 +1861,175 @@ function PaymentControlPanel({
         </div>
       )}
       {orphanDraft && (
-        <ActionModal
-          title="Vincular evento orfão"
-          description="Informe a inscrição correta e o motivo da vinculação manual."
-          confirmLabel="Vincular evento"
-          confirmDisabled={!orphanDraft.registrationId.trim() || orphanDraft.reason.trim().length < 5}
-          onConfirm={() => void submitOrphanLink()}
-          onClose={() => setOrphanDraft(null)}
-        >
-          <EditInput label="ID da inscrição" value={orphanDraft.registrationId} onChange={(value) => setOrphanDraft({ ...orphanDraft, registrationId: value })} />
-          <label className="block text-xs font-bold text-zinc-400">
-            Motivo da vinculação
-            <textarea value={orphanDraft.reason} onChange={(event) => setOrphanDraft({ ...orphanDraft, reason: event.target.value })} className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white" />
-          </label>
-        </ActionModal>
+        <OrphanLinkModal
+          draft={orphanDraft}
+          state={orphanMutation.state}
+          context={orphanContext}
+          onDraftChange={setOrphanDraft}
+          onSubmit={submitOrphanLink}
+          onAcknowledge={acknowledgeOrphanLink}
+          onSessionExpired={() => { window.location.href = '/admin'; }}
+          onClose={closeOrphanLink}
+        />
       )}
+    </div>
+  );
+}
+
+// ADMIN-UX-RELIABILITY Wave 3C — durable submitting/success/failure surface
+// for orphan-payment linking, mirroring the established Bib/CheckIn/Kit
+// modal contract. Explicitly NOT a payment-confirmation UI: the copy makes
+// clear this only records evidence, never marks a registration as paid.
+function OrphanLinkModal({
+  draft,
+  state,
+  context,
+  onDraftChange,
+  onSubmit,
+  onAcknowledge,
+  onSessionExpired,
+  onClose,
+}: {
+  draft: { event: AdminPaymentEvent; registrationId: string; reason: string };
+  state: AdminMutationState<AdminOrphanLinkResponse>;
+  context: {
+    event: AdminPaymentEvent;
+    requestedRegistrationId: string;
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'conflict' | 'unknown' | 'unreachable' | null;
+  } | null;
+  onDraftChange: (draft: { event: AdminPaymentEvent; registrationId: string; reason: string }) => void;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onSessionExpired: () => void;
+  onClose: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const verification = context?.verification ?? null;
+  const alreadyLinkedHere = state.result?.outcome === 'ORPHAN_ALREADY_LINKED_HERE';
+
+  const reasonValid = draft.reason.trim().length >= 5;
+  const registrationIdValid = draft.registrationId.trim().length > 0;
+
+  // The editable form is kept whenever a retry is still meaningful. It is
+  // hidden once the change is done (success), once the session must be
+  // renewed, and once a verification has determined the result is applied or
+  // indeterminate.
+  const showForm = !succeeded && !sessionExpired
+    && verification !== 'confirmed' && verification !== 'conflict' && verification !== 'unknown' && verification !== 'unreachable';
+  const concludeOnly = succeeded || verification === 'confirmed';
+  const reviewOnly = verification === 'conflict' || verification === 'unknown' || verification === 'unreachable';
+
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onClose} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">Vincular evento órfão</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              Associa o evento <span className="font-mono text-white">{draft.event.providerEventId}</span> a uma inscrição existente.
+              Isto <span className="text-white">não</span> confirma o pagamento — apenas registra a evidência para conferência posterior.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {showForm && (
+          <div className="mt-5 space-y-3">
+            <EditInput label="ID da inscrição" value={draft.registrationId} disabled={submitting} onChange={(value) => onDraftChange({ ...draft, registrationId: value })} />
+            <label className="block text-xs font-bold text-zinc-400">
+              Motivo <span className="font-normal text-zinc-500">(obrigatório, mínimo de 5 caracteres)</span>
+              <textarea
+                value={draft.reason}
+                aria-required="true"
+                aria-invalid={draft.reason.length > 0 && !reasonValid}
+                disabled={submitting}
+                onChange={(event) => onDraftChange({ ...draft, reason: event.target.value })}
+                className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white disabled:opacity-60"
+              />
+            </label>
+          </div>
+        )}
+
+        {succeeded && (
+          <div className="mt-5 space-y-2" aria-live="polite">
+            <div className={`border p-3 text-sm ${alreadyLinkedHere ? 'border-white/15 bg-white/5 text-zinc-200' : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100'}`} role="status">
+              {alreadyLinkedHere
+                ? 'Este evento já estava vinculado a esta inscrição.'
+                : 'Evento vinculado com sucesso. O pagamento continua não confirmado — use "Marcar como pago e conciliar" separadamente, se necessário.'}
+            </div>
+            {context?.refreshFailed && (
+              <div className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+                Vínculo salvo, mas não foi possível atualizar os dados exibidos. Atualize antes de tentar novamente — não reenvie.
+              </div>
+            )}
+          </div>
+        )}
+        {failed && !sessionExpired && verification === null && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Não foi possível vincular o evento.'}
+          </div>
+        )}
+        {sessionExpired && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Sua sessão expirou. O vínculo NÃO foi executado. Entre novamente para continuar.'}
+          </div>
+        )}
+        {verification === 'confirmed' && (
+          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            A conexão falhou, mas a verificação confirmou que o evento foi vinculado a esta inscrição. Não reenvie.
+          </div>
+        )}
+        {verification === 'not-applied' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            A conexão falhou e a verificação mostra que o vínculo NÃO foi aplicado. Você pode tentar novamente.
+          </div>
+        )}
+        {verification === 'conflict' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            A conexão falhou e o evento não está mais disponível como órfão — provavelmente foi vinculado a outra inscrição enquanto isso. Revise antes de qualquer nova ação.
+          </div>
+        )}
+        {verification === 'unknown' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Estado indefinido: não foi possível confirmar se o vínculo foi aplicado a esta inscrição. Revise antes de qualquer nova ação.
+          </div>
+        )}
+        {verification === 'unreachable' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Não foi possível confirmar se o vínculo foi aplicado. Recarregue e verifique antes de repetir a ação.
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {concludeOnly ? (
+            <button type="button" onClick={succeeded ? onAcknowledge : onClose} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : reviewOnly ? (
+            <button type="button" onClick={onClose} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300">Fechar</button>
+          ) : (
+            <>
+              <button type="button" onClick={onClose} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting || !reasonValid || !registrationIdValid}
+                className="flex items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting ? 'Vinculando…' : (failed || verification === 'not-applied') ? 'Tentar novamente' : 'Vincular evento'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

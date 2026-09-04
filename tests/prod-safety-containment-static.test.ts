@@ -153,7 +153,18 @@ test('no generic persist:true transaction() whose callback ONLY pushes to auditL
 // entire transaction() lived inside handlePaymentWebhook alone, not shared
 // with any sibling handler), so this wave removes exactly one. The already-
 // narrow paid path (confirmPaymentInPostgres) is untouched.
-const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 16, 'server/database.ts': 2 };
+//
+// ADMIN-UX-RELIABILITY Wave 3C: 16 -> 15. handleAdminOrphanLink delegates to
+// the narrow linkOrphanPaymentInPostgres primitive and no longer wraps
+// orphan-payment linking in a generic full-blob transaction(cb,
+// {scope:'checkout'}). This was an independent writer (not shared with
+// handleAdminPaymentReconcile, whose own transaction() calls already carry
+// persist:false and are exempt from this count), so this wave removes
+// exactly one. Stage 1 forensic: orphan-link is evidence association, not
+// payment confirmation — it never touches registration.status, paid_at, or
+// any run-lots field; confirmPaymentInPostgres and
+// applyNonPaidPaymentWebhookInPostgres remain untouched.
+const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 15, 'server/database.ts': 2 };
 
 function countFullBlobWriters(src: string): number {
   const lines = src.split('\n');
