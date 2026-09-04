@@ -2800,6 +2800,283 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
   }
 }
 
+// Payment confirmation is monotonic: a stale/non-paid event can never
+// downgrade a payment already confirmed as paid. Moved from server/index.ts
+// (verbatim, no behavior change) so applyNonPaidPaymentWebhookInPostgres
+// below can reuse it without a database.ts -> index.ts circular import;
+// re-exported from index.ts under the same name for every existing caller.
+export function resolvePaymentTransition(current: RegistrationStatus, incoming: RegistrationStatus): RegistrationStatus {
+  return current === 'paid' && incoming !== 'paid' ? 'paid' : incoming;
+}
+
+export type NonPaidPaymentWebhookInput = {
+  registrationId: string;
+  providerEventId: string;
+  providerPaymentId: string;
+  providerTransactionId: string;
+  eventType: string;
+  gatewayStatus: string;
+  // Never 'paid' — the caller (handlePaymentWebhook) routes any verified
+  // paid claim to confirmPaymentInPostgres before this primitive is ever
+  // reached.
+  nextStatus: Exclude<RegistrationStatus, 'paid'>;
+  amountCents: number | null;
+  payload: unknown;
+};
+
+export type NonPaidPaymentWebhookResult = {
+  statusCode: number;
+  payload: unknown;
+  registrationId?: string;
+  paymentId?: string;
+  nextStatus?: RegistrationStatus;
+  // Observability-only label — does not change what was written. See the
+  // Wave 3B Stage 2 report for why ALREADY_PAID still performs the same
+  // gateway-field write as NON_PAID_APPLIED (preserving §12's provider-
+  // identity-overwrite semantics exactly, rather than silently skipping it).
+  outcome?: 'ORPHAN_RECORDED' | 'ORPHAN_DUPLICATE' | 'STALE_CHECKOUT' | 'AMOUNT_MISMATCH' | 'DUPLICATE_EVENT' | 'ALREADY_PAID' | 'NON_PAID_APPLIED';
+};
+
+/**
+ * ADMIN-UX-RELIABILITY Wave 3B — narrow, single-row transactional replacement
+ * for the non-paid branch of POST /api/webhooks/payment (previously a generic
+ * transaction(cb, {scope:'checkout'}) that read/wrote 9 full tables,
+ * including a blind full-table recompute-and-rewrite of every run-lots row
+ * via synchronizeLotProjections — the source of a proven, never-yet-triggered
+ * lost-update race against confirmPaymentInPostgres's row-locked sold_count
+ * increment, since the two paths took different advisory locks).
+ *
+ * Touches only run-registrations (one row), run-payments (one row),
+ * run-payment-events (one idempotent insert) and run-audit-logs (one
+ * insert). run-lots is READ ONLY (never locked, never written) — used solely
+ * for the stale_checkout price/status comparison, mirroring exactly how
+ * confirmPaymentInPostgres already reads (but never locks) lot.
+ *
+ * Lock order is IDENTICAL to confirmPaymentInPostgres's
+ * (funpace-run-registration-lot -> funpace-run-payment-confirmation -> row
+ * `for update of registration, payment`), so a paid and a non-paid webhook
+ * for the same registration are finally serialized against each other —
+ * closing the lost-update race structurally (no run-lots write to race over)
+ * and procedurally (shared lock family).
+ *
+ * Business semantics are a faithful port of the previous in-memory
+ * implementation: same validation order, same status codes, same messages,
+ * same field-by-field write set on the payment row (including the
+ * pre-existing, deliberately-unchanged behavior where an unverified non-paid
+ * claim can overwrite payment.provider_payment_id /
+ * payment.gateway_transaction_id — see PAYMENT-PROVIDER-IDENTITY-HARDENING in
+ * the Wave 3B Stage 2 report; this wave narrows persistence, it does not
+ * change that policy).
+ */
+export async function applyNonPaidPaymentWebhookInPostgres(
+  input: NonPaidPaymentWebhookInput,
+): Promise<NonPaidPaymentWebhookResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+  const now = new Date().toISOString();
+
+  try {
+    await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-payment-confirmation'))");
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '15s'");
+
+    const result = await client.query(
+      `select registration.id, registration.status, registration.amount_cents, registration.original_price, registration.lot_id,
+              payment.id as payment_id,
+              lot.status as lot_status, lot.price_cents as lot_price_cents
+       from ${table.registrations} registration
+       join ${table.payments} payment on payment.registration_id = registration.id
+       left join ${table.lots} lot on lot.id = registration.lot_id
+       where registration.id = $1
+          or ($2 <> '' and payment.provider_payment_id = $2)
+          or ($3 <> '' and (payment.gateway_transaction_id = $3 or payment.provider_payment_id = $3))
+       limit 1
+       for update of registration, payment`,
+      [input.registrationId, input.providerPaymentId, input.providerTransactionId],
+    );
+    const row = result.rows[0];
+
+    const providerEventId = input.providerEventId || input.providerTransactionId || input.providerPaymentId || '';
+
+    if (!row) {
+      // Registration not found: preserve the exact run-payment-events row
+      // shape and dedupe semantics the Admin orphan-link feature depends on
+      // (eventType 'infinitepay.orphan', empty paymentId).
+      const orphanEventId = providerEventId || randomUUID();
+      const inserted = await client.query(
+        `insert into ${table.paymentEvents} (id, payment_id, provider_event_id, event_type, payload, received_at)
+         values ($1, '', $2, 'infinitepay.orphan', $3, $4)
+         on conflict (provider_event_id) do nothing
+         returning id`,
+        [randomUUID(), orphanEventId, input.payload, now],
+      );
+      if (inserted.rowCount) {
+        await client.query(
+          `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+           values ($1, 'system', 'payment.orphan_received', 'payment', $2, $3, $4)`,
+          [
+            randomUUID(),
+            orphanEventId,
+            JSON.stringify({ registrationId: input.registrationId || null, providerTransactionId: input.providerTransactionId || null }),
+            now,
+          ],
+        );
+      }
+      await client.query('commit');
+      return {
+        statusCode: 404,
+        payload: { message: 'Inscricao nao encontrada.' },
+        outcome: inserted.rowCount ? 'ORPHAN_RECORDED' : 'ORPHAN_DUPLICATE',
+      };
+    }
+
+    const previousStatus = row.status as RegistrationStatus;
+    // Never downgrade a confirmed payment because of a delayed/stale event.
+    const nextStatus = resolvePaymentTransition(previousStatus, input.nextStatus);
+
+    const originalPriceCents = Number(row.original_price ?? row.amount_cents);
+    if (
+      previousStatus !== 'paid'
+      && (!row.lot_status || row.lot_status !== 'active' || originalPriceCents !== Number(row.lot_price_cents))
+    ) {
+      await client.query(
+        `update ${table.payments}
+         set gateway_status = 'stale_checkout',
+             gateway_transaction_id = coalesce(nullif($1, ''), gateway_transaction_id),
+             gateway_payload = $2, updated_at = $3
+         where id = $4`,
+        [input.providerTransactionId, input.payload, now, row.payment_id],
+      );
+      await client.query(
+        `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+         values ($1, 'system', 'payment.stale_checkout', 'registration', $2, $3, $4)`,
+        [
+          randomUUID(),
+          row.id,
+          JSON.stringify({ lotId: row.lot_id, amountCents: Number(row.amount_cents), receivedAmountCents: input.amountCents }),
+          now,
+        ],
+      );
+      await client.query('commit');
+      return { statusCode: 409, payload: { message: 'Checkout expirado por mudanca de lote.' }, outcome: 'STALE_CHECKOUT' };
+    }
+
+    if (input.amountCents !== null && input.amountCents !== Number(row.amount_cents)) {
+      await client.query(
+        `update ${table.payments}
+         set gateway_status = coalesce(nullif($1, ''), 'amount_mismatch'),
+             gateway_transaction_id = coalesce(nullif($2, ''), gateway_transaction_id),
+             gateway_payload = $3, updated_at = $4
+         where id = $5`,
+        [input.gatewayStatus, input.providerTransactionId, input.payload, now, row.payment_id],
+      );
+      await client.query(
+        `insert into ${table.paymentEvents} (id, payment_id, provider_event_id, event_type, payload, received_at)
+         values ($1, $2, $3, 'infinitepay.amount_mismatch', $4, $5)
+         on conflict (provider_event_id) do nothing`,
+        [randomUUID(), row.payment_id, providerEventId || randomUUID(), input.payload, now],
+      );
+      await client.query(
+        `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+         values ($1, 'system', 'payment.amount_mismatch', 'registration', $2, $3, $4)`,
+        [
+          randomUUID(),
+          row.id,
+          JSON.stringify({ expectedAmountCents: Number(row.amount_cents), receivedAmountCents: input.amountCents, providerEventId: providerEventId || null }),
+          now,
+        ],
+      );
+      await client.query('commit');
+      return { statusCode: 400, payload: { message: 'Valor do pagamento divergente.' }, outcome: 'AMOUNT_MISMATCH' };
+    }
+
+    const isDuplicatedEvent = Boolean(
+      providerEventId
+      && (await client.query(`select 1 from ${table.paymentEvents} where provider_event_id = $1 limit 1`, [providerEventId])).rowCount,
+    );
+
+    if (isDuplicatedEvent) {
+      await client.query('commit');
+      return {
+        statusCode: 200,
+        payload: { ok: true, duplicated: true },
+        registrationId: row.id,
+        paymentId: row.payment_id,
+        nextStatus,
+        outcome: 'DUPLICATE_EVENT',
+      };
+    }
+
+    // Faithful port of the previous in-memory write set — including the
+    // pre-existing provider-identity-overwrite characteristic (§12/§Z of the
+    // Wave 3B reports). paid_at/expires_at are intentionally NOT in this SET
+    // clause: for a non-paid nextStatus they are always a no-op preserve
+    // (`x || null` / `x` in the legacy code), so omitting them is the
+    // strongest possible guarantee against §J.6 (paid_at can never be
+    // cleared) rather than merely replicating a no-op assignment.
+    await client.query(
+      `update ${table.registrations} set status = $1, updated_at = $2 where id = $3`,
+      [nextStatus, now, row.id],
+    );
+    await client.query(
+      `update ${table.payments}
+       set provider = 'infinitepay',
+           provider_payment_id = coalesce(nullif($1, ''), nullif($2, ''), provider_payment_id),
+           status = $3,
+           gateway_status = coalesce(nullif($4, ''), $3),
+           gateway_transaction_id = coalesce(nullif($2, ''), gateway_transaction_id),
+           gateway_payload = $5,
+           updated_at = $6
+       where id = $7`,
+      [input.providerPaymentId, input.providerTransactionId, nextStatus, input.gatewayStatus, input.payload, now, row.payment_id],
+    );
+    await client.query(
+      `insert into ${table.paymentEvents} (id, payment_id, provider_event_id, event_type, payload, received_at)
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (provider_event_id) do nothing`,
+      [randomUUID(), row.payment_id, providerEventId || randomUUID(), input.eventType, input.payload, now],
+    );
+    await client.query(
+      `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+       values ($1, 'system', 'payment.webhook_processed', 'registration', $2, $3, $4)`,
+      [
+        randomUUID(),
+        row.id,
+        JSON.stringify({
+          provider: 'infinitepay',
+          providerEventId: providerEventId || null,
+          providerPaymentId: input.providerPaymentId || null,
+          providerTransactionId: input.providerTransactionId || null,
+          previousStatus,
+          nextStatus,
+        }),
+        now,
+      ],
+    );
+
+    await client.query('commit');
+    return {
+      statusCode: 200,
+      payload: { ok: true },
+      registrationId: row.id,
+      paymentId: row.payment_id,
+      nextStatus,
+      outcome: previousStatus === 'paid' ? 'ALREADY_PAID' : 'NON_PAID_APPLIED',
+    };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function markPaymentCreationFailedInPostgres(registrationId: string) {
   const client = await requirePool().connect();
 

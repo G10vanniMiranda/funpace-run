@@ -6,6 +6,7 @@ import type { CreateRegistrationResponse, MarketingAttributionTouch, Registratio
 import { canUndoCheckIn, canUndoKit, getCheckInConflictMessage, getKitConflictMessage } from './admin-guards.js';
 import {
   attachCheckoutToPaymentInPostgres,
+  applyNonPaidPaymentWebhookInPostgres,
   cancelRegistrationInPostgres,
   claimRegistrationEmailInPostgres,
   completeRegistrationEmailInPostgres,
@@ -1203,9 +1204,11 @@ export function toPaymentProviderStatus(event: {
   return 'pending_payment';
 }
 
-export function resolvePaymentTransition(current: RegistrationStatus, incoming: RegistrationStatus): RegistrationStatus {
-  return current === 'paid' && incoming !== 'paid' ? 'paid' : incoming;
-}
+// ADMIN-UX-RELIABILITY Wave 3B — moved to server/database.ts (verbatim, no
+// behavior change) so the new applyNonPaidPaymentWebhookInPostgres primitive
+// can reuse it without a database.ts -> index.ts circular import. Re-exported
+// here so every existing import site (this file, tests) is unaffected.
+export { resolvePaymentTransition } from './database.js';
 
 type NormalizedPaymentWebhook = {
   registrationId: string;
@@ -2718,167 +2721,36 @@ async function handlePaymentWebhook(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const result = await transaction<{ statusCode: number; payload: unknown; registrationId?: string; paymentId?: string; nextStatus?: RegistrationStatus }>((database) => {
-    expirePendingPayments(database);
-
-    const paymentByGatewayId = database.payments.find((item) => (
-      Boolean(normalizedEvent.providerPaymentId) && item.providerPaymentId === normalizedEvent.providerPaymentId
-    ) || (
-      Boolean(normalizedEvent.providerTransactionId)
-      && (item.gatewayTransactionId === normalizedEvent.providerTransactionId || item.providerPaymentId === normalizedEvent.providerTransactionId)
-    ));
-    const registration = database.registrations.find((item) => (
-      Boolean(normalizedEvent.registrationId) && item.id === normalizedEvent.registrationId
-    ) || (
-      paymentByGatewayId && item.id === paymentByGatewayId.registrationId
-    ));
-
-    if (!registration) {
-      const orphanEventId = normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId || randomUUID();
-      if (!database.paymentEvents.some((item) => item.providerEventId === orphanEventId)) {
-        database.paymentEvents.push({ id: randomUUID(), paymentId: '', providerEventId: orphanEventId, eventType: 'infinitepay.orphan', payload: event, receivedAt: new Date().toISOString() });
-        database.auditLogs.push({ id: randomUUID(), actor: 'system', action: 'payment.orphan_received', entityType: 'payment', entityId: orphanEventId, payload: { registrationId: normalizedEvent.registrationId || null, providerTransactionId: normalizedEvent.providerTransactionId || null }, createdAt: new Date().toISOString() });
-      }
-      console.error(JSON.stringify({
-        at: new Date().toISOString(),
-        message: 'payment_webhook_registration_not_found',
-        provider: 'infinitepay',
-        registrationId: normalizedEvent.registrationId || null,
-        providerPaymentId: normalizedEvent.providerPaymentId || null,
-        providerTransactionId: normalizedEvent.providerTransactionId || null,
-      }));
-
-      return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
-    }
-
-    const payment = database.payments.find((item) => item.registrationId === registration.id);
-    const lot = database.lots.find((item) => item.id === registration.lotId);
-    const now = new Date().toISOString();
-    const providerEventId = normalizedEvent.providerEventId || normalizedEvent.providerTransactionId || normalizedEvent.providerPaymentId || '';
-    // Never downgrade a confirmed payment because of a delayed/stale event.
-    const nextStatus = resolvePaymentTransition(registration.status, normalizedEvent.nextStatus);
-
-    if (
-      registration.status !== 'paid'
-      && (!lot || lot.status !== 'active' || (registration.originalPriceCents ?? registration.amountCents) !== lot.priceCents)
-    ) {
-      if (payment) {
-        payment.gatewayStatus = 'stale_checkout';
-        payment.gatewayTransactionId = normalizedEvent.providerTransactionId || payment.gatewayTransactionId || null;
-        payment.gatewayPayload = event;
-        payment.updatedAt = now;
-      }
-      database.auditLogs.push({
-        id: randomUUID(), actor: 'system', action: 'payment.stale_checkout', entityType: 'registration', entityId: registration.id,
-        payload: { lotId: registration.lotId, amountCents: registration.amountCents, receivedAmountCents: normalizedEvent.amountCents }, createdAt: now,
-      });
-      return { statusCode: 409, payload: { message: 'Checkout expirado por mudanca de lote.' } };
-    }
-
-    if (normalizedEvent.amountCents !== null && normalizedEvent.amountCents !== registration.amountCents) {
-      if (payment) {
-        payment.gatewayStatus = normalizedEvent.gatewayStatus || 'amount_mismatch';
-        payment.gatewayTransactionId = normalizedEvent.providerTransactionId || payment.gatewayTransactionId || null;
-        payment.gatewayPayload = event;
-        payment.updatedAt = now;
-      }
-      if (!providerEventId || !database.paymentEvents.some((item) => item.providerEventId === providerEventId)) {
-        database.paymentEvents.push({
-          id: randomUUID(), paymentId: payment?.id || '', providerEventId: providerEventId || randomUUID(),
-          eventType: 'infinitepay.amount_mismatch', payload: event, receivedAt: now,
-        });
-      }
-      database.auditLogs.push({
-        id: randomUUID(), actor: 'system', action: 'payment.amount_mismatch', entityType: 'registration', entityId: registration.id,
-        payload: { expectedAmountCents: registration.amountCents, receivedAmountCents: normalizedEvent.amountCents, providerEventId: providerEventId || null }, createdAt: now,
-      });
-      return { statusCode: 400, payload: { message: 'Valor do pagamento divergente.' } };
-    }
-
-    const isDuplicatedEvent = Boolean(providerEventId && database.paymentEvents.some((item) => item.providerEventId === providerEventId));
-
-    if (isDuplicatedEvent && !(nextStatus === 'paid' && registration.status !== 'paid')) {
-      console.log(JSON.stringify({
-        at: now,
-        message: 'payment_webhook_duplicate',
-        provider: 'infinitepay',
-        registrationId: registration.id,
-        providerEventId,
-        status: registration.status,
-      }));
-
-      return { statusCode: 200, payload: { ok: true, duplicated: true }, registrationId: registration.id, paymentId: payment?.id, nextStatus };
-    }
-
-    const previousStatus = registration.status;
-    registration.status = nextStatus;
-    registration.updatedAt = now;
-
-    if (nextStatus === 'paid') {
-      registration.expiresAt = null;
-      registration.paidAt = registration.paidAt || now;
-      registration.confirmedAt = registration.confirmedAt || now;
-      if (registration.couponCode) registration.couponUsedAt ||= now;
-      ensureRegistrationBibNumber(database, registration);
-
-    }
-
-    if (payment) {
-      payment.provider = 'infinitepay';
-      payment.providerPaymentId = normalizedEvent.providerPaymentId || normalizedEvent.providerTransactionId || payment.providerPaymentId;
-      payment.status = nextStatus;
-      payment.updatedAt = now;
-      payment.paidAt = nextStatus === 'paid' ? payment.paidAt || now : payment.paidAt || null;
-      payment.expiresAt = nextStatus === 'paid' ? null : payment.expiresAt;
-      payment.gatewayStatus = normalizedEvent.gatewayStatus || nextStatus;
-      payment.gatewayTransactionId = normalizedEvent.providerTransactionId || payment.gatewayTransactionId || null;
-      payment.gatewayPayload = event;
-    }
-    synchronizeLotProjections(database);
-
-    if (!isDuplicatedEvent) {
-      database.paymentEvents.push({
-        id: randomUUID(),
-        paymentId: payment?.id || '',
-        providerEventId: providerEventId || randomUUID(),
-        eventType: normalizedEvent.eventType,
-        payload: event,
-        receivedAt: now,
-      });
-    }
-
-    database.auditLogs.push({
-      id: randomUUID(),
-      actor: 'system',
-      action: 'payment.webhook_processed',
-      entityType: 'registration',
-      entityId: registration.id,
-      payload: {
-        provider: 'infinitepay',
-        providerEventId: providerEventId || null,
-        providerPaymentId: normalizedEvent.providerPaymentId || null,
-        providerTransactionId: normalizedEvent.providerTransactionId || null,
-        previousStatus,
-        nextStatus,
-      },
-      createdAt: now,
-    });
-
-    console.log(JSON.stringify({
-      at: now,
-      message: 'payment_webhook_processed',
-      provider: 'infinitepay',
-      registrationId: registration.id,
-      paymentId: payment?.id || null,
-      providerEventId: providerEventId || null,
-      providerPaymentId: normalizedEvent.providerPaymentId || null,
-      providerTransactionId: normalizedEvent.providerTransactionId || null,
-      previousStatus,
-      nextStatus,
-    }));
-
-    return { statusCode: 200, payload: { ok: true, duplicated: isDuplicatedEvent || undefined }, registrationId: registration.id, paymentId: payment?.id, nextStatus };
-  }, { scope: 'checkout' });
+  // ADMIN-UX-RELIABILITY Wave 3B: delegate to the narrow transaction
+  // (run-registrations + run-payments + run-payment-events + run-audit-logs;
+  // run-lots is never written) instead of the generic full-database blob
+  // path. normalizedEvent.nextStatus is guaranteed non-'paid' here (the
+  // 'paid' claim is handled by confirmPaymentInPostgres above, which
+  // `return`s before this point is ever reached).
+  const nonPaidResult = await applyNonPaidPaymentWebhookInPostgres({
+    registrationId: normalizedEvent.registrationId,
+    providerEventId: normalizedEvent.providerEventId,
+    providerPaymentId: normalizedEvent.providerPaymentId,
+    providerTransactionId: normalizedEvent.providerTransactionId,
+    eventType: normalizedEvent.eventType,
+    gatewayStatus: normalizedEvent.gatewayStatus,
+    nextStatus: normalizedEvent.nextStatus as Exclude<RegistrationStatus, 'paid'>,
+    amountCents: normalizedEvent.amountCents,
+    payload: event,
+  });
+  console.log(JSON.stringify({
+    at: new Date().toISOString(),
+    message: 'payment_webhook_processed',
+    provider: 'infinitepay',
+    registrationId: nonPaidResult.registrationId || null,
+    paymentId: nonPaidResult.paymentId || null,
+    providerEventId: normalizedEvent.providerEventId || null,
+    providerPaymentId: normalizedEvent.providerPaymentId || null,
+    providerTransactionId: normalizedEvent.providerTransactionId || null,
+    outcome: nonPaidResult.outcome || null,
+    nextStatus: nonPaidResult.nextStatus || null,
+  }));
+  const result = nonPaidResult;
 
   if (result.statusCode === 200 && result.registrationId && result.nextStatus && result.nextStatus !== 'paid') {
     await appendPartnerPaymentStatusAuditInPostgres(result.registrationId, result.nextStatus, { provider: 'infinitepay' });
