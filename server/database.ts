@@ -4912,6 +4912,273 @@ export async function updateLotConfigurationInPostgres(
   }
 }
 
+// ADMIN-UX-RELIABILITY Wave 3A — narrow, single-row transactional mutations for
+// PATCH /api/admin/event-config and PATCH /api/admin/distances/:id. Same shape
+// as updateLotConfigurationInPostgres above: no readPostgresDatabase(scope='all'),
+// no savePostgresDatabase, no global 'funpace-run-write' advisory lock. Touches
+// only the target row (run-events / run-distances) plus one appended
+// run-audit-logs row. Validation order, status codes and messages are a
+// faithful port of the previous in-memory handlers; the only behavior change is
+// the added *_UNCHANGED no-op outcome (zero writes, zero audit row) when the
+// requested values already match the stored row.
+
+export type EventConfigurationUpdateInput = {
+  changes: Partial<Record<'name' | 'date' | 'startTime' | 'locationName' | 'city' | 'state' | 'status', string>>;
+  reason: string;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+function mapEventConfigurationRow(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    slug: String(row.slug),
+    status: String(row.status),
+    date: String(row.date),
+    startTime: String(row.start_time),
+    locationName: String(row.location_name),
+    city: String(row.city),
+    state: String(row.state),
+  };
+}
+
+export async function updateEventConfigurationInPostgres(
+  input: EventConfigurationUpdateInput,
+): Promise<{ statusCode: number; payload: unknown }> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const targetResult = await client.query(
+      `select id, name, slug, status, date, start_time, location_name, city, state
+       from ${table.events} order by id limit 1 for update`,
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { statusCode: 404, payload: { message: 'Evento nao encontrado.' } };
+    }
+
+    const before = mapEventConfigurationRow(targetRow);
+    const working: Record<string, unknown> = { ...before };
+    const diffBefore: Record<string, unknown> = {};
+    const diffAfter: Record<string, unknown> = {};
+    const allowed = ['name', 'date', 'startTime', 'locationName', 'city', 'state', 'status'] as const;
+    for (const field of allowed) {
+      const value = input.changes[field];
+      if (value === undefined) continue;
+      if (value === working[field]) continue;
+      diffBefore[field] = working[field];
+      diffAfter[field] = value;
+      working[field] = value;
+    }
+
+    if (Object.keys(diffAfter).length === 0) {
+      await client.query('rollback');
+      return { statusCode: 200, payload: { event: before, outcome: 'EVENT_CONFIG_UNCHANGED' } };
+    }
+
+    if (!working.name || !working.date || !working.city || !working.state) {
+      await client.query('rollback');
+      return { statusCode: 400, payload: { message: 'Nome, data, cidade e UF sao obrigatorios.' } };
+    }
+    if (
+      !['draft', 'published', 'closed'].includes(String(working.status))
+      || !/^\d{4}-\d{2}-\d{2}$/.test(String(working.date))
+      || !/^[A-Z]{2}$/.test(String(working.state).toUpperCase())
+    ) {
+      await client.query('rollback');
+      return { statusCode: 400, payload: { message: 'Status, data ou UF invalido.' } };
+    }
+    working.state = String(working.state).toUpperCase();
+
+    const updatedResult = await client.query(
+      `update ${table.events}
+         set name = $2, status = $3, date = $4, start_time = $5, location_name = $6, city = $7, state = $8
+       where id = $1
+       returning id, name, slug, status, date, start_time, location_name, city, state`,
+      [before.id, working.name, working.status, working.date, working.startTime, working.locationName, working.city, working.state],
+    );
+    const after = mapEventConfigurationRow(updatedResult.rows[0]);
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'event.updated', 'event', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        before.id,
+        JSON.stringify({ reason: input.reason, before: diffBefore, after: diffAfter }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { statusCode: 200, payload: { event: after, outcome: 'EVENT_CONFIG_UPDATED' } };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export type DistanceConfigurationUpdateInput = {
+  distanceId: string;
+  reason: string;
+  capacity: number;
+  status: string;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+function mapDistanceConfigurationRow(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    eventId: String(row.event_id),
+    name: row.name,
+    distanceKm: Number(row.distance_km),
+    capacity: Number(row.capacity),
+    status: String(row.status),
+  };
+}
+
+// The live run-distances_status_check constraint only allows
+// ('active', 'inactive') even though the app-layer validation below (and the
+// Admin UI) also accept 'sold_out' — a pre-existing gap, not introduced or
+// widened here. This defensively maps the resulting 23514 to the same 400 the
+// app-layer validation already promises for an invalid status, instead of
+// leaking a raw Postgres constraint error.
+function isDistanceStatusCheckViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: string; constraint?: string };
+  if (candidate.code !== '23514') return false;
+  return !candidate.constraint || candidate.constraint === 'run-distances_status_check';
+}
+
+export async function updateDistanceConfigurationInPostgres(
+  input: DistanceConfigurationUpdateInput,
+): Promise<{ statusCode: number; payload: unknown }> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const targetResult = await client.query(
+      `select id, event_id, name, distance_km, capacity, status
+       from ${table.distances} where id = $1 for update`,
+      [input.distanceId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { statusCode: 404, payload: { message: 'Distancia nao encontrada.' } };
+    }
+    const before = mapDistanceConfigurationRow(targetRow);
+
+    const occupiedResult = await client.query(
+      `select count(*)::int as n from ${table.registrations}
+       where distance_id = $1 and status in ('pending_payment', 'paid')`,
+      [input.distanceId],
+    );
+    const occupied = Number(occupiedResult.rows[0]?.n || 0);
+
+    const capacity = Math.floor(Number(input.capacity));
+    if (!Number.isFinite(capacity) || capacity < occupied) {
+      await client.query('rollback');
+      return {
+        statusCode: 409,
+        payload: { message: `A capacidade nao pode ser menor que ${occupied} vagas ocupadas.` },
+      };
+    }
+    if (!['active', 'inactive', 'sold_out'].includes(input.status)) {
+      await client.query('rollback');
+      return { statusCode: 400, payload: { message: 'Status de distancia invalido.' } };
+    }
+
+    if (capacity === before.capacity && input.status === before.status) {
+      await client.query('rollback');
+      return { statusCode: 200, payload: { distance: before, outcome: 'DISTANCE_CONFIG_UNCHANGED' } };
+    }
+
+    let updatedResult;
+    try {
+      updatedResult = await client.query(
+        `update ${table.distances}
+           set capacity = $2, status = $3
+         where id = $1
+         returning id, event_id, name, distance_km, capacity, status`,
+        [input.distanceId, capacity, input.status],
+      );
+    } catch (error) {
+      if (isDistanceStatusCheckViolation(error)) {
+        await client.query('rollback').catch(() => undefined);
+        return { statusCode: 400, payload: { message: 'Status de distancia invalido.' } };
+      }
+      throw error;
+    }
+    const after = mapDistanceConfigurationRow(updatedResult.rows[0]);
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'distance.updated', 'distance', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.distanceId,
+        JSON.stringify({ reason: input.reason, before: { capacity: before.capacity, status: before.status }, after: { capacity, status: input.status } }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { statusCode: 200, payload: { distance: after, outcome: 'DISTANCE_CONFIG_UPDATED' } };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function snapshot() {
   const configurationIssue = getDatabaseConfigurationIssue();
 

@@ -443,6 +443,23 @@ export type AdminBibNumberResponse = {
   registration: AdminRegistration;
 };
 
+// ADMIN-UX-RELIABILITY Wave 3A — Admin event/distance configuration. Same
+// contract shape as bib/check-in/kit above: the server either changes the one
+// row (*_UPDATED) or recognises the request as already-applied (*_UNCHANGED,
+// HTTP 200, no audit noise). Validation/NOT_FOUND/capacity-conflict arrive as
+// HTTP errors; only the two success outcomes are decoded into these shapes.
+export type AdminEventConfigOutcome = 'EVENT_CONFIG_UPDATED' | 'EVENT_CONFIG_UNCHANGED';
+export type AdminEventConfigMutationResponse = {
+  outcome: AdminEventConfigOutcome;
+  event: AdminEventConfig['event'];
+};
+
+export type AdminDistanceConfigOutcome = 'DISTANCE_CONFIG_UPDATED' | 'DISTANCE_CONFIG_UNCHANGED';
+export type AdminDistanceConfigMutationResponse = {
+  outcome: AdminDistanceConfigOutcome;
+  distance: AdminEventConfig['distances'][number];
+};
+
 // ADMIN-UX-RELIABILITY Wave 2B — Admin check-in / undo-check-in. The server is
 // the single authority for the on-site state (row existence in run-check-ins).
 // CHECK_IN_ACCEPTED / ALREADY_CHECKED_IN / CHECK_IN_REVERTED /

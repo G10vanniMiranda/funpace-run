@@ -10,6 +10,8 @@ import type {
   AdminBibNumberResponse,
   AdminCheckInResponse,
   AdminKitResponse,
+  AdminEventConfigMutationResponse,
+  AdminDistanceConfigMutationResponse,
   AdminRecoverConfirmationEmailResponse,
   AdminResendHistoricalConfirmationResponse,
   AdminRegistrationEditable,
@@ -616,8 +618,13 @@ export function getAdminOperation(adminKey: string, filters: Record<string, stri
 }
 
 export function getAdminEventConfig(adminKey: string) { return adminFetch<AdminEventConfig>('/api/admin/event-config', adminKey); }
-export function updateAdminEventConfig(adminKey: string, changes: Record<string, unknown>, reason: string) { return adminFetch<{ event: AdminEventConfig['event'] }>('/api/admin/event-config', adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes, reason }) }); }
-export function updateAdminDistance(adminKey: string, distanceId: string, changes: { capacity: number; status: string; reason: string }) { return adminFetch<{ distance: AdminEventConfig['distances'][number] }>(`/api/admin/distances/${encodeURIComponent(distanceId)}`, adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) }); }
+// ADMIN-UX-RELIABILITY Wave 3A — narrow event/distance config mutation on the
+// established reliability contract: no auto-retry (an ambiguous network commit
+// must be verified read-only, never silently resent), typed *_UPDATED /
+// *_UNCHANGED outcome so the panel can show an informational (not error)
+// message when the requested values already matched the stored row.
+export function updateAdminEventConfig(adminKey: string, changes: Record<string, unknown>, reason: string) { return adminFetch<AdminEventConfigMutationResponse>('/api/admin/event-config', adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes, reason }), retry: false }); }
+export function updateAdminDistance(adminKey: string, distanceId: string, changes: { capacity: number; status: string; reason: string }) { return adminFetch<AdminDistanceConfigMutationResponse>(`/api/admin/distances/${encodeURIComponent(distanceId)}`, adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes), retry: false }); }
 export function updateAdminLot(adminKey: string, lotId: string, changes: { name: string; capacity: number; priceCents: number; status: string; startsAt: string; endsAt: string; reason: string }) { return adminFetch<{ lot: AdminEventConfig['lots'][number] }>(`/api/admin/lots/${encodeURIComponent(lotId)}`, adminKey, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) }); }
 export function runAdminSystemCheck(adminKey: string, target: 'email' | 'gateway') { return adminFetch<AdminSystemCheckResponse>(`/api/admin/system-checks/${target}`, adminKey, { method: 'POST' }); }
 

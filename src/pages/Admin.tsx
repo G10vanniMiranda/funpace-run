@@ -2824,18 +2824,72 @@ function AuditPanel({ auditLogs, adminKey, registrations, onOpenRegistration }: 
   );
 }
 
+// ADMIN-UX-RELIABILITY Wave 3A — pure helpers for the event/distance config
+// save path. Kept outside the component so they stay trivially testable and
+// so submitConfigSave reads as: diff → send → (verify | refresh).
+
+const EVENT_CONFIG_FIELDS = ['name', 'date', 'startTime', 'locationName', 'city', 'state', 'status'] as const;
+
+// Dirty-fields-only diff (mirrors diffProfileChanges): only fields that
+// genuinely differ from the last-loaded snapshot are sent, so an operator
+// editing one field never silently overwrites another field's value with a
+// stale in-browser copy.
+function diffEventConfigChanges(
+  original: AdminEventConfig['event'] | null,
+  edited: AdminEventConfig['event'],
+): Partial<Record<typeof EVENT_CONFIG_FIELDS[number], string>> {
+  const changes: Partial<Record<typeof EVENT_CONFIG_FIELDS[number], string>> = {};
+  for (const field of EVENT_CONFIG_FIELDS) {
+    const value = edited[field];
+    if (!original || value !== original[field]) changes[field] = value;
+  }
+  return changes;
+}
+
+// Classifies an ambiguous (timeout/network) failure against a fresh read-only
+// refetch: every requested field now matching → confirmed applied (no
+// resend); every requested field still matching the pre-edit snapshot → safe
+// to retry; anything else → indeterminate, operator must review.
+function classifyConfigVerification(
+  original: Record<string, unknown> | null,
+  requestedChanges: Record<string, unknown>,
+  canonical: Record<string, unknown>,
+): 'confirmed' | 'not-applied' | 'unknown' {
+  const keys = Object.keys(requestedChanges);
+  if (keys.length === 0) return 'confirmed';
+  if (keys.every((key) => canonical[key] === requestedChanges[key])) return 'confirmed';
+  if (original && keys.every((key) => canonical[key] === original[key])) return 'not-applied';
+  return 'unknown';
+}
+
 function EventManagementPanel({ adminKey }: { adminKey: string }) {
   const [config, setConfig] = useState<AdminEventConfig | null>(null);
+  // ADMIN-UX-RELIABILITY Wave 3A — the pristine, last-authoritative snapshot,
+  // distinct from `config` (which also holds in-progress, not-yet-saved edits).
+  // Event-config diffs against this so only operator-touched fields are sent —
+  // never the whole live-edited object (a stale-overwrite risk for any field a
+  // second operator changed concurrently).
+  const [originalConfig, setOriginalConfig] = useState<AdminEventConfig | null>(null);
   const [message, setMessage] = useState('');
   const [saveDraft, setSaveDraft] = useState<{ kind: 'event' | 'distance' | 'lot'; id?: string; reason: string } | null>(null);
   // ADMIN-UX-HOTFIX-001 — event/lot config saves run on the reusable mutation
   // state machine: idle → confirming → submitting → success | failure. Feedback
   // is rendered in the modal (durable), never the transient panel banner, and a
   // silent no-op / swallowed rejection is impossible.
-  const saveMutation = useAdminMutation<{ message: string }>();
+  const saveMutation = useAdminMutation<{ message: string; unchanged?: boolean }>();
+  // ADMIN-UX-RELIABILITY Wave 3A — event/distance only (lot is out of this
+  // wave's scope and keeps its pre-existing behavior: context stays null).
+  // Populated on submit; a refetch failure after a committed save, or an
+  // ambiguous (timeout/network) failure, is classified here instead of being
+  // silently dropped or encouraging a blind resend.
+  const [configContext, setConfigContext] = useState<{
+    kind: 'event' | 'distance';
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'unknown' | 'unreachable' | null;
+  } | null>(null);
   const [checkLoading, setCheckLoading] = useState<'email' | 'gateway' | ''>('');
   const [checkResult, setCheckResult] = useState<{ target: 'email' | 'gateway'; summary: string; ok: boolean; checks: Array<{ label: string; ok: boolean; detail: string }> } | null>(null);
-  const load = () => getAdminEventConfig(adminKey).then(setConfig).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Não foi possível carregar o evento.'));
+  const load = () => getAdminEventConfig(adminKey).then((data) => { setConfig(data); setOriginalConfig(data); }).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Não foi possível carregar o evento.'));
   useEffect(() => { void load(); }, [adminKey]);
   if (!config) return <section className="mt-4 border border-white/10 bg-zinc-950 p-6 text-zinc-400">{message || 'Carregando configuracao...'}</section>;
   const availabilityLabel = {
@@ -2858,39 +2912,99 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
   // ADMIN-UX-HOTFIX-001 — one confirm → exactly one PATCH. The mutation runtime
   // owns submitting/success/failure; a rejected promise is never swallowed and a
   // "lot not found in the loaded config" case is surfaced, not silently dropped.
+  //
+  // ADMIN-UX-RELIABILITY Wave 3A — event/distance additionally: (a) send only
+  // the operator-touched event fields (diffEventConfigChanges), never the whole
+  // live-edited object; (b) distinguish the *_UNCHANGED no-op from a real write
+  // in the success message; (c) on a timeout/network failure, run a READ-ONLY
+  // verification instead of leaving the operator to guess or blindly resend.
   const submitConfigSave = () => {
     const draft = saveDraft;
     if (!draft) return;
+    if (draft.kind === 'event' || draft.kind === 'distance') {
+      setConfigContext({ kind: draft.kind, refreshFailed: false, verification: null });
+    } else {
+      setConfigContext(null);
+    }
+    let caught: unknown = null;
     void saveMutation.submit(async () => {
-      const reason = draft.reason.trim();
-      if (reason.length < 5) {
-        throw new ApiError('Informe um motivo com pelo menos 5 caracteres.', { code: 'validation', businessCode: 'CONFIG_REASON_INVALID' });
-      }
-      if (draft.kind === 'event') {
-        await updateAdminEventConfig(adminKey, config.event, reason);
-        return { message: 'Alteração salva com sucesso.' };
-      }
-      if (draft.kind === 'distance' && draft.id) {
-        const distance = config.distances.find((item) => item.id === draft.id);
-        if (!distance) {
-          throw new ApiError('Distância não encontrada na configuração carregada. Recarregue e tente novamente.', { code: 'stale', businessCode: 'CONFIG_ENTITY_STALE' });
+      try {
+        const reason = draft.reason.trim();
+        if (reason.length < 5) {
+          throw new ApiError('Informe um motivo com pelo menos 5 caracteres.', { code: 'validation', businessCode: 'CONFIG_REASON_INVALID' });
         }
-        await updateAdminDistance(adminKey, distance.id, { capacity: distance.capacity, status: distance.status, reason });
-        return { message: 'Alteração salva com sucesso.' };
-      }
-      if (draft.kind === 'lot' && draft.id) {
-        const lot = config.lots.find((item) => item.id === draft.id);
-        const built = buildLotUpdatePayload(lot, reason);
-        if (!built.ok || !('payload' in built)) {
-          const errorText = 'error' in built ? built.error : 'Configuração de lote inválida.';
-          throw new ApiError(errorText, { code: 'validation', businessCode: 'LOT_PAYLOAD_INVALID' });
+        if (draft.kind === 'event') {
+          const changes = diffEventConfigChanges(originalConfig?.event ?? null, config.event);
+          const response = await updateAdminEventConfig(adminKey, changes, reason);
+          return {
+            message: response.outcome === 'EVENT_CONFIG_UNCHANGED'
+              ? 'Nenhuma alteração foi necessária — os valores já estavam salvos.'
+              : 'Alteração salva com sucesso.',
+            unchanged: response.outcome === 'EVENT_CONFIG_UNCHANGED',
+          };
         }
-        // full-replace: buildLotUpdatePayload guarantees the complete 7-field body
-        // (name / capacity / priceCents / status / startsAt / endsAt / reason).
-        await updateAdminLot(adminKey, (lot as { id: string }).id, built.payload);
-        return { message: 'Alteração salva com sucesso.' };
+        if (draft.kind === 'distance' && draft.id) {
+          const distance = config.distances.find((item) => item.id === draft.id);
+          if (!distance) {
+            throw new ApiError('Distância não encontrada na configuração carregada. Recarregue e tente novamente.', { code: 'stale', businessCode: 'CONFIG_ENTITY_STALE' });
+          }
+          const response = await updateAdminDistance(adminKey, distance.id, { capacity: distance.capacity, status: distance.status, reason });
+          return {
+            message: response.outcome === 'DISTANCE_CONFIG_UNCHANGED'
+              ? 'Nenhuma alteração foi necessária — os valores já estavam salvos.'
+              : 'Alteração salva com sucesso.',
+            unchanged: response.outcome === 'DISTANCE_CONFIG_UNCHANGED',
+          };
+        }
+        if (draft.kind === 'lot' && draft.id) {
+          const lot = config.lots.find((item) => item.id === draft.id);
+          const built = buildLotUpdatePayload(lot, reason);
+          if (!built.ok || !('payload' in built)) {
+            const errorText = 'error' in built ? built.error : 'Configuração de lote inválida.';
+            throw new ApiError(errorText, { code: 'validation', businessCode: 'LOT_PAYLOAD_INVALID' });
+          }
+          // full-replace: buildLotUpdatePayload guarantees the complete 7-field body
+          // (name / capacity / priceCents / status / startsAt / endsAt / reason).
+          await updateAdminLot(adminKey, (lot as { id: string }).id, built.payload);
+          return { message: 'Alteração salva com sucesso.' };
+        }
+        throw new ApiError('Nada para salvar.', { code: 'validation', businessCode: 'CONFIG_NOTHING_TO_SAVE' });
+      } catch (requestError) {
+        caught = requestError;
+        throw requestError;
       }
-      throw new ApiError('Nada para salvar.', { code: 'validation', businessCode: 'CONFIG_NOTHING_TO_SAVE' });
+    }).then(async (ok) => {
+      if (draft.kind !== 'event' && draft.kind !== 'distance') return;
+      if (ok) {
+        try {
+          await load();
+        } catch {
+          // §19 — the mutation committed; only the read-only refresh failed.
+          // This is NOT a mutation failure and MUST NOT trigger a resubmission.
+          setConfigContext((current) => (current ? { ...current, refreshFailed: true } : current));
+        }
+        return;
+      }
+      // §18 — a timeout / bare network failure leaves the commit state
+      // unprovable. Never encourage a resend: run a READ-ONLY verification.
+      const ambiguous = caught instanceof TypeError
+        || (caught instanceof ApiError && (caught.code === 'timeout' || caught.code === 'network_error'));
+      if (!ambiguous) return;
+      try {
+        const fresh = await getAdminEventConfig(adminKey);
+        const verification = draft.kind === 'event'
+          ? classifyConfigVerification(originalConfig?.event ?? null, diffEventConfigChanges(originalConfig?.event ?? null, config.event), fresh.event)
+          : classifyConfigVerification(
+            (() => { const d = originalConfig?.distances.find((item) => item.id === draft.id); return d ? { capacity: String(d.capacity), status: d.status } : null; })(),
+            (() => { const d = config.distances.find((item) => item.id === draft.id); return d ? { capacity: String(d.capacity), status: d.status } : {}; })(),
+            (() => { const d = fresh.distances.find((item) => item.id === draft.id); return d ? { capacity: String(d.capacity), status: d.status } : {}; })(),
+          );
+        setConfig(fresh);
+        setOriginalConfig(fresh);
+        setConfigContext((current) => (current ? { ...current, verification } : current));
+      } catch {
+        setConfigContext((current) => (current ? { ...current, verification: 'unreachable' } : current));
+      }
     });
   };
 
@@ -2898,11 +3012,13 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
     saveMutation.acknowledge();
     setSaveDraft(null);
     void load();
+    setConfigContext(null);
   };
 
   const closeConfigSave = () => {
     saveMutation.reset();
     setSaveDraft(null);
+    setConfigContext(null);
   };
   const runCheck = async (target: 'email' | 'gateway') => {
     setCheckLoading(target);
@@ -2977,6 +3093,7 @@ function EventManagementPanel({ adminKey }: { adminKey: string }) {
         reason={saveDraft.reason}
         onReasonChange={(value) => setSaveDraft({ ...saveDraft, reason: value })}
         state={saveMutation.state}
+        context={configContext}
         onSubmit={submitConfigSave}
         onAcknowledge={acknowledgeConfigSave}
         onSessionExpired={() => { window.location.href = '/admin'; }}
@@ -4267,6 +4384,7 @@ function ConfigSaveModal({
   reason,
   onReasonChange,
   state,
+  context,
   onSubmit,
   onAcknowledge,
   onSessionExpired,
@@ -4275,7 +4393,14 @@ function ConfigSaveModal({
   kind: 'event' | 'distance' | 'lot';
   reason: string;
   onReasonChange: (value: string) => void;
-  state: AdminMutationState<{ message?: string }>;
+  state: AdminMutationState<{ message?: string; unchanged?: boolean }>;
+  // ADMIN-UX-RELIABILITY Wave 3A — populated for event/distance only; lot keeps
+  // its pre-existing behavior (context stays null, no verification/refresh
+  // banners render).
+  context?: {
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'unknown' | 'unreachable' | null;
+  } | null;
   onSubmit: () => void;
   onAcknowledge: () => void;
   onSessionExpired: () => void;
@@ -4287,6 +4412,17 @@ function ConfigSaveModal({
   const sessionExpired = failed && Boolean(state.error?.sessionExpired);
   const entity = kind === 'lot' ? 'lote' : kind === 'distance' ? 'distância' : 'evento';
   const reasonValid = reason.trim().length >= 5;
+  const unchanged = Boolean(state.result?.unchanged);
+  const verification = context?.verification ?? null;
+
+  // The reason field is hidden once the change is done (success), once the
+  // session must be renewed, and once a verification has determined the
+  // result is applied or indeterminate (retrying would be uninformed).
+  const showReasonField = !succeeded && !sessionExpired
+    && verification !== 'confirmed' && verification !== 'unknown' && verification !== 'unreachable';
+  const concludeOnly = succeeded || verification === 'confirmed';
+  const reviewOnly = verification === 'unknown' || verification === 'unreachable';
+
   return (
     <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
       <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onClose} />
@@ -4301,7 +4437,7 @@ function ConfigSaveModal({
           </button>
         </div>
 
-        {!succeeded && !sessionExpired && (
+        {showReasonField && (
           <label className="mt-5 block text-xs font-bold text-zinc-400">
             Motivo da alteração <span className="font-normal text-zinc-500">(mínimo de 5 caracteres)</span>
             <textarea
@@ -4315,21 +4451,55 @@ function ConfigSaveModal({
         )}
 
         {succeeded && (
-          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
-            {state.successMessage || 'Alteração salva com sucesso.'}
+          <div className="mt-5 space-y-2" aria-live="polite">
+            <div className={`border p-3 text-sm ${unchanged ? 'border-white/15 bg-white/5 text-zinc-200' : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100'}`} role="status">
+              {state.successMessage || 'Alteração salva com sucesso.'}
+            </div>
+            {context?.refreshFailed && (
+              <div className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+                Alteração salva, mas não foi possível atualizar os dados exibidos. Atualize antes de tentar novamente — não reenvie.
+              </div>
+            )}
           </div>
         )}
-        {failed && (
+        {failed && !sessionExpired && verification === null && (
           <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
             {state.error?.message || 'Não foi possível salvar a alteração.'}
           </div>
         )}
+        {sessionExpired && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Sua sessão expirou. A alteração NÃO foi executada. Entre novamente para continuar.'}
+          </div>
+        )}
+        {verification === 'confirmed' && (
+          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            A conexão falhou, mas a verificação confirmou que a alteração foi aplicada. Não reenvie.
+          </div>
+        )}
+        {verification === 'not-applied' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            A conexão falhou e a verificação mostra que a alteração NÃO foi aplicada. Você pode tentar novamente.
+          </div>
+        )}
+        {verification === 'unknown' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Estado indefinido: os dados atuais não correspondem nem ao valor anterior nem ao solicitado. Revise antes de qualquer nova ação.
+          </div>
+        )}
+        {verification === 'unreachable' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Não foi possível confirmar se a alteração foi aplicada. Recarregue e verifique antes de repetir a ação.
+          </div>
+        )}
 
         <div className="mt-5 flex justify-end gap-2">
-          {succeeded ? (
-            <button type="button" onClick={onAcknowledge} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          {concludeOnly ? (
+            <button type="button" onClick={succeeded ? onAcknowledge : onClose} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
           ) : sessionExpired ? (
             <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : reviewOnly ? (
+            <button type="button" onClick={onClose} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300">Fechar</button>
           ) : (
             <>
               <button type="button" onClick={onClose} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
@@ -4340,7 +4510,7 @@ function ConfigSaveModal({
                 className="flex items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40"
               >
                 {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
-                {submitting ? 'Salvando…' : failed ? 'Tentar novamente' : 'Salvar alteração'}
+                {submitting ? 'Salvando…' : (failed || verification === 'not-applied') ? 'Tentar novamente' : 'Salvar alteração'}
               </button>
             </>
           )}

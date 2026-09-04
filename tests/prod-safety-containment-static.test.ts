@@ -137,7 +137,14 @@ test('no generic persist:true transaction() whose callback ONLY pushes to auditL
 // undoRegistrationKitDeliveryInPostgres); that handler's generic transaction()
 // LINE stays counted — it still structurally serves the cancel JSON-mode
 // fallback. So this wave removes exactly one independent writer (kit delivery).
-const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 19, 'server/database.ts': 2 };
+//
+// ADMIN-UX-RELIABILITY Wave 3A: 19 -> 17. handleAdminEventUpdate and
+// handleAdminDistanceUpdate delegate to the narrow
+// updateEventConfigurationInPostgres / updateDistanceConfigurationInPostgres
+// primitives and no longer wrap event/distance config edits in a generic
+// full-blob transaction(). Both were independent writers (no shared handler,
+// unlike undo-check-in/undo-kit above), so this wave removes exactly two.
+const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 17, 'server/database.ts': 2 };
 
 function countFullBlobWriters(src: string): number {
   const lines = src.split('\n');
