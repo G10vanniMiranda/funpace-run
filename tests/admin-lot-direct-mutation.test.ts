@@ -32,7 +32,10 @@ function lotHandler(): string {
 
 function directMutation(): string {
   const start = serverDatabase.indexOf('export async function updateLotConfigurationInPostgres(');
-  const end = serverDatabase.indexOf('export async function snapshot()');
+  // ADMIN-UX-RELIABILITY Wave 3A inserted its own narrow event/distance
+  // primitives directly after this function (before `snapshot()`) — pin the
+  // slice end to that wave-unique marker so it never grows to swallow them.
+  const end = serverDatabase.indexOf('// ADMIN-UX-RELIABILITY Wave 3A');
   assert.ok(start >= 0 && end > start, 'updateLotConfigurationInPostgres located');
   return serverDatabase.slice(start, end);
 }

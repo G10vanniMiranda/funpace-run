@@ -62,6 +62,8 @@ import {
   undoRegistrationCheckInInPostgres,
   undoRegistrationKitDeliveryInPostgres,
   updateLotConfigurationInPostgres,
+  updateEventConfigurationInPostgres,
+  updateDistanceConfigurationInPostgres,
   updateRegistrationFieldsInPostgres,
   upsertAdminBootstrapInPostgres,
   usesPostgresDatabase,
@@ -4201,16 +4203,27 @@ async function handleAdminEventUpdate(req: IncomingMessage, res: ServerResponse)
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<{ reason?: string; changes?: Record<string, unknown> }>(await readBody(req)); const reason = body?.reason?.trim() || '';
   if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const event = database.events[0]; if (!event) return { statusCode: 404, payload: { message: 'Evento nao encontrado.' } };
-    const allowed = ['name', 'date', 'startTime', 'locationName', 'city', 'state', 'status'] as const; const before: Record<string, unknown> = {}; const after: Record<string, unknown> = {};
-    for (const field of allowed) { if (body?.changes?.[field] === undefined) continue; const value = compactText(body.changes[field], field === 'state' ? 2 : 160); if (value === event[field]) continue; before[field] = event[field]; after[field] = value; (event as unknown as Record<string, unknown>)[field] = value; }
-    if (!event.name || !event.date || !event.city || !event.state) return { statusCode: 400, payload: { message: 'Nome, data, cidade e UF sao obrigatorios.' } };
-    if (!['draft', 'published', 'closed'].includes(event.status) || !/^\d{4}-\d{2}-\d{2}$/.test(event.date) || !/^[A-Z]{2}$/.test(event.state.toUpperCase())) return { statusCode: 400, payload: { message: 'Status, data ou UF invalido.' } };
-    event.state = event.state.toUpperCase();
-    const now = new Date().toISOString(); database.auditLogs.push(createAuditLog(req, adminSession, { action: 'event.updated', entityType: 'event', entityId: event.id, payload: { reason, before, after }, createdAt: now }));
-    return { statusCode: 200, payload: { event } };
-  }); json(res, result.statusCode, result.payload);
+  // ADMIN-UX-RELIABILITY Wave 3A: delegate to a narrow single-row transaction
+  // (run-events + run-audit-logs) instead of the generic full-database blob path.
+  const allowed = ['name', 'date', 'startTime', 'locationName', 'city', 'state', 'status'] as const;
+  const changes: Partial<Record<typeof allowed[number], string>> = {};
+  for (const field of allowed) {
+    if (body?.changes?.[field] === undefined) continue;
+    changes[field] = compactText(body.changes[field], field === 'state' ? 2 : 160);
+  }
+  const result = await updateEventConfigurationInPostgres({
+    changes,
+    reason,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
+  });
+  json(res, result.statusCode, result.payload);
 }
 
 async function handleAdminDistanceUpdate(req: IncomingMessage, res: ServerResponse, distanceId: string) {
@@ -4218,15 +4231,23 @@ async function handleAdminDistanceUpdate(req: IncomingMessage, res: ServerRespon
   if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
   const body = parseJsonBody<{ reason?: string; capacity?: number; status?: string }>(await readBody(req)); const reason = body?.reason?.trim() || '';
   if (reason.length < 5) { json(res, 400, { message: 'Informe um motivo com pelo menos 5 caracteres.' }); return; }
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const distance = database.distances.find((item) => item.id === distanceId); if (!distance) return { statusCode: 404, payload: { message: 'Distancia nao encontrada.' } };
-    const occupied = database.registrations.filter((item) => item.distanceId === distanceId && ['pending_payment', 'paid'].includes(item.status)).length;
-    const capacity = Math.floor(Number(body?.capacity)); if (!Number.isFinite(capacity) || capacity < occupied) return { statusCode: 409, payload: { message: `A capacidade nao pode ser menor que ${occupied} vagas ocupadas.` } };
-    if (!['active', 'inactive', 'sold_out'].includes(body?.status || '')) return { statusCode: 400, payload: { message: 'Status de distancia invalido.' } };
-    const before = { capacity: distance.capacity, status: distance.status }; distance.capacity = capacity; distance.status = body!.status as typeof distance.status;
-    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'distance.updated', entityType: 'distance', entityId: distanceId, payload: { reason, before, after: { capacity, status: distance.status } }, createdAt: new Date().toISOString() }));
-    return { statusCode: 200, payload: { distance } };
-  }); json(res, result.statusCode, result.payload);
+  // ADMIN-UX-RELIABILITY Wave 3A: delegate to a narrow single-row transaction
+  // (run-distances + run-audit-logs) instead of the generic full-database blob path.
+  const result = await updateDistanceConfigurationInPostgres({
+    distanceId,
+    reason,
+    capacity: Number(body?.capacity),
+    status: String(body?.status || ''),
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
+  });
+  json(res, result.statusCode, result.payload);
 }
 
 async function handleAdminLotUpdate(req: IncomingMessage, res: ServerResponse, lotId: string) {

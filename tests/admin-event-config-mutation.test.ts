@@ -34,7 +34,7 @@ test('regression: the config save no longer silently returns and no longer sprea
 
 test('the save runs on the reusable mutation state machine (one confirm -> one PATCH)', () => {
   const body = panel();
-  assert.match(body, /const saveMutation = useAdminMutation<\{ message: string \}>\(\);/);
+  assert.match(body, /const saveMutation = useAdminMutation<\{ message: string; unchanged\?: boolean \}>\(\);/);
   assert.match(body, /saveMutation\.submit\(async \(\) => \{/);
   // exactly one PATCH per submit: the lot branch calls updateAdminLot once, with
   // the validated builder output — not a hand-spread object.
