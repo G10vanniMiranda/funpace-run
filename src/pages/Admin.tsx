@@ -60,6 +60,7 @@ import {
   checkInAdminRegistration,
   undoAdminRegistrationCheckIn,
   deliverAdminKit,
+  undoAdminRegistrationKitDelivery,
   getAdminAuditLogs,
   getAdminAuditLogsCsvUrl,
   getAdminCsvUrl,
@@ -96,7 +97,7 @@ import {
   getAdminRegistrationDetails,
   assignAdminBibNumber,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminCheckInResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminCheckInResponse, AdminKitResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -346,6 +347,25 @@ export function AdminPage() {
     mode: 'check-in' | 'undo';
     refreshFailed: boolean;
     verification: 'confirmed' | 'not-applied' | 'blocked-by-kit' | 'unknown' | 'unreachable' | null;
+  } | null>(null);
+  // ADMIN-UX-RELIABILITY Wave 2C — kit delivery / undo-kit on the same reusable
+  // state machine. `kitDraft.mode` selects the operation; `kitContext` records
+  // the intended transition for SUCCESS rendering and the READ-ONLY
+  // ambiguous-commit verification (never an automatic resend). PG-1 (an active
+  // check-in is required to deliver) is enforced server-side; the modal
+  // disables/explains it too.
+  const kitMutation = useAdminMutation<AdminKitResponse>((result) => result.message);
+  const [kitDraft, setKitDraft] = useState<{
+    registration: AdminRegistration;
+    mode: 'deliver' | 'undo';
+    notes: string;
+    reason: string;
+  } | null>(null);
+  const [kitContext, setKitContext] = useState<{
+    before: AdminRegistration;
+    mode: 'deliver' | 'undo';
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'check-in-required' | 'unknown' | 'unreachable' | null;
   } | null>(null);
   // ADMIN-UX-RELIABILITY Stage 2 / Wave 1 — the athlete profile edit on the same
   // reusable state machine (idle → confirming → submitting → success | failure).
@@ -674,20 +694,93 @@ export function AdminPage() {
     setCheckInContext(null);
   };
 
-  const handleKitDelivery = async (registration: AdminRegistration) => {
-    setActionLoading('kit');
-    setError('');
+  // ADMIN-UX-RELIABILITY Wave 2C — kit delivery and undo-kit on `useAdminMutation`.
+  const openKitDeliver = (registration: AdminRegistration) => {
+    kitMutation.reset();
+    setKitContext(null);
+    setKitDraft({ registration, mode: 'deliver', notes: '', reason: '' });
+    kitMutation.open();
+  };
+  const openUndoKit = (registration: AdminRegistration) => {
+    kitMutation.reset();
+    setKitContext(null);
+    setKitDraft({ registration, mode: 'undo', notes: '', reason: '' });
+    kitMutation.open();
+  };
 
-    try {
-      const response = await deliverAdminKit(adminKey, registration.id);
-      updateRegistration(response.registration);
-      setRegistrationDetails(await getAdminRegistrationDetails(adminKey, registration.id));
-      await loadAdminData();
-    } catch (requestError) {
-      setError(requestError instanceof ApiError ? requestError.message : 'Não foi possível registrar a entrega do kit.');
-    } finally {
-      setActionLoading('');
+  const canSubmitKit = (draft: { mode: 'deliver' | 'undo'; reason: string; registration: AdminRegistration }) =>
+    draft.mode === 'deliver'
+      ? draft.registration.checkInStatus === 'checked_in'
+      : draft.reason.trim().length >= 5;
+
+  const submitKit = async () => {
+    if (!kitDraft || !canSubmitKit(kitDraft)) return;
+    const before = kitDraft.registration;
+    const mode = kitDraft.mode;
+    const notes = kitDraft.notes.trim();
+    const reason = kitDraft.reason.trim();
+    setActionMessage('');
+    setKitContext({ before, mode, refreshFailed: false, verification: null });
+
+    let response: AdminKitResponse | null = null;
+    let caught: unknown = null;
+    const ok = await kitMutation.submit(async () => {
+      try {
+        response = mode === 'deliver'
+          ? await deliverAdminKit(adminKey, before.id, notes)
+          : await undoAdminRegistrationKitDelivery(adminKey, before.id, reason);
+        return response;
+      } catch (requestError) {
+        caught = requestError;
+        throw requestError;
+      }
+    });
+
+    if (ok && response) {
+      try {
+        updateRegistration(response.registration);
+        setRegistrationDetails(await getAdminRegistrationDetails(adminKey, before.id));
+        await loadAdminData();
+      } catch {
+        // §29 — the mutation committed; only the read-only refresh failed. NOT a
+        // mutation failure, MUST NOT trigger a resubmission.
+        setKitContext((current) => (current ? { ...current, refreshFailed: true } : current));
+      }
+      return;
     }
+
+    // §27 / §28 — a timeout / bare network failure leaves the commit state
+    // unprovable. Never encourage a resend: run a READ-ONLY verification.
+    const ambiguous = caught instanceof TypeError
+      || (caught instanceof ApiError && (caught.code === 'timeout' || caught.code === 'network_error'));
+    if (!ambiguous) return;
+    try {
+      const details = await getAdminRegistrationDetails(adminKey, before.id);
+      const delivered = details.registration.kitStatus === 'delivered';
+      const checkedIn = details.registration.checkInStatus === 'checked_in';
+      let verification: 'confirmed' | 'not-applied' | 'check-in-required' | 'unknown';
+      if (mode === 'deliver') {
+        verification = delivered ? 'confirmed' : (checkedIn ? 'not-applied' : 'check-in-required');
+      } else {
+        verification = !delivered ? 'confirmed' : 'not-applied';
+      }
+      updateRegistration(details.registration);
+      setRegistrationDetails(details);
+      setKitContext((current) => (current ? { ...current, verification } : current));
+    } catch {
+      setKitContext((current) => (current ? { ...current, verification: 'unreachable' } : current));
+    }
+  };
+
+  const acknowledgeKit = () => {
+    kitMutation.acknowledge();
+    setKitDraft(null);
+    setKitContext(null);
+  };
+  const resetKit = () => {
+    kitMutation.reset();
+    setKitDraft(null);
+    setKitContext(null);
   };
 
   const handleMaintenance = async (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => {
@@ -1014,7 +1107,8 @@ export function AdminPage() {
         actionLoading={actionLoading}
         onCheckIn={openCheckIn}
         onUndoCheckIn={openUndoCheckIn}
-        onKitDelivery={handleKitDelivery}
+        onKitDelivery={openKitDeliver}
+        onUndoKit={openUndoKit}
         onMaintenance={handleMaintenance}
         onRecoverConfirmationEmail={openRecoverEmail}
         onResendHistoricalConfirmation={openHistoricalResend}
@@ -1112,6 +1206,20 @@ export function AdminPage() {
           onSubmit={() => void submitCheckIn()}
           onAcknowledge={acknowledgeCheckIn}
           onReset={resetCheckIn}
+          onSessionExpired={handleSessionExpired}
+        />
+      )}
+
+      {kitDraft && (
+        <KitModal
+          draft={kitDraft}
+          state={kitMutation.state}
+          context={kitContext}
+          canSubmit={canSubmitKit(kitDraft)}
+          onDraftChange={setKitDraft}
+          onSubmit={() => void submitKit()}
+          onAcknowledge={acknowledgeKit}
+          onReset={resetKit}
           onSessionExpired={handleSessionExpired}
         />
       )}
@@ -3950,6 +4058,206 @@ function CheckInModal({
   );
 }
 
+// ADMIN-UX-RELIABILITY Wave 2C — reliable kit delivery / undo-kit.
+//   * `mode` selects the operation; the confirming step always shows the
+//     canonical current kit state;
+//   * the reusable state machine: submitting visible, submit disabled +
+//     double-submit-guarded, KIT_DELIVERED / KIT_DELIVERY_REVERTED explicit,
+//     KIT_ALREADY_DELIVERED / KIT_ALREADY_NOT_DELIVERED informational (not
+//     errors), the authoritative refetch has already run by the time SUCCESS
+//     shows;
+//   * PG-1: an active check-in is required to deliver — the modal explains it up
+//     front AND surfaces the server's CHECK_IN_REQUIRED_FOR_KIT_DELIVERY 409;
+//   * a timeout / bare network failure runs a READ-ONLY verification (parent)
+//     and this modal renders its verdict — applied / not applied / check-in
+//     required / unknown — without ever offering an automatic resend;
+//   * a refetch failure AFTER a committed transition is its own message and also
+//     never re-issues the mutation.
+function KitModal({
+  draft,
+  state,
+  context,
+  canSubmit,
+  onDraftChange,
+  onSubmit,
+  onAcknowledge,
+  onReset,
+  onSessionExpired,
+}: {
+  draft: { registration: AdminRegistration; mode: 'deliver' | 'undo'; notes: string; reason: string };
+  state: AdminMutationState<AdminKitResponse>;
+  context: {
+    before: AdminRegistration;
+    mode: 'deliver' | 'undo';
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'check-in-required' | 'unknown' | 'unreachable' | null;
+  } | null;
+  canSubmit: boolean;
+  onDraftChange: (draft: { registration: AdminRegistration; mode: 'deliver' | 'undo'; notes: string; reason: string }) => void;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onReset: () => void;
+  onSessionExpired: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const businessCode = state.error?.businessCode ?? '';
+  const isCheckInRequired = failed && businessCode === 'CHECK_IN_REQUIRED_FOR_KIT_DELIVERY';
+  const notEligible = failed && businessCode === 'NOT_ELIGIBLE';
+  const verification = context?.verification ?? null;
+  const outcome = state.result?.outcome ?? null;
+
+  const reg = draft.registration;
+  const isUndo = draft.mode === 'undo';
+  const checkedIn = reg.checkInStatus === 'checked_in';
+  const kitLabel = reg.kitStatus === 'delivered'
+    ? `Entregue${reg.kitDeliveredBy ? ` por ${reg.kitDeliveredBy}` : ''}${reg.kitDeliveredAt ? ` em ${dateTimeFormatter.format(new Date(reg.kitDeliveredAt))}` : ''}`
+    : 'Não entregue';
+  const reasonValid = draft.reason.trim().length >= 5;
+
+  // The PG-1 block: known before submit (deliver mode, participant not checked
+  // in) or surfaced by the server / the ambiguous-commit verification.
+  const checkInRequired = (!isUndo && !checkedIn) || isCheckInRequired || verification === 'check-in-required';
+  const showForm = !succeeded && !sessionExpired && !checkInRequired
+    && verification !== 'confirmed' && verification !== 'unknown' && verification !== 'unreachable';
+  const concludeOnly = succeeded || verification === 'confirmed';
+  const reviewOnly = checkInRequired || verification === 'unknown' || verification === 'unreachable';
+
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onReset} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">{isUndo ? 'Desfazer entrega do kit' : 'Registrar entrega do kit'}</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              {isUndo ? 'Remove a' : 'Registra a'} entrega do kit de <span className="text-white">{reg.fullName}</span>.
+              Kit atual: <span className="text-white">{kitLabel}</span>.
+            </p>
+          </div>
+          <button type="button" onClick={onReset} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {checkInRequired && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            O kit só pode ser entregue após o check-in.
+          </div>
+        )}
+
+        {showForm && (
+          <div className="mt-5 space-y-3">
+            {isUndo ? (
+              <label className="block text-xs font-bold text-zinc-400">
+                Motivo <span className="font-normal text-zinc-500">(obrigatório, mínimo de 5 caracteres)</span>
+                <textarea
+                  value={draft.reason}
+                  aria-required="true"
+                  aria-invalid={draft.reason.length > 0 && !reasonValid}
+                  disabled={submitting}
+                  onChange={(event) => onDraftChange({ ...draft, reason: event.target.value })}
+                  className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white disabled:opacity-60"
+                />
+              </label>
+            ) : (
+              <label className="block text-xs font-bold text-zinc-400">
+                Observações <span className="font-normal text-zinc-500">(opcional)</span>
+                <input
+                  value={draft.notes}
+                  disabled={submitting}
+                  onChange={(event) => onDraftChange({ ...draft, notes: event.target.value })}
+                  className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white disabled:opacity-60"
+                />
+              </label>
+            )}
+          </div>
+        )}
+
+        {succeeded && (outcome === 'KIT_DELIVERED' || outcome === 'KIT_DELIVERY_REVERTED') && (
+          <div className="mt-5 space-y-2" aria-live="polite">
+            <div className="border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+              {state.successMessage || (outcome === 'KIT_DELIVERY_REVERTED' ? 'Entrega de kit desfeita.' : 'Entrega de kit registrada.')}
+            </div>
+            {context?.refreshFailed && (
+              <div className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+                Operação salva, mas não foi possível atualizar os dados exibidos. Atualize antes de tentar novamente — não reenvie.
+              </div>
+            )}
+          </div>
+        )}
+        {succeeded && (outcome === 'KIT_ALREADY_DELIVERED' || outcome === 'KIT_ALREADY_NOT_DELIVERED') && (
+          <div className="mt-5 border border-white/15 bg-white/5 p-3 text-sm text-zinc-200" role="status" aria-live="polite">
+            {state.successMessage || (outcome === 'KIT_ALREADY_DELIVERED' ? 'Kit já estava entregue.' : 'Não há entrega de kit para desfazer.')}
+          </div>
+        )}
+
+        {failed && !sessionExpired && !isCheckInRequired && verification === null && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {notEligible
+              ? (state.error?.message || 'Entrega de kit permitida apenas para inscrições pagas.')
+              : (state.error?.message || 'Não foi possível concluir a ação de entrega do kit.')}
+          </div>
+        )}
+        {sessionExpired && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Sua sessão expirou. A ação NÃO foi executada. Entre novamente para continuar.'}
+          </div>
+        )}
+        {verification === 'confirmed' && (
+          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            A conexão falhou, mas a verificação confirmou que a entrega do kit foi {isUndo ? 'desfeita' : 'registrada'}. Não reenvie.
+          </div>
+        )}
+        {verification === 'not-applied' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            A conexão falhou e a verificação mostra que a ação NÃO foi aplicada. Você pode tentar novamente.
+          </div>
+        )}
+        {verification === 'unknown' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Estado indefinido após a falha de conexão. Revise a inscrição antes de qualquer nova ação.
+          </div>
+        )}
+        {verification === 'unreachable' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Não foi possível confirmar se a ação foi aplicada. Recarregue e verifique a inscrição antes de repetir.
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {concludeOnly ? (
+            <button type="button" onClick={succeeded ? onAcknowledge : onReset} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : reviewOnly ? (
+            <button type="button" onClick={onReset} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300">Fechar</button>
+          ) : (
+            <>
+              <button type="button" onClick={onReset} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting || !canSubmit}
+                className="flex items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting
+                  ? 'Salvando...'
+                  : (failed || verification === 'not-applied')
+                    ? 'Tentar novamente'
+                    : isUndo ? 'Desfazer entrega do kit' : 'Registrar entrega do kit'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ADMIN-UX-HOTFIX-001 — event / distance / lot config save modal on the reusable
 // mutation state machine. One confirm → one PATCH. The submitting / success /
 // failure surface is rendered HERE (durable); the modal never disappears leaving
@@ -4107,6 +4415,7 @@ function AthleteDrawer({
   onCheckIn,
   onUndoCheckIn,
   onKitDelivery,
+  onUndoKit,
   onMaintenance,
   onRecoverConfirmationEmail,
   onResendHistoricalConfirmation,
@@ -4126,6 +4435,7 @@ function AthleteDrawer({
   onCheckIn: (registration: AdminRegistration) => void;
   onUndoCheckIn: (registration: AdminRegistration) => void;
   onKitDelivery: (registration: AdminRegistration) => void;
+  onUndoKit: (registration: AdminRegistration) => void;
   onMaintenance: (registration: AdminRegistration, action: 'cancel' | 'send-email' | 'undo-check-in' | 'undo-kit') => void;
   onRecoverConfirmationEmail: (registration: AdminRegistration) => void;
   onResendHistoricalConfirmation: (registration: AdminRegistration) => void;
@@ -4242,7 +4552,8 @@ function AthleteDrawer({
           </button>
           <button
             type="button"
-            disabled={!canHandleOperation || !canOperate || registration.kitStatus === 'delivered' || actionLoading !== ''}
+            disabled={!canHandleOperation || !canOperate || registration.kitStatus === 'delivered' || registration.checkInStatus !== 'checked_in' || actionLoading !== ''}
+            title={registration.checkInStatus !== 'checked_in' && registration.kitStatus !== 'delivered' ? 'O kit só pode ser entregue após o check-in.' : undefined}
             onClick={() => onKitDelivery(registration)}
             className="flex min-h-12 items-center justify-center gap-2 border border-white/10 px-4 text-xs font-black uppercase tracking-widest text-zinc-100 transition-colors hover:border-brand hover:text-brand disabled:cursor-not-allowed disabled:text-zinc-500"
           >
@@ -4281,7 +4592,7 @@ function AthleteDrawer({
               Desfazer check-in
             </button>
           )}
-          {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'undo-kit')} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
+          {canHandleOperation && registration.kitStatus === 'delivered' && <button type="button" disabled={actionLoading !== ''} onClick={() => onUndoKit(registration)} className="border border-white/10 px-3 py-2 text-xs font-black uppercase">Desfazer entrega</button>}
           {canCancelRegistration && !['cancelled', 'refunded'].includes(registration.status) && <button type="button" disabled={actionLoading !== ''} onClick={() => onMaintenance(registration, 'cancel')} className="border border-red-400/30 px-3 py-2 text-xs font-black uppercase text-red-300">Cancelar inscrição</button>}
         </div>
 

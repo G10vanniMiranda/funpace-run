@@ -469,6 +469,33 @@ export type AdminCheckInResponse = {
   registration: AdminRegistration;
 };
 
+// ADMIN-UX-RELIABILITY Wave 2C — Admin kit delivery / undo-kit. The server is
+// the single authority for the on-site state (row existence in
+// run-kit-deliveries). KIT_DELIVERED / KIT_ALREADY_DELIVERED /
+// KIT_DELIVERY_REVERTED / KIT_ALREADY_NOT_DELIVERED are HTTP 200 (the ALREADY_*
+// pair is an idempotent no-op: no write, no audit). PG-1
+// (CHECK_IN_REQUIRED_FOR_KIT_DELIVERY) / NOT_ELIGIBLE arrive as HTTP 409 and
+// NOT_FOUND as 404, each carrying `code`; only the four 200 outcomes are decoded
+// into this shape.
+export type AdminKitOutcome =
+  | 'KIT_DELIVERED'
+  | 'KIT_ALREADY_DELIVERED'
+  | 'KIT_DELIVERY_REVERTED'
+  | 'KIT_ALREADY_NOT_DELIVERED'
+  | 'CHECK_IN_REQUIRED_FOR_KIT_DELIVERY'
+  | 'NOT_ELIGIBLE'
+  | 'NOT_FOUND';
+
+export type AdminKitResponse = {
+  ok: boolean;
+  outcome: Extract<
+    AdminKitOutcome,
+    'KIT_DELIVERED' | 'KIT_ALREADY_DELIVERED' | 'KIT_DELIVERY_REVERTED' | 'KIT_ALREADY_NOT_DELIVERED'
+  >;
+  message: string;
+  registration: AdminRegistration;
+};
+
 // PARTICIPANT-OPS-001 CASE A / Stage A2 — controlled confirmation-email recovery.
 // The server decides eligibility; the client only relays the machine outcome.
 export type ConfirmationRecoveryOutcome =

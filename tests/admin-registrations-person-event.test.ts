@@ -159,7 +159,12 @@ test('§62b api client carries the event through resource-by-id + mutation calls
     /getAdminRegistrationDetails\(adminKey: string, registrationId: string\)[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
     /maintainAdminRegistration[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
     /assignAdminBibNumber[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
-    /postAdminRegistrationAction[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
+    // ADMIN-UX-RELIABILITY Wave 2B/2C — check-in and kit delivery no longer go
+    // through postAdminRegistrationAction; each dedicated client carries the event.
+    /checkInAdminRegistration[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
+    /undoAdminRegistrationCheckIn[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
+    /deliverAdminKit[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
+    /undoAdminRegistrationKitDelivery[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
     /syncAdminRegistrationToGoogleSheets[\s\S]*?toQueryString\(\{ event: currentEventParam\(\) \}\)/,
   ]) {
     assert.match(api, needle);

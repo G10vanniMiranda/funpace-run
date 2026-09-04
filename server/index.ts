@@ -57,8 +57,10 @@ import {
   loadConfirmationRecoverySnapshotInPostgres,
   loadHistoricalConfirmationResendSnapshotInPostgres,
   checkInRegistrationInPostgres,
+  deliverRegistrationKitInPostgres,
   setRegistrationBibInPostgres,
   undoRegistrationCheckInInPostgres,
+  undoRegistrationKitDeliveryInPostgres,
   updateLotConfigurationInPostgres,
   updateRegistrationFieldsInPostgres,
   upsertAdminBootstrapInPostgres,
@@ -4375,58 +4377,61 @@ async function handleAdminKitDelivery(req: IncomingMessage, res: ServerResponse,
   if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
 
   const rawBody = await readBody(req);
-  const payload = parseJsonBody<AdminActionRequest>(rawBody) || {};
-  const actor = adminSession.actor;
-  const now = new Date().toISOString();
+  const body = parseJsonBody<AdminActionRequest>(rawBody) || {};
+  const notes = body.notes?.trim() || null;
 
-  const result = await transaction((database) => {
-    const registration = database.registrations.find((item) => item.id === registrationId);
-
-    if (!registration) {
-      return { statusCode: 404, payload: { message: 'Inscricao nao encontrada.' } };
-    }
-
-    if (registration.status !== 'paid') {
-      return { statusCode: 409, payload: { message: 'Entrega de kit permitida apenas para inscricoes pagas.' } };
-    }
-
-    const existing = database.kitDeliveries.find((item) => item.registrationId === registration.id);
-
-    if (existing) {
-      return {
-        statusCode: 409,
-        payload: {
-          message: getKitConflictMessage({ actor: existing.deliveredBy || null, at: existing.deliveredAt || null }),
-          registration: toAdminRow(database, registration),
-        },
-      };
-    } else {
-      database.kitDeliveries.push({
-        id: randomUUID(),
-        registrationId: registration.id,
-        status: 'delivered',
-        deliveredAt: now,
-        deliveredBy: actor,
-        notes: payload.notes?.trim() || null,
-      });
-    }
-
-    database.auditLogs.push(createAuditLog(req, adminSession, {
-      actor,
-      action: 'registration.kit_delivered',
-      entityType: 'registration',
-      entityId: registration.id,
-      payload: { notes: payload.notes?.trim() || null },
-      createdAt: now,
-    }));
-
-    return { statusCode: 200, payload: { registration: toAdminRow(database, registration) } };
+  // ADMIN-UX-RELIABILITY Wave 2C — kit delivery is a narrow, single-row
+  // PostgreSQL primitive (deliverRegistrationKitInPostgres): `select ... for
+  // update of r` on the one registration row (cross-wave lock order), the PG-1
+  // guard (an active check-in is required — KIT_DELIVERED => CHECKED_IN), one
+  // INSERT into run-kit-deliveries iff not already delivered, one appended
+  // 'registration.kit_delivered' audit row. It never routes through the generic
+  // full-blob transaction() / savePostgresDatabase / 'funpace-run-write' path.
+  // requireAdminDatabase() above already 503s outside Postgres mode, so there is
+  // no JSON-mode fallback here.
+  const outcome = await deliverRegistrationKitInPostgres({
+    registrationId,
+    notes,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
   });
 
-  const googleSheetSync = result.statusCode === 200
-    ? await queueCheckInGoogleSheetSync(registrationId)
-    : null;
-  json(res, result.statusCode, withRegistrationView(result.payload, adminSession.role as RegistrationViewRole));
+  if (outcome.status === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  if (outcome.status === 'not_eligible') { json(res, 409, { message: outcome.message, code: 'NOT_ELIGIBLE' }); return; }
+  if (outcome.status === 'check_in_required') {
+    json(res, 409, { message: 'O kit só pode ser entregue após o check-in.', code: 'CHECK_IN_REQUIRED_FOR_KIT_DELIVERY' });
+    return;
+  }
+
+  const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId);
+  if (!refreshedRegistration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  const registrationRow = toAdminRow(refreshed, refreshedRegistration);
+
+  if (outcome.status === 'already_delivered') {
+    // §13 — idempotent: no INSERT, no audit, HTTP 200.
+    json(res, 200, withRegistrationView({
+      ok: true,
+      outcome: 'KIT_ALREADY_DELIVERED' as const,
+      message: getKitConflictMessage({ actor: outcome.deliveredBy || null, at: outcome.deliveredAt || null }),
+      registration: registrationRow,
+    }, adminSession.role as RegistrationViewRole));
+    return;
+  }
+
+  const googleSheetSync = await queueCheckInGoogleSheetSync(registrationId);
+  json(res, 200, withRegistrationView({
+    ok: true,
+    outcome: 'KIT_DELIVERED' as const,
+    message: 'Entrega de kit registrada.',
+    registration: registrationRow,
+  }, adminSession.role as RegistrationViewRole));
   if (googleSheetSync) await processGoogleSheetSync(googleSheetSync.id);
 }
 
@@ -4543,6 +4548,53 @@ async function handleAdminRegistrationMaintenance(req: IncomingMessage, res: Ser
       registration: registrationRow,
     }, adminSession.role as RegistrationViewRole));
     if (undoGoogleSheetSync) await processGoogleSheetSync(undoGoogleSheetSync.id);
+    return;
+  }
+  if (action === 'undo-kit' && usesPostgresDatabase()) {
+    // ADMIN-UX-RELIABILITY Wave 2C — undo-kit is a narrow PostgreSQL primitive
+    // (undoRegistrationKitDeliveryInPostgres): `select ... for update of r` then
+    // read run-kit-deliveries (cross-wave lock order; no run-check-ins guard —
+    // removing a kit while checked in is a valid transition), a real physical
+    // DELETE from run-kit-deliveries (the legacy full-blob path was upsert-only
+    // and never deleted the side row), and one narrow 'registration.undo-kit'
+    // audit row iff the row is actually removed. It does NOT route through the
+    // generic transaction() / savePostgresDatabase / 'funpace-run-write' path.
+    // The cancel JSON-mode fallback keeps the generic block below.
+    const undoKitOutcome = await undoRegistrationKitDeliveryInPostgres({
+      registrationId,
+      reason,
+      audit: {
+        actor: adminSession.actor,
+        actorRole: adminSession.role,
+        sessionId: adminSession.id,
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req),
+        createdAt: new Date().toISOString(),
+      },
+    });
+    if (undoKitOutcome.status === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+    const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+    const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId);
+    if (!refreshedRegistration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+    const registrationRow = toAdminRow(refreshed, refreshedRegistration);
+    if (undoKitOutcome.status === 'already_not_delivered') {
+      // §14 — idempotent: no DELETE, no audit, HTTP 200.
+      json(res, 200, withRegistrationView({
+        ok: true,
+        outcome: 'KIT_ALREADY_NOT_DELIVERED' as const,
+        message: 'Não há entrega de kit para desfazer.',
+        registration: registrationRow,
+      }, adminSession.role as RegistrationViewRole));
+      return;
+    }
+    const undoKitGoogleSheetSync = await queueCheckInGoogleSheetSync(registrationId);
+    json(res, 200, withRegistrationView({
+      ok: true,
+      outcome: 'KIT_DELIVERY_REVERTED' as const,
+      message: 'Entrega de kit desfeita.',
+      registration: registrationRow,
+    }, adminSession.role as RegistrationViewRole));
+    if (undoKitGoogleSheetSync) await processGoogleSheetSync(undoKitGoogleSheetSync.id);
     return;
   }
   const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {

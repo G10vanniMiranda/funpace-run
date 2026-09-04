@@ -45,7 +45,8 @@ function checkInPrimitive(): string {
 }
 function undoPrimitive(): string {
   const a = serverDatabase.indexOf('export async function undoRegistrationCheckInInPostgres(');
-  const b = serverDatabase.indexOf('export type RegistrationFieldsUpdateInput', a);
+  // stop before the ADMIN-UX-RELIABILITY Wave 2C kit primitives that follow
+  const b = serverDatabase.indexOf('ADMIN-UX-RELIABILITY Wave 2C', a);
   assert.ok(a >= 0 && b > a, 'undoRegistrationCheckInInPostgres located');
   return serverDatabase.slice(a, b);
 }

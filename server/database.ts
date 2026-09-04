@@ -5390,6 +5390,299 @@ export async function undoRegistrationCheckInInPostgres(
 }
 
 /**
+ * ADMIN-UX-RELIABILITY Wave 2C — narrow PostgreSQL mutations for the on-site kit
+ * flow (POST /api/admin/registrations/:id/kit and the undo-kit branch of
+ * POST /api/admin/registrations/:id/undo-kit).
+ *
+ * They replace the generic full-blob transaction() path
+ * (readPostgresDatabase(scope='all') -> in-memory mutate ->
+ * savePostgresDatabase(17-table upsert) -> commit, under
+ * pg_advisory_xact_lock('funpace-run-write')) for a logical one-row
+ * INSERT/DELETE + one audit row. Same defect class as EVENT-OPS-001, the
+ * ADMIN-UX-HOTFIX-00x series, Wave 2A (bib) and Wave 2B (check-in).
+ *
+ * INTENTIONAL BUGFIX: savePostgresDatabase is upsert-only and there is no DELETE
+ * for run-kit-deliveries anywhere in the legacy path, so the legacy undo-kit
+ * appended a 'registration.undo-kit' audit row while LEAVING the
+ * run-kit-deliveries side row in place (dormant in Production: 0 kits ever).
+ * undoRegistrationKitDeliveryInPostgres performs the real physical DELETE.
+ *
+ * PG-1 (Human Product Gate, APPROVED): KIT_DELIVER requires an active check-in.
+ * PG-2 (already live in undoRegistrationCheckInInPostgres): an active kit
+ * delivery blocks undo-check-in. Together the two enforce the invariant
+ *   KIT_DELIVERED => CHECKED_IN
+ * in both directions, server-side. The state NOT_CHECKED_IN + KIT_DELIVERED is
+ * unreachable by any single operation and, under the cross-wave lock order, by
+ * any concurrent pair (deliver-first -> undo blocked by PG-2; undo-first ->
+ * deliver blocked by PG-1). This also eliminates the Wave 2B residual
+ * resurrection race: kit delivery is no longer generic, so a concurrent legacy
+ * savePostgresDatabase can no longer re-create a just-deleted check-in row.
+ *
+ * CROSS-WAVE LOCK ORDER (from Wave 2B, unchanged):
+ *   1. run-registrations  -- SELECT ... FOR UPDATE OF r  (the serialisation point)
+ *   2. run-check-ins       -- deliver reads it for the PG-1 guard (read-only);
+ *                             undo-kit does NOT touch it (removing a kit while the
+ *                             participant stays checked in is a valid transition).
+ *   3. run-kit-deliveries  -- the operation's own child table.
+ * Never lock a child table before run-registrations; never hold both child locks
+ * in opposing orders. Total order run-registrations -> run-check-ins ->
+ * run-kit-deliveries is deadlock-free with the Wave 2B primitives.
+ *
+ * Concurrency: `select ... for update of r` on the registration row serialises
+ * two concurrent deliver / undo / mixed requests for the SAME registration; the
+ * unique index run-kit-deliveries_registration_id_idx is the belt-and-braces
+ * backstop for a lost same-registration race (23505 -> KIT_ALREADY_DELIVERED).
+ * Different registrations run fully in parallel (no global lock). local
+ * lock_timeout / statement_timeout bound a contended call under the 15s Admin
+ * timeout.
+ *
+ * Neither primitive calls transaction() / savePostgresDatabase() /
+ * ensureConfiguredLots() / ensurePostgresReady() / the funpace-run-write
+ * advisory lock.
+ */
+
+/** SQLSTATE-23505 classifier for the one-kit-per-registration unique index (cf.
+ *  isCheckInRegistrationUniqueViolation / isBibNumberUniqueViolation). The kit
+ *  INSERT only ever writes run-kit-deliveries, so a 23505 there can only be this
+ *  index. */
+function isKitDeliveryRegistrationUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: string; constraint?: string };
+  if (candidate.code !== '23505') return false;
+  return !candidate.constraint || candidate.constraint === 'run-kit-deliveries_registration_id_idx';
+}
+
+export type RegistrationKitDeliveryInput = {
+  registrationId: string;
+  notes: string | null;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type RegistrationKitDeliveryResult =
+  | { status: 'not_found' }
+  | { status: 'not_eligible'; message: string }
+  | { status: 'check_in_required' }
+  | { status: 'already_delivered'; deliveredAt: string; deliveredBy: string }
+  | { status: 'ok'; kitId: string; deliveredAt: string };
+
+export async function deliverRegistrationKitInPostgres(
+  input: RegistrationKitDeliveryInput,
+): Promise<RegistrationKitDeliveryResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    // 1. cross-wave lock order: the registration row is the serialisation point.
+    const targetResult = await client.query(
+      `select r.id, r.status from ${table.registrations} r where r.id = $1 for update of r`,
+      [input.registrationId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { status: 'not_found' };
+    }
+    // Eligibility — faithful port of handleAdminKitDelivery: paid registrations only.
+    if (targetRow.status !== 'paid') {
+      await client.query('rollback');
+      return { status: 'not_eligible', message: 'Entrega de kit permitida apenas para inscricoes pagas.' };
+    }
+
+    // 2. PG-1 guard — an active check-in is required. Read-only under the held
+    //    registration row lock (cross-wave lock order step 2).
+    const checkIn = await client.query(
+      `select id from ${table.checkIns} where registration_id = $1`,
+      [input.registrationId],
+    );
+    if (!checkIn.rows[0]) {
+      await client.query('rollback');
+      return { status: 'check_in_required' };
+    }
+
+    // 3. canonical kit-delivery state.
+    const existing = await client.query(
+      `select id, delivered_at, delivered_by from ${table.kitDeliveries} where registration_id = $1`,
+      [input.registrationId],
+    );
+    if (existing.rows[0]) {
+      // §13 idempotent no-op: 200 KIT_ALREADY_DELIVERED, no INSERT, no audit.
+      await client.query('rollback');
+      return {
+        status: 'already_delivered',
+        deliveredAt: String(existing.rows[0].delivered_at),
+        deliveredBy: String(existing.rows[0].delivered_by),
+      };
+    }
+
+    const kitId = randomUUID();
+    try {
+      await client.query(
+        `insert into ${table.kitDeliveries} (id, registration_id, status, delivered_at, delivered_by, notes)
+         values ($1, $2, 'delivered', $3, $4, $5)`,
+        [kitId, input.registrationId, input.audit.createdAt, input.audit.actor, input.notes],
+      );
+    } catch (error) {
+      // Belt & braces: the `for update of r` lock already serialises same-reg
+      // deliveries, so this only fires on an unexpected concurrent inserter.
+      if (isKitDeliveryRegistrationUniqueViolation(error)) {
+        await client.query('rollback').catch(() => undefined);
+        const race = await requirePool().query(
+          `select delivered_at, delivered_by from ${table.kitDeliveries} where registration_id = $1`,
+          [input.registrationId],
+        );
+        const row = race.rows[0];
+        return {
+          status: 'already_delivered',
+          deliveredAt: row ? String(row.delivered_at) : input.audit.createdAt,
+          deliveredBy: row ? String(row.delivered_by) : input.audit.actor,
+        };
+      }
+      throw error;
+    }
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'registration.kit_delivered', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.registrationId,
+        JSON.stringify({ notes: input.notes }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { status: 'ok', kitId, deliveredAt: input.audit.createdAt };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export type RegistrationKitDeliveryUndoInput = {
+  registrationId: string;
+  reason: string;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type RegistrationKitDeliveryUndoResult =
+  | { status: 'not_found' }
+  | { status: 'already_not_delivered' }
+  | { status: 'ok'; previousDeliveredAt: string; previousDeliveredBy: string };
+
+export async function undoRegistrationKitDeliveryInPostgres(
+  input: RegistrationKitDeliveryUndoInput,
+): Promise<RegistrationKitDeliveryUndoResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    // 1. cross-wave lock order — registration row FIRST.
+    const targetResult = await client.query(
+      `select r.id from ${table.registrations} r where r.id = $1 for update of r`,
+      [input.registrationId],
+    );
+    if (!targetResult.rows[0]) {
+      await client.query('rollback');
+      return { status: 'not_found' };
+    }
+
+    // Step 2 (run-check-ins) is intentionally skipped: undo-kit has no
+    // cross-table invariant — KIT_NOT_DELIVERED + CHECKED_IN is a valid state.
+
+    // 3. canonical kit-delivery state.
+    const kit = await client.query(
+      `select id, delivered_at, delivered_by from ${table.kitDeliveries} where registration_id = $1`,
+      [input.registrationId],
+    );
+    if (!kit.rows[0]) {
+      // §14 idempotent no-op: 200 KIT_ALREADY_NOT_DELIVERED, no DELETE, no audit.
+      await client.query('rollback');
+      return { status: 'already_not_delivered' };
+    }
+
+    // The physical DELETE the legacy upsert-only path never performed.
+    const deleted = await client.query(
+      `delete from ${table.kitDeliveries} where registration_id = $1 returning id`,
+      [input.registrationId],
+    );
+    if (deleted.rowCount !== 1) {
+      // Serialised by the registration row lock this is unreachable; kept as a
+      // defensive guarantee that we only audit an actual deletion.
+      await client.query('rollback');
+      return { status: 'already_not_delivered' };
+    }
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'registration.undo-kit', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.registrationId,
+        JSON.stringify({ reason: input.reason }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return {
+      status: 'ok',
+      previousDeliveredAt: String(kit.rows[0].delivered_at),
+      previousDeliveredBy: String(kit.rows[0].delivered_by),
+    };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * ADMIN-UX-HOTFIX-003 — narrow, single-row transactional mutation for
  * PATCH /api/admin/registrations/:id. Replaces the generic transaction() blob
  * mechanism (readPostgresDatabase(scope='all') -> in-memory mutate ->
