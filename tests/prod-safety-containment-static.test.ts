@@ -144,7 +144,16 @@ test('no generic persist:true transaction() whose callback ONLY pushes to auditL
 // primitives and no longer wrap event/distance config edits in a generic
 // full-blob transaction(). Both were independent writers (no shared handler,
 // unlike undo-check-in/undo-kit above), so this wave removes exactly two.
-const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 17, 'server/database.ts': 2 };
+//
+// ADMIN-UX-RELIABILITY Wave 3B: 17 -> 16. handlePaymentWebhook's non-paid
+// branch delegates to the narrow applyNonPaidPaymentWebhookInPostgres
+// primitive and no longer wraps non-paid webhook processing (incl. orphan
+// detection, stale-checkout, amount-mismatch) in a generic full-blob
+// transaction(cb, {scope:'checkout'}). This was an independent writer (the
+// entire transaction() lived inside handlePaymentWebhook alone, not shared
+// with any sibling handler), so this wave removes exactly one. The already-
+// narrow paid path (confirmPaymentInPostgres) is untouched.
+const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 16, 'server/database.ts': 2 };
 
 function countFullBlobWriters(src: string): number {
   const lines = src.split('\n');
