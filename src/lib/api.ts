@@ -12,6 +12,7 @@ import type {
   AdminKitResponse,
   AdminEventConfigMutationResponse,
   AdminDistanceConfigMutationResponse,
+  AdminOrphanLinkResponse,
   AdminRecoverConfirmationEmailResponse,
   AdminResendHistoricalConfirmationResponse,
   AdminRegistrationEditable,
@@ -683,8 +684,14 @@ export function getAdminPaymentsCsvUrl(filters: Record<string, string>) {
   return getApiUrl(`/api/admin/payments.csv${toQueryString(filters)}`);
 }
 
+// ADMIN-UX-RELIABILITY Wave 3C — narrow orphan-link mutation on the
+// established reliability contract: no auto-retry (an ambiguous network
+// commit must be verified read-only, never silently resent), typed
+// ORPHAN_LINKED / ORPHAN_ALREADY_LINKED_HERE outcome so the panel can show
+// an informational (not error) message when the event was already linked to
+// this exact target.
 export function linkAdminOrphanPayment(adminKey: string, eventId: string, registrationId: string, reason: string) {
-  return adminFetch<{ ok: boolean }>(`/api/admin/payment-events/${encodeURIComponent(eventId)}/link`, adminKey, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ registrationId, reason }) });
+  return adminFetch<AdminOrphanLinkResponse>(`/api/admin/payment-events/${encodeURIComponent(eventId)}/link`, adminKey, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ registrationId, reason }), retry: false });
 }
 
 export function reconcileAdminPayment(adminKey: string, registrationId: string, reason: string) {

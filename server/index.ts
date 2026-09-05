@@ -7,6 +7,11 @@ import { canUndoCheckIn, canUndoKit, getCheckInConflictMessage, getKitConflictMe
 import {
   attachCheckoutToPaymentInPostgres,
   applyNonPaidPaymentWebhookInPostgres,
+  linkOrphanPaymentInPostgres,
+  findFirstValue,
+  toStringValue,
+  normalizePaymentWebhook,
+  toPaymentProviderStatus,
   cancelRegistrationInPostgres,
   claimRegistrationEmailInPostgres,
   completeRegistrationEmailInPostgres,
@@ -69,6 +74,7 @@ import {
   upsertAdminBootstrapInPostgres,
   usesPostgresDatabase,
   type Database,
+  type NormalizedPaymentWebhook,
   type PartnerRecord,
   type PartnerType,
   type PartnershipLeadRecord,
@@ -1101,201 +1107,20 @@ function expirePendingPayments(database: Database, now = new Date()) {
   return expiredCount;
 }
 
-function findFirstValue(payload: unknown, keys: string[], depth = 0): unknown {
-  if (!payload || typeof payload !== 'object' || depth > 4) {
-    return undefined;
-  }
-
-  const record = payload as Record<string, unknown>;
-
-  for (const key of keys) {
-    if (record[key] !== undefined && record[key] !== null && record[key] !== '') {
-      return record[key];
-    }
-  }
-
-  for (const value of Object.values(record)) {
-    const found = findFirstValue(value, keys, depth + 1);
-
-    if (found !== undefined && found !== null && found !== '') {
-      return found;
-    }
-  }
-
-  return undefined;
-}
-
-function toStringValue(value: unknown) {
-  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
-    ? String(value).trim()
-    : '';
-}
-
-function toNumberValue(value: unknown) {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === 'string') {
-    const parsed = Number(value.replace(',', '.'));
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  return null;
-}
-
-function normalizeGatewayAmount(value: unknown) {
-  const parsed = toNumberValue(value);
-
-  if (parsed === null) {
-    return null;
-  }
-
-  return Number.isInteger(parsed) ? parsed : Math.round(parsed * 100);
-}
-
-export function toPaymentProviderStatus(event: {
-  status?: string;
-  paid?: boolean;
-  amount?: number | string;
-  paid_amount?: number | string;
-  settledAt?: string;
-} | null): RegistrationStatus {
-  if (!event) {
-    return 'pending_payment';
-  }
-
-  const status = String(event.status || '').trim().toLowerCase();
-  const paidStatuses = new Set(['paid', 'approved', 'confirmed', 'completed', 'captured', 'settled', 'success', 'succeeded', 'received', 'recebido']);
-  const failedStatuses = new Set(['payment_failed', 'failed', 'declined', 'denied', 'refused', 'rejected']);
-  const cancelledStatuses = new Set(['cancelled', 'canceled', 'voided']);
-
-  if (paidStatuses.has(status) || event.paid === true) {
-    return 'paid';
-  }
-
-  const amount = normalizeGatewayAmount(event.amount);
-  const paidAmount = normalizeGatewayAmount(event.paid_amount);
-
-  if (amount !== null && paidAmount !== null && paidAmount >= amount) {
-    return 'paid';
-  }
-
-  if (String(event.settledAt || '').trim()) {
-    return 'paid';
-  }
-
-  if (cancelledStatuses.has(status)) {
-    return 'cancelled';
-  }
-
-  if (status === 'refunded') {
-    return 'refunded';
-  }
-
-  if (status === 'expired') {
-    return 'expired';
-  }
-
-  if (failedStatuses.has(status)) {
-    return 'payment_failed';
-  }
-
-  return 'pending_payment';
-}
-
 // ADMIN-UX-RELIABILITY Wave 3B — moved to server/database.ts (verbatim, no
 // behavior change) so the new applyNonPaidPaymentWebhookInPostgres primitive
 // can reuse it without a database.ts -> index.ts circular import. Re-exported
 // here so every existing import site (this file, tests) is unaffected.
 export { resolvePaymentTransition } from './database.js';
 
-type NormalizedPaymentWebhook = {
-  registrationId: string;
-  providerEventId: string;
-  providerTransactionId: string;
-  providerPaymentId: string;
-  eventType: string;
-  gatewayStatus: string;
-  paymentMethod: string;
-  amountCents: number | null;
-  paidAmountCents: number | null;
-  receiptUrl: string;
-  nextStatus: RegistrationStatus;
-};
-
-export function normalizePaymentWebhook(rawEvent: unknown): NormalizedPaymentWebhook | null {
-  if (!rawEvent || typeof rawEvent !== 'object') {
-    return null;
-  }
-
-  const registrationId = toStringValue(findFirstValue(rawEvent, [
-    'registrationId',
-    'registration_id',
-    'order_nsu',
-    'orderNsu',
-    'order_id',
-    'orderId',
-    'external_id',
-    'externalId',
-    'reference_id',
-    'referenceId',
-  ]));
-  const providerTransactionId = toStringValue(findFirstValue(rawEvent, [
-    'transaction_nsu',
-    'transactionNsu',
-    'transaction_id',
-    'transactionId',
-    'transaction_uuid',
-    'payment_id',
-    'paymentId',
-  ]));
-  const providerPaymentId = toStringValue(findFirstValue(rawEvent, [
-    'invoice_slug',
-    'invoiceSlug',
-    'slug',
-    'checkout_slug',
-    'checkoutSlug',
-    'invoice_id',
-    'invoiceId',
-    'link_id',
-    'linkId',
-  ]));
-  const providerEventId = toStringValue(findFirstValue(rawEvent, [
-    'providerEventId',
-    'event_id',
-    'eventId',
-    'id',
-  ])) || providerTransactionId || providerPaymentId;
-  const eventType = toStringValue(findFirstValue(rawEvent, ['eventType', 'event_type', 'type'])) || 'infinitepay.payment_status_changed';
-  const gatewayStatus = toStringValue(findFirstValue(rawEvent, ['status', 'payment_status', 'paymentStatus', 'transaction_status', 'transactionStatus', 'invoice_status', 'invoiceStatus']));
-  const amountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['amount', 'amount_cents', 'amountCents', 'total_amount', 'totalAmount', 'value']));
-  const paidAmountCents = normalizeGatewayAmount(findFirstValue(rawEvent, ['paid_amount', 'paidAmount', 'paid_amount_cents', 'received_amount', 'receivedAmount']));
-  const paidValue = findFirstValue(rawEvent, ['paid', 'is_paid', 'isPaid']);
-  const settledAt = toStringValue(findFirstValue(rawEvent, ['paid_at', 'paidAt', 'received_at', 'receivedAt', 'settled_at', 'settledAt']));
-  const paid = paidValue === true || String(paidValue).toLowerCase() === 'true';
-  const nextStatus = toPaymentProviderStatus({
-    status: gatewayStatus,
-    paid,
-    amount: amountCents ?? undefined,
-    paid_amount: paidAmountCents ?? undefined,
-    settledAt,
-  });
-
-  return {
-    registrationId,
-    providerEventId,
-    providerTransactionId,
-    providerPaymentId,
-    eventType,
-    gatewayStatus,
-    paymentMethod: toStringValue(findFirstValue(rawEvent, ['payment_method', 'paymentMethod', 'method', 'payment_type', 'paymentType', 'capture_method'])),
-    amountCents,
-    paidAmountCents,
-    receiptUrl: toStringValue(findFirstValue(rawEvent, ['receipt_url', 'receiptUrl'])),
-    nextStatus,
-  };
-}
+// ADMIN-UX-RELIABILITY Wave 3C — moved to server/database.ts (verbatim, no
+// behavior change) so the new linkOrphanPaymentInPostgres primitive can
+// normalize an orphan event's stored payload without a database.ts ->
+// index.ts circular import. Imported for local use below AND re-exported
+// under the same names so every existing import site (this file, tests) is
+// unaffected.
+export { findFirstValue, toStringValue, normalizePaymentWebhook, toPaymentProviderStatus };
+export type { NormalizedPaymentWebhook };
 
 export function validateInfinitePayApproval(event: NormalizedPaymentWebhook | null) {
   if (!event) return 'invalid_payload';
@@ -3257,20 +3082,29 @@ async function handleAdminOrphanLink(req: IncomingMessage, res: ServerResponse, 
   const body = parseJsonBody<{ registrationId?: string; reason?: string }>(await readBody(req));
   const registrationId = body?.registrationId?.trim() || ''; const reason = body?.reason?.trim() || '';
   if (!registrationId || reason.length < 5) { json(res, 400, { message: 'Informe a inscricao e um motivo com pelo menos 5 caracteres.' }); return; }
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const event = database.paymentEvents.find((item) => item.id === eventId && item.eventType === 'infinitepay.orphan');
-    const registration = database.registrations.find((item) => item.id === registrationId);
-    const payment = database.payments.find((item) => item.registrationId === registrationId);
-    if (!event) return { statusCode: 404, payload: { message: 'Evento orfao nao encontrado.' } };
-    if (!registration || !payment) return { statusCode: 404, payload: { message: 'Inscricao ou pagamento nao encontrado.' } };
-    const normalized = normalizePaymentWebhook(event.payload);
-    if (normalized && normalized.amountCents !== null && normalized.amountCents !== registration.amountCents) return { statusCode: 409, payload: { message: 'O valor do evento diverge da inscricao informada.' } };
-    const now = new Date().toISOString(); event.paymentId = payment.id; event.eventType = 'infinitepay.orphan_linked';
-    payment.gatewayPayload = event.payload; payment.gatewayStatus = normalized?.gatewayStatus || payment.gatewayStatus; payment.gatewayTransactionId = normalized?.providerTransactionId || payment.gatewayTransactionId; payment.updatedAt = now;
-    database.auditLogs.push(createAuditLog(req, adminSession, { action: 'payment.orphan_linked', entityType: 'registration', entityId: registrationId, payload: { reason, eventId, providerEventId: event.providerEventId }, createdAt: now }));
-    return { statusCode: 200, payload: { ok: true } };
-  }, { scope: 'checkout' });
-  json(res, result.statusCode, result.payload);
+  // ADMIN-UX-RELIABILITY Wave 3C: delegate to the narrow transaction
+  // (run-payment-events + run-payments + run-audit-logs; run-registrations
+  // and run-lots are never written) instead of the generic full-database
+  // blob path.
+  const result = await linkOrphanPaymentInPostgres({
+    eventId,
+    registrationId,
+    reason,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
+  });
+  if (result.outcome === 'TARGET_NOT_FOUND') { json(res, 404, { message: 'Inscricao ou pagamento nao encontrado.' }); return; }
+  if (result.outcome === 'ORPHAN_NOT_FOUND') { json(res, 404, { message: 'Evento orfao nao encontrado.' }); return; }
+  if (result.outcome === 'ORPHAN_ALREADY_CLAIMED') { json(res, 409, { message: 'Este evento ja foi vinculado a outra inscricao.', code: 'ORPHAN_ALREADY_CLAIMED' }); return; }
+  if (result.outcome === 'AMOUNT_MISMATCH') { json(res, 409, { message: 'O valor do evento diverge da inscricao informada.', code: 'AMOUNT_MISMATCH' }); return; }
+  if (result.outcome === 'GATEWAY_CONFLICT') { json(res, 409, { message: 'Esta transacao do gateway ja esta associada a outro pagamento.', code: 'GATEWAY_CONFLICT' }); return; }
+  json(res, 200, { ok: true, outcome: result.outcome });
 }
 
 async function handleAdminPaymentReconcile(req: IncomingMessage, res: ServerResponse, registrationId: string) {
