@@ -5276,7 +5276,11 @@ async function handleAdminPartnerships(req: IncomingMessage, res: ServerResponse
 }
 
 async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerResponse, partnershipId: string) {
-  const adminSession = await requireAdmin(req, res);
+  // ADMIN-UX-RELIABILITY Wave 4A Stage 2A: administrator-only, matching every
+  // handler in the adjacent partner (discount/referral) domain — including its
+  // own status-change and delete mutations (handleAdminPartnerStatus,
+  // handleAdminPartnerDelete) — none of which grant finance or operation.
+  const adminSession = await requireAdmin(req, res, ['administrator']);
   if (!adminSession) {
     return;
   }
