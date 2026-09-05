@@ -65,6 +65,7 @@ import {
   checkInRegistrationInPostgres,
   deliverRegistrationKitInPostgres,
   setRegistrationBibInPostgres,
+  correctRegistrationDistanceInPostgres,
   undoRegistrationCheckInInPostgres,
   undoRegistrationKitDeliveryInPostgres,
   updateLotConfigurationInPostgres,
@@ -4791,6 +4792,54 @@ async function handleAdminBibNumber(req: IncomingMessage, res: ServerResponse, r
   json(res, 200, withRegistrationView(payload, adminSession.role as RegistrationViewRole));
 }
 
+// PARTICIPANT-OPS-003 — administrative race distance correction for one paid
+// registration. Dedicated endpoint (NOT profile-edit): administrator-only, the
+// client may supply only the target distance id + reason. Delegates to the
+// narrow correctRegistrationDistanceInPostgres primitive — one run-registrations
+// row (distance_id + payload.distance mirror + updated_at) and one
+// 'registration.distance_corrected' audit row IFF the distance changes. It never
+// touches lot / sold_count / payment / pricing / bib / check-in / kit / e-mail
+// state, and never routes through the generic full-blob transaction() path.
+async function handleAdminRegistrationDistance(req: IncomingMessage, res: ServerResponse, registrationId: string, url: URL) {
+  const adminSession = await requireAdmin(req, res, ['administrator']);
+  if (!adminSession || !requireAdminDatabase(res) || !requireJson(req, res)) return;
+  if (!await ensureRegistrationEventScope(res, url, registrationId)) return;
+  const body = parseJsonBody<{ targetDistanceId?: string; reason?: string }>(await readBody(req));
+  const targetDistanceId = compactText(body?.targetDistanceId, 100);
+  const reason = body?.reason?.trim() || '';
+  if (!targetDistanceId || reason.length < 5) {
+    json(res, 400, { message: 'Prova de destino ou motivo insuficiente (mínimo de 5 caracteres).' });
+    return;
+  }
+
+  const outcome = await correctRegistrationDistanceInPostgres({
+    registrationId,
+    targetDistanceId,
+    reason,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
+  });
+
+  if (outcome.status === 'not_found') { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  if (outcome.status === 'target_not_found') { json(res, 404, { message: 'Prova de destino nao encontrada.', code: 'TARGET_DISTANCE_NOT_FOUND' }); return; }
+  if (outcome.status === 'target_not_available') { json(res, 409, { message: outcome.message, code: 'TARGET_DISTANCE_NOT_AVAILABLE' }); return; }
+  if (outcome.status === 'not_eligible') { json(res, 409, { message: outcome.message, code: 'NOT_ELIGIBLE' }); return; }
+
+  const refreshed = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const refreshedRegistration = refreshed.registrations.find((item) => item.id === registrationId);
+  if (!refreshedRegistration) { json(res, 404, { message: 'Inscricao nao encontrada.' }); return; }
+  const payload = outcome.status === 'unchanged'
+    ? { ok: true, outcome: 'DISTANCE_UNCHANGED' as const, message: 'A inscrição já estava nesta prova. Nenhuma alteração foi registrada.', registration: toAdminRow(refreshed, refreshedRegistration) }
+    : { ok: true, outcome: 'DISTANCE_UPDATED' as const, message: `Prova corrigida de ${outcome.previousDistanceLabel ?? outcome.previousDistanceId} para ${outcome.distanceLabel}.`, registration: toAdminRow(refreshed, refreshedRegistration) };
+  json(res, 200, withRegistrationView(payload, adminSession.role as RegistrationViewRole));
+}
+
 async function handleAdminRegistrations(req: IncomingMessage, res: ServerResponse, url: URL) {
   const session = await requireAdmin(req, res);
   if (!session) {
@@ -5697,6 +5746,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     if (req.method === 'GET' && adminRegistrationUpdate) { await handleAdminRegistrationDetails(req, res, decodeURIComponent(adminRegistrationUpdate[1]), url); return; }
     const adminBibNumber = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/bib-number$/);
     if (req.method === 'POST' && adminBibNumber) { await handleAdminBibNumber(req, res, decodeURIComponent(adminBibNumber[1]), url); return; }
+    const adminRegistrationDistance = url.pathname.match(/^\/api\/admin\/registrations\/([^/]+)\/distance$/);
+    if (req.method === 'POST' && adminRegistrationDistance) { await handleAdminRegistrationDistance(req, res, decodeURIComponent(adminRegistrationDistance[1]), url); return; }
 
     const adminPaymentAction = url.pathname.match(/^\/api\/admin\/payments\/([^/]+)(?:\/(reconcile))?$/);
     if (adminPaymentAction) {

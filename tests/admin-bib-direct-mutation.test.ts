@@ -25,15 +25,19 @@ const serverDatabase = readFileSync('server/database.ts', 'utf8');
 
 function bibHandler(): string {
   const start = serverIndex.indexOf('async function handleAdminBibNumber(');
-  const end = serverIndex.indexOf('\nasync function handleAdminRegistrations(');
+  // stop before handleAdminRegistrationDistance (PARTICIPANT-OPS-003), inserted
+  // between the bib handler and handleAdminRegistrations.
+  const end = serverIndex.indexOf('\n// PARTICIPANT-OPS-003 — administrative race distance correction', start);
   assert.ok(start >= 0 && end > start, 'handleAdminBibNumber located');
   return serverIndex.slice(start, end);
 }
 
 function bibPrimitive(): string {
   const start = serverDatabase.indexOf('export type RegistrationBibUpdateInput = {');
-  // stop before the ADMIN-UX-RELIABILITY Wave 2B check-in primitives that follow
-  const end = serverDatabase.indexOf('ADMIN-UX-RELIABILITY Wave 2B', start);
+  // stop before the PARTICIPANT-OPS-003 distance-correction primitive that was
+  // inserted immediately after the bib block (which itself precedes the
+  // ADMIN-UX-RELIABILITY Wave 2B check-in primitives).
+  const end = serverDatabase.indexOf('PARTICIPANT-OPS-003 — narrow PostgreSQL primitive', start);
   assert.ok(start >= 0 && end > start, 'setRegistrationBibInPostgres block located');
   return serverDatabase.slice(start, end);
 }

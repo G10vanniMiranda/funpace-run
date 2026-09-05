@@ -8,6 +8,7 @@ import type {
   AdminSystemCheckResponse,
   AdminRegistrationActionResponse,
   AdminBibNumberResponse,
+  AdminRegistrationDistanceResponse,
   AdminCheckInResponse,
   AdminKitResponse,
   AdminEventConfigMutationResponse,
@@ -669,6 +670,17 @@ export function getAdminRegistrationDetails(adminKey: string, registrationId: st
 export function assignAdminBibNumber(adminKey: string, registrationId: string, bibNumber: string, reason: string) {
   return adminFetch<AdminBibNumberResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/bib-number${toQueryString({ event: currentEventParam() })}`, adminKey, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bibNumber, reason }), retry: false,
+  });
+}
+
+// PARTICIPANT-OPS-003 — administrative race distance correction. `retry: false`
+// is explicit: an ambiguous POST is never silently replayed — the caller runs a
+// read-only verification instead. The client sends ONLY the target distance id
+// and reason; price, lot, payment, bib and every financial snapshot stay
+// server-owned.
+export function correctAdminRegistrationDistance(adminKey: string, registrationId: string, targetDistanceId: string, reason: string) {
+  return adminFetch<AdminRegistrationDistanceResponse>(`/api/admin/registrations/${encodeURIComponent(registrationId)}/distance${toQueryString({ event: currentEventParam() })}`, adminKey, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetDistanceId, reason }), retry: false,
   });
 }
 

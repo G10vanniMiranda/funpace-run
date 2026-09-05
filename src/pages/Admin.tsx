@@ -96,8 +96,9 @@ import {
   updateAdminRegistration,
   getAdminRegistrationDetails,
   assignAdminBibNumber,
+  correctAdminRegistrationDistance,
 } from '../lib/api';
-import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminCheckInResponse, AdminKitResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminOrphanLinkResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
+import type { AdminAlertsResponse, AdminAuditLog, AdminBibNumberResponse, AdminRegistrationDistanceResponse, AdminCheckInResponse, AdminKitResponse, AdminEventConfig, AdminEventContext, AdminEventListItem, AdminExecutiveDashboard, AdminGoogleSheetsStatus, AdminMonitoringResponse, AdminOrphanLinkResponse, AdminPaymentDetailsResponse, AdminPaymentEvent, AdminReconciliationDashboard, AdminRecoverConfirmationEmailResponse, AdminResendHistoricalConfirmationResponse, AdminRegistration, AdminRegistrationActionResponse, AdminRegistrationDetailsResponse, AdminRegistrationEditable, AdminRegistrationsResponse, AdminSummaryResponse, DashboardChartPoint, RegistrationStatus } from '../types/registration';
 import { useExecutiveDashboardRuntime } from '../hooks/useExecutiveDashboardRuntime';
 import { EVENT_SELECTION_CODES } from '../lib/executive-dashboard-runtime';
 
@@ -129,6 +130,10 @@ const HISTORICAL_RESEND_OUTCOME_MESSAGE: Record<AdminResendHistoricalConfirmatio
 // only keeps the confirm button honest and avoids a doomed round-trip.
 const BIB_NUMBER_PATTERN = /^[A-Z0-9-]{1,20}$/;
 const BIB_REASON_MIN_LENGTH = 5;
+// PARTICIPANT-OPS-003 — the distance-correction reason follows the same
+// minimum as bib/cancel; the server (handleAdminRegistrationDistance) is
+// authoritative and re-checks it.
+const DISTANCE_REASON_MIN_LENGTH = 5;
 const normalizeBibNumber = (value: string) => value.trim().toUpperCase();
 const isBibNumberShapeValid = (value: string) => BIB_NUMBER_PATTERN.test(normalizeBibNumber(value));
 
@@ -328,6 +333,22 @@ export function AdminPage() {
     refreshFailed: boolean;
     verification: 'confirmed' | 'not-applied' | 'unknown' | 'unreachable' | null;
     canonical: string | null;
+  } | null>(null);
+  // PARTICIPANT-OPS-003 — administrative race distance correction on the same
+  // reusable state machine. `distanceDraft` holds the operator's editable input;
+  // `distanceContext` records what was submitted so SUCCESS renders the canonical
+  // outcome and — on an ambiguous network/timeout failure — the result of a
+  // READ-ONLY verification (never an automatic resend). A refetch failure AFTER a
+  // committed DISTANCE_UPDATED is a distinct state that also never re-issues.
+  const distanceMutation = useAdminMutation<AdminRegistrationDistanceResponse>((result) => result.message);
+  const [distanceDraft, setDistanceDraft] = useState<{ registration: AdminRegistration; targetDistanceId: string; reason: string } | null>(null);
+  const [distanceContext, setDistanceContext] = useState<{
+    before: AdminRegistration;
+    requestedId: string;
+    requestedLabel: string;
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'unknown' | 'unreachable' | null;
+    canonicalId: string | null;
   } | null>(null);
   // ADMIN-UX-RELIABILITY Wave 2B — check-in / undo-check-in on the same reusable
   // state machine. `checkInDraft.mode` selects the operation; `checkInContext`
@@ -1000,6 +1021,95 @@ export function AdminPage() {
     setBibContext(null);
   };
 
+  // PARTICIPANT-OPS-003 — distance-correction sibling options for the current
+  // event, resolved from the summary (same source the export filter uses); the
+  // registration's own distance is excluded. The server validates active/same
+  // event; the client only offers the candidates.
+  const distanceOptions = (summary?.byDistance || []).map((distance) => ({ id: distance.id, name: String(distance.name) }));
+
+  const handleCorrectDistance = (registration: AdminRegistration) => {
+    distanceMutation.reset();
+    setDistanceContext(null);
+    const firstOther = distanceOptions.find((option) => option.id !== registration.distanceId);
+    setDistanceDraft({ registration, targetDistanceId: firstOther?.id || '', reason: '' });
+    distanceMutation.open();
+  };
+
+  const canSubmitDistance = (draft: { registration: AdminRegistration; targetDistanceId: string; reason: string }) =>
+    Boolean(draft.targetDistanceId)
+    && draft.targetDistanceId !== draft.registration.distanceId
+    && draft.reason.trim().length >= DISTANCE_REASON_MIN_LENGTH;
+
+  const submitDistanceCorrection = async () => {
+    if (!distanceDraft || !canSubmitDistance(distanceDraft)) return;
+    const before = distanceDraft.registration;
+    const requestedId = distanceDraft.targetDistanceId;
+    const requestedLabel = distanceOptions.find((option) => option.id === requestedId)?.name || requestedId;
+    const reason = distanceDraft.reason.trim();
+    setActionMessage('');
+    setDistanceContext({ before, requestedId, requestedLabel, refreshFailed: false, verification: null, canonicalId: before.distanceId });
+
+    let response: AdminRegistrationDistanceResponse | null = null;
+    let caught: unknown = null;
+    const ok = await distanceMutation.submit(async () => {
+      try {
+        response = await correctAdminRegistrationDistance(adminKey, before.id, requestedId, reason);
+        return response;
+      } catch (requestError) {
+        caught = requestError;
+        throw requestError;
+      }
+    });
+
+    if (ok && response) {
+      // DISTANCE_UPDATED or DISTANCE_UNCHANGED — both HTTP 200. Refetch the
+      // canonical record so the drawer shows the corrected prova BEFORE the
+      // operator concludes.
+      try {
+        updateRegistration(response.registration);
+        setRegistrationDetails(await getAdminRegistrationDetails(adminKey, before.id));
+        await loadAdminData();
+      } catch {
+        // The mutation committed; only the read-only refresh failed. NOT a
+        // mutation failure — never triggers a resubmission.
+        setDistanceContext((current) => (current ? { ...current, refreshFailed: true } : current));
+      }
+      return;
+    }
+
+    // A timeout / bare network failure leaves the commit state unprovable.
+    // Never encourage a resend: run a READ-ONLY verification and classify.
+    const ambiguous = caught instanceof TypeError
+      || (caught instanceof ApiError && (caught.code === 'timeout' || caught.code === 'network_error'));
+    if (!ambiguous) return;
+    try {
+      const details = await getAdminRegistrationDetails(adminKey, before.id);
+      const canonicalId = details.registration.distanceId || null;
+      const verification = canonicalId === requestedId
+        ? 'confirmed' as const
+        : canonicalId === before.distanceId
+          ? 'not-applied' as const
+          : 'unknown' as const;
+      updateRegistration(details.registration);
+      setRegistrationDetails(details);
+      setDistanceContext((current) => (current ? { ...current, verification, canonicalId } : current));
+    } catch {
+      setDistanceContext((current) => (current ? { ...current, verification: 'unreachable' } : current));
+    }
+  };
+
+  const acknowledgeDistanceCorrection = () => {
+    distanceMutation.acknowledge();
+    setDistanceDraft(null);
+    setDistanceContext(null);
+  };
+
+  const resetDistanceCorrection = () => {
+    distanceMutation.reset();
+    setDistanceDraft(null);
+    setDistanceContext(null);
+  };
+
   if (authChecking) return <main className="flex min-h-screen items-center justify-center bg-black text-brand"><Loader2 className="h-8 w-8 animate-spin" /></main>;
 
   if (!adminKey || error === 'Acesso administrativo não autorizado.') {
@@ -1120,6 +1230,8 @@ export function AdminPage() {
         onSessionExpired={handleSessionExpired}
         details={registrationDetails}
         onAssignBib={handleBibNumber}
+        onCorrectDistance={handleCorrectDistance}
+        distanceOptions={distanceOptions}
         adminRole={adminRole}
         onClose={() => { setSelectedRegistration(null); setRegistrationDetails(null); }}
       />
@@ -1192,6 +1304,21 @@ export function AdminPage() {
           onSubmit={() => void submitBibNumber()}
           onAcknowledge={acknowledgeBibNumber}
           onReset={resetBibNumber}
+          onSessionExpired={handleSessionExpired}
+        />
+      )}
+
+      {distanceDraft && (
+        <DistanceCorrectionModal
+          draft={distanceDraft}
+          options={distanceOptions}
+          state={distanceMutation.state}
+          context={distanceContext}
+          canSubmit={canSubmitDistance(distanceDraft)}
+          onDraftChange={setDistanceDraft}
+          onSubmit={() => void submitDistanceCorrection()}
+          onAcknowledge={acknowledgeDistanceCorrection}
+          onReset={resetDistanceCorrection}
           onSessionExpired={handleSessionExpired}
         />
       )}
@@ -4211,6 +4338,204 @@ function BibNumberModal({
   );
 }
 
+// PARTICIPANT-OPS-003 — administrative race distance correction. Mirrors the
+// BibNumberModal contract exactly: confirming → submitting → success | failure,
+// double-submit guarded by `submitting`, retry:false at the client, explicit
+// success / committed-but-refresh-failed / session-expired / ambiguous-failure
+// verification states, and a plain "Concluir"/"Fechar" once nothing else should
+// be sent. The modal states plainly that only the prova changes — not the lote
+// nor the valor pago.
+function DistanceCorrectionModal({
+  draft,
+  options,
+  state,
+  context,
+  canSubmit,
+  onDraftChange,
+  onSubmit,
+  onAcknowledge,
+  onReset,
+  onSessionExpired,
+}: {
+  draft: { registration: AdminRegistration; targetDistanceId: string; reason: string };
+  options: Array<{ id: string; name: string }>;
+  state: AdminMutationState<AdminRegistrationDistanceResponse>;
+  context: {
+    before: AdminRegistration;
+    requestedId: string;
+    requestedLabel: string;
+    refreshFailed: boolean;
+    verification: 'confirmed' | 'not-applied' | 'unknown' | 'unreachable' | null;
+    canonicalId: string | null;
+  } | null;
+  canSubmit: boolean;
+  onDraftChange: (draft: { registration: AdminRegistration; targetDistanceId: string; reason: string }) => void;
+  onSubmit: () => void;
+  onAcknowledge: () => void;
+  onReset: () => void;
+  onSessionExpired: () => void;
+}) {
+  const submitting = state.phase === 'submitting';
+  const succeeded = state.phase === 'success';
+  const failed = state.phase === 'failure';
+  const sessionExpired = failed && Boolean(state.error?.sessionExpired);
+  const verification = context?.verification ?? null;
+  const outcome = state.result?.outcome ?? null;
+
+  const currentLabel = draft.registration.distance || draft.registration.distanceId;
+  const targetOptions = options.filter((option) => option.id !== draft.registration.distanceId);
+  const requestedLabel = options.find((option) => option.id === draft.targetDistanceId)?.name || draft.targetDistanceId;
+  const reasonValid = draft.reason.trim().length >= DISTANCE_REASON_MIN_LENGTH;
+
+  const showForm = !succeeded && !sessionExpired
+    && verification !== 'confirmed' && verification !== 'unknown' && verification !== 'unreachable';
+  const concludeOnly = succeeded || verification === 'confirmed';
+  const reviewOnly = verification === 'unknown' || verification === 'unreachable';
+
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 p-4">
+      <button type="button" aria-label="Fechar modal" className="absolute inset-0" onClick={submitting ? undefined : onReset} />
+      <div className="relative w-full max-w-lg border border-white/10 bg-zinc-950 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-black">Alterar prova</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              Corrige a prova da inscrição de <span className="text-white">{draft.registration.fullName}</span>.
+            </p>
+          </div>
+          <button type="button" onClick={onReset} disabled={submitting} className="flex h-10 w-10 items-center justify-center border border-white/10 disabled:opacity-40">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+          <div className="border border-white/10 bg-black/40 p-3">
+            <p className="text-[11px] font-black uppercase tracking-widest text-zinc-500">Prova atual</p>
+            <p className="mt-1 text-white">{currentLabel}</p>
+          </div>
+          <div className="border border-white/10 bg-black/40 p-3">
+            <p className="text-[11px] font-black uppercase tracking-widest text-zinc-500">Nova prova</p>
+            <p className="mt-1 text-white">{draft.targetDistanceId ? requestedLabel : '—'}</p>
+          </div>
+        </div>
+
+        <p className="mt-3 border border-white/15 bg-white/5 p-3 text-xs text-zinc-300" role="note">
+          Esta ação altera <span className="font-black text-white">apenas a prova</span> da inscrição.
+          O lote (<span className="text-white">{draft.registration.lot || 'não informado'}</span>) e o valor pago
+          permanecem inalterados; nenhum valor é cobrado ou estornado.
+        </p>
+
+        {showForm && (
+          <div className="mt-5 space-y-3">
+            <label className="block text-xs font-bold text-zinc-400">
+              Nova prova
+              <select
+                value={draft.targetDistanceId}
+                disabled={submitting}
+                onChange={(event) => onDraftChange({ ...draft, targetDistanceId: event.target.value })}
+                className="mt-1 min-h-11 w-full border border-white/10 bg-black p-2 text-white disabled:opacity-60"
+              >
+                <option value="">Selecione a prova de destino</option>
+                {targetOptions.map((option) => (
+                  <option key={option.id} value={option.id}>{option.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block text-xs font-bold text-zinc-400">
+              Motivo <span className="font-normal text-zinc-500">(obrigatório, mínimo de {DISTANCE_REASON_MIN_LENGTH} caracteres)</span>
+              <textarea
+                value={draft.reason}
+                aria-required="true"
+                aria-invalid={draft.reason.length > 0 && !reasonValid}
+                disabled={submitting}
+                onChange={(event) => onDraftChange({ ...draft, reason: event.target.value })}
+                className="mt-1 min-h-24 w-full border border-white/10 bg-black p-3 text-white disabled:opacity-60"
+              />
+            </label>
+            {draft.targetDistanceId && (
+              <p className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+                A prova será corrigida de <span className="font-black">{currentLabel}</span> para <span className="font-black">{requestedLabel}</span>.
+              </p>
+            )}
+          </div>
+        )}
+
+        {succeeded && outcome === 'DISTANCE_UPDATED' && (
+          <div className="mt-5 space-y-2" aria-live="polite">
+            <div className="border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+              {state.successMessage || `Prova corrigida para ${context?.requestedLabel ?? requestedLabel}.`}
+            </div>
+            {context?.refreshFailed && (
+              <div className="border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="status">
+                Prova corrigida, mas não foi possível atualizar os dados exibidos. Atualize antes de tentar novamente — não reenvie.
+              </div>
+            )}
+          </div>
+        )}
+        {succeeded && outcome === 'DISTANCE_UNCHANGED' && (
+          <div className="mt-5 border border-white/15 bg-white/5 p-3 text-sm text-zinc-200" role="status" aria-live="polite">
+            {state.successMessage || 'A inscrição já estava nesta prova. Nenhuma alteração foi registrada.'}
+          </div>
+        )}
+
+        {failed && !sessionExpired && verification === null && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Não foi possível alterar a prova.'}
+          </div>
+        )}
+        {sessionExpired && (
+          <div className="mt-5 border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert">
+            {state.error?.message || 'Sua sessão expirou. A alteração NÃO foi executada. Entre novamente para continuar.'}
+          </div>
+        )}
+        {verification === 'confirmed' && (
+          <div className="mt-5 border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100" role="status">
+            A conexão falhou, mas a verificação confirmou que a prova foi corrigida para {context?.requestedLabel ?? requestedLabel}. Não reenvie.
+          </div>
+        )}
+        {verification === 'not-applied' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            A conexão falhou e a verificação mostra que a alteração NÃO foi aplicada (a prova segue como {currentLabel}). Você pode tentar novamente.
+          </div>
+        )}
+        {verification === 'unknown' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Estado indefinido: a prova está diferente do valor anterior e do solicitado. Revise a inscrição antes de qualquer nova ação.
+          </div>
+        )}
+        {verification === 'unreachable' && (
+          <div className="mt-5 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100" role="alert">
+            Não foi possível confirmar se a alteração foi aplicada. Recarregue e verifique a inscrição antes de repetir a ação.
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          {concludeOnly ? (
+            <button type="button" onClick={succeeded ? onAcknowledge : onReset} className="border border-emerald-400/40 px-4 py-3 text-xs font-black uppercase text-emerald-200">Concluir</button>
+          ) : sessionExpired ? (
+            <button type="button" onClick={onSessionExpired} className="border border-brand/40 px-4 py-3 text-xs font-black uppercase text-brand">Entrar novamente</button>
+          ) : reviewOnly ? (
+            <button type="button" onClick={onReset} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300">Fechar</button>
+          ) : (
+            <>
+              <button type="button" onClick={onReset} disabled={submitting} className="border border-white/10 px-4 py-3 text-xs font-black uppercase text-zinc-300 disabled:opacity-40">Fechar</button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={submitting || !canSubmit}
+                className="flex items-center gap-2 bg-brand px-4 py-3 text-xs font-black uppercase text-black disabled:opacity-40"
+              >
+                {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                {submitting ? 'Salvando...' : (failed || verification === 'not-applied') ? 'Tentar novamente' : 'Salvar correção'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ADMIN-UX-RELIABILITY Wave 2B — reliable check-in / undo-check-in.
 //   * `mode` selects the operation; the confirming step always shows the
 //     canonical current check-in state;
@@ -4831,6 +5156,8 @@ function AthleteDrawer({
   onEditReset,
   onSessionExpired,
   onAssignBib,
+  onCorrectDistance,
+  distanceOptions,
   onClose,
 }: {
   registration: AdminRegistration | null;
@@ -4851,6 +5178,8 @@ function AthleteDrawer({
   onEditReset: () => void;
   onSessionExpired: () => void;
   onAssignBib: (registration: AdminRegistration) => void;
+  onCorrectDistance: (registration: AdminRegistration) => void;
+  distanceOptions: Array<{ id: string; name: string }>;
   onClose: () => void;
 }) {
   if (!registration) {
@@ -4919,6 +5248,9 @@ function AthleteDrawer({
           />
         )}
         {canAssignBib && <button type="button" disabled={actionLoading !== ''} onClick={() => onAssignBib(registration)} className="mt-3 w-full border border-brand/30 px-4 py-3 text-xs font-black uppercase text-brand">{registration.bibNumber ? 'Alterar numero de peito' : 'Atribuir numero de peito'}</button>}
+        {canEditRegistration && registration.status === 'paid' && distanceOptions.some((option) => option.id !== registration.distanceId) && (
+          <button type="button" disabled={actionLoading !== ''} onClick={() => onCorrectDistance(registration)} className="mt-3 w-full border border-brand/30 px-4 py-3 text-xs font-black uppercase text-brand">Alterar prova</button>
+        )}
 
         <div className="mt-5 grid gap-4 sm:grid-cols-[160px_1fr]">
           <OperationalQr registrationId={registration.id} />
