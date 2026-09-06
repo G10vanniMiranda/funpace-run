@@ -22,7 +22,9 @@ function handlerBlock(): string {
 
 function primitiveBlock(): string {
   const a = serverDatabase.indexOf('export type PartnershipLeadCreateInput = {');
-  const b = serverDatabase.indexOf('export type AuditLogAppendInput = {', a);
+  // stop before the Wave 4C Stage 2 remarketing primitive inserted right after
+  // createPartnershipLeadInPostgres.
+  const b = serverDatabase.indexOf('ADMIN-UX-RELIABILITY Wave 4C Stage 2 — narrow, DB-idempotent persistence', a);
   assert.ok(a >= 0 && b > a, 'createPartnershipLeadInPostgres block located');
   return serverDatabase.slice(a, b);
 }

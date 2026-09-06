@@ -187,7 +187,22 @@ test('no generic persist:true transaction() whose callback ONLY pushes to auditL
 // contract is preserved), no registrations / payments / lots / partners /
 // coupons / email. Validation, honeypot, in-memory rate limit and 201 wording
 // stay in the handler, unchanged.
-const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 13, 'server/database.ts': 2 };
+//
+// ADMIN-UX-RELIABILITY Wave 4C Stage 2: 13 -> 12. handleAdminRemarketingCampaignEvent
+// (the manual campaign-funnel event, admin-only, no UI) delegates to the narrow
+// recordRemarketingCampaignEventsInPostgres primitive and no longer wraps the
+// audit append in a generic full-blob transaction((db) => ...,
+// {scope:'admin-registrations'}). The old in-memory `db.auditLogs.some(...)`
+// dedupe was not race-safe; the new primitive is a single batched
+// `INSERT ... ON CONFLICT (action,(payload->>'campaign'),(payload->>'personKey'))
+// WHERE action IN ('remarketing.eligible','remarketing.message_sent') DO NOTHING`,
+// with the partial unique index run-audit-logs_remarketing_campaign_stage_idx as
+// the concurrency authority. The handler's two remaining transaction() calls are
+// persist:false scoped READS (projection cohort + response metrics) and are
+// exempt from this count. Independent writer, so exactly one removed. Write set:
+// run-audit-logs only (0..N rows, or 0 on full duplicate); no registrations /
+// payments / lots / email / campaign state.
+const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 12, 'server/database.ts': 2 };
 
 function countFullBlobWriters(src: string): number {
   const lines = src.split('\n');

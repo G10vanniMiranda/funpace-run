@@ -1088,6 +1088,7 @@ async function ensurePostgresDatabase(client: Queryable) {
     create unique index if not exists "run-check-ins_registration_id_idx" on ${table.checkIns}(registration_id);
     create unique index if not exists "run-kit-deliveries_registration_id_idx" on ${table.kitDeliveries}(registration_id);
     create index if not exists "run-audit-logs_entity_idx" on ${table.auditLogs}(entity_type, entity_id);
+    create unique index if not exists "run-audit-logs_remarketing_campaign_stage_idx" on ${table.auditLogs} (action, (payload->>'campaign'), (payload->>'personKey')) where action in ('remarketing.eligible', 'remarketing.message_sent');
     create index if not exists "run-admin-sessions_actor_idx" on ${table.adminSessions}(actor);
     create index if not exists "run-admin-sessions_expires_at_idx" on ${table.adminSessions}(expires_at);
     create unique index if not exists "run-admin-users_email_idx" on ${table.adminUsers}(email);
@@ -7152,6 +7153,133 @@ export async function createPartnershipLeadInPostgres(
   );
 
   return mapPartnershipLeadRow(result.rows[0]);
+}
+
+/**
+ * ADMIN-UX-RELIABILITY Wave 4C Stage 2 — narrow, DB-idempotent persistence for
+ * the manual remarketing campaign-funnel event (POST
+ * /api/admin/remarketing/campaigns/whatsapp_remarketing_volta10/events).
+ *
+ * Replaces the generic full-blob path in handleAdminRemarketingCampaignEvent
+ * (transaction((db) => { ...projections...; db.auditLogs.push(...) },
+ * {scope:'admin-registrations'}) -> readPostgresDatabase(scope='admin-registrations')
+ * -> savePostgresDatabase(16-table upsert) -> commit, under
+ * pg_advisory_xact_lock('funpace-run-write')). The old in-memory dedupe
+ * `db.auditLogs.some(...)` was NOT race-safe — the only thing preventing
+ * duplicates was the accidental global serialisation of that advisory lock.
+ *
+ * These rows are PURE campaign-funnel EVIDENCE: they do not control eligibility,
+ * send communication, or mutate any registration / payment / lot / participant /
+ * campaign state. The dedupe tuple is (action, payload->>'campaign',
+ * payload->>'personKey'), enforced by the PARTIAL unique index
+ * "run-audit-logs_remarketing_campaign_stage_idx"
+ *   ON "run-audit-logs" (action, (payload->>'campaign'), (payload->>'personKey'))
+ *   WHERE action IN ('remarketing.eligible', 'remarketing.message_sent')
+ * which MUST already exist in the target database (Stage-3 applies it to
+ * Production out-of-band, schema-first, via CREATE UNIQUE INDEX CONCURRENTLY).
+ * If the index is absent, PostgreSQL rejects the ON CONFLICT inference with
+ * SQLSTATE 42P10 ("there is no unique or exclusion constraint matching the
+ * ON CONFLICT specification") and the call fails loudly — by design.
+ *
+ * MINIMAL FORM (justified): one batched, idempotent
+ * `INSERT ... VALUES (...),(...) ON CONFLICT (...) WHERE ... DO NOTHING
+ * RETURNING action` is atomic on its own; the partial unique index is the
+ * concurrency authority. No BEGIN/COMMIT, no advisory lock, no FOR UPDATE —
+ * matching createPartnershipLeadInPostgres (Wave 4B) and the EMAIL-OPS-003
+ * `ON CONFLICT (svix_id) DO NOTHING` idempotency precedent.
+ *
+ * The primitive is deliberately NOT a generic audit inserter: `event` is a
+ * two-value union, `action` is derived internally (`remarketing.<stage>`), and
+ * `campaign` / `source` are the fixed Volta10 constants (pinned by a static
+ * test against server/remarketing-campaign.ts).
+ */
+const REMARKETING_VOLTA10_CAMPAIGN = 'whatsapp_remarketing_volta10';
+const REMARKETING_VOLTA10_SOURCE = 'whatsapp';
+
+export type RemarketingCampaignEventInput = {
+  event: 'eligible' | 'message_sent';
+  entries: Array<{ personKey: string; registrationIdReference: string }>;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type RemarketingCampaignEventResult = {
+  recordedByAction: { 'remarketing.eligible': number; 'remarketing.message_sent': number };
+};
+
+export async function recordRemarketingCampaignEventsInPostgres(
+  input: RemarketingCampaignEventInput,
+): Promise<RemarketingCampaignEventResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const recordedByAction: RemarketingCampaignEventResult['recordedByAction'] = {
+    'remarketing.eligible': 0,
+    'remarketing.message_sent': 0,
+  };
+
+  // event === 'message_sent' also backfills the 'eligible' stage for anyone not
+  // yet marked — a faithful port of the previous stages loop.
+  const stages: Array<'eligible' | 'message_sent'> =
+    input.event === 'message_sent' ? ['eligible', 'message_sent'] : ['eligible'];
+
+  const params: unknown[] = [];
+  const tuples: string[] = [];
+  let i = 1;
+  for (const entry of input.entries) {
+    for (const stage of stages) {
+      tuples.push(
+        `($${i++}, $${i++}, $${i++}, $${i++}, 'registration', $${i++}, $${i++}::jsonb, $${i++}, $${i++}, $${i++}, $${i++})`,
+      );
+      params.push(
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        `remarketing.${stage}`,
+        entry.registrationIdReference,
+        JSON.stringify({
+          campaign: REMARKETING_VOLTA10_CAMPAIGN,
+          source: REMARKETING_VOLTA10_SOURCE,
+          personKey: entry.personKey,
+          registrationIdReference: entry.registrationIdReference,
+        }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      );
+    }
+  }
+
+  if (!tuples.length) {
+    return { recordedByAction };
+  }
+
+  const result = await requirePool().query(
+    `insert into ${table.auditLogs}
+       (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+     values ${tuples.join(', ')}
+     on conflict (action, (payload->>'campaign'), (payload->>'personKey'))
+       where action in ('remarketing.eligible', 'remarketing.message_sent')
+       do nothing
+     returning action`,
+    params,
+  );
+
+  for (const row of result.rows) {
+    if (row.action === 'remarketing.eligible' || row.action === 'remarketing.message_sent') {
+      recordedByAction[row.action] += 1;
+    }
+  }
+  return { recordedByAction };
 }
 
 export type AuditLogAppendInput = {
