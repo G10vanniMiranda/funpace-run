@@ -7094,6 +7094,66 @@ export async function updatePartnershipStatusInPostgres(
   }
 }
 
+/**
+ * ADMIN-UX-RELIABILITY Wave 4B Stage 2 — narrow PostgreSQL persistence for the
+ * PUBLIC partnership-lead intake (POST /api/partnerships).
+ *
+ * Replaces the generic full-blob path in handleCreatePartnership
+ * (transaction<PartnershipLeadRecord>((db) => db.partnershipLeads.push(nextLead))
+ * — default scope:'all', persist:true -> readPostgresDatabase(scope='all') ->
+ * savePostgresDatabase(16-table upsert) -> commit, under
+ * pg_advisory_xact_lock('funpace-run-write')). An UNAUTHENTICATED endpoint was
+ * taking the GLOBAL write lock and round-tripping the whole dataset to append
+ * one row; this removes that contention from the public path.
+ *
+ * MINIMAL FORM (justified): lead creation is append-only with a fresh UUID PK —
+ * there is no existing row to lock and no multi-statement invariant, so a single
+ * parameterized INSERT is atomic on its own. No BEGIN/COMMIT, no lock_timeout,
+ * no FOR UPDATE. This matches the repository's canonical single-INSERT primitive
+ * appendAuditLogInPostgres (PROD-SAFETY-001): `getDatabaseConfigurationIssue()`
+ * guard, then one `requirePool().query(insert ... returning ...)`. It does NOT
+ * call ensurePostgresReady / ensureConfiguredLots, readPostgresDatabase,
+ * savePostgresDatabase, or acquire 'funpace-run-write'.
+ *
+ * Semantics are a faithful port of the previous in-memory handler: `id` is a
+ * fresh randomUUID(), `status` defaults to 'new', `source` to 'site',
+ * `createdAt`/`updatedAt` are the SAME ISO timestamp. Validation, the honeypot,
+ * the in-memory rate limit and the 201 response wording stay in the handler,
+ * unchanged. NO dedupe / uniqueness / idempotency / audit row is added or
+ * removed — the current no-dedupe, no-audit contract is preserved
+ * (follow-ups: PARTNERSHIP-LEAD-DEDUP-HARDENING, PARTNERSHIP-LEAD-AUDIT-GAP,
+ * PARTNERSHIP-LEAD-RATE-LIMIT-HARDENING).
+ */
+export type PartnershipLeadCreateInput = {
+  companyName: string;
+  contactName: string;
+  contactRole: string;
+  corporateEmail: string;
+  involvementMessage: string;
+};
+
+export async function createPartnershipLeadInPostgres(
+  input: PartnershipLeadCreateInput,
+): Promise<PartnershipLeadRecord> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const id = randomUUID();
+  const now = new Date().toISOString();
+
+  const result = await requirePool().query(
+    `insert into ${table.partnershipLeads}
+       (id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, 'new', 'site', $7, $7)
+     returning ${PARTNERSHIP_LEAD_COLUMNS}`,
+    [id, input.companyName, input.contactName, input.contactRole, input.corporateEmail, input.involvementMessage, now],
+  );
+
+  return mapPartnershipLeadRow(result.rows[0]);
+}
+
 export type AuditLogAppendInput = {
   actor?: string;
   actorRole?: string | null;
