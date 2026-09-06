@@ -443,6 +443,28 @@ export type AdminBibNumberResponse = {
   registration: AdminRegistration;
 };
 
+// PARTICIPANT-OPS-003 — administrative race distance correction. Same contract
+// shape as bib above: the server either changes the one registration row
+// (DISTANCE_UPDATED) or recognises the request as already-applied
+// (DISTANCE_UNCHANGED, HTTP 200, no audit row). NOT_ELIGIBLE (409),
+// TARGET_DISTANCE_NOT_FOUND (404), TARGET_DISTANCE_NOT_AVAILABLE (409) and
+// NOT_FOUND (404) arrive as HTTP errors carrying `code`; only the two success
+// outcomes are decoded into this shape.
+export type AdminRegistrationDistanceOutcome =
+  | 'DISTANCE_UPDATED'
+  | 'DISTANCE_UNCHANGED'
+  | 'NOT_ELIGIBLE'
+  | 'TARGET_DISTANCE_NOT_FOUND'
+  | 'TARGET_DISTANCE_NOT_AVAILABLE'
+  | 'NOT_FOUND';
+
+export type AdminRegistrationDistanceResponse = {
+  ok: boolean;
+  outcome: Extract<AdminRegistrationDistanceOutcome, 'DISTANCE_UPDATED' | 'DISTANCE_UNCHANGED'>;
+  message: string;
+  registration: AdminRegistration;
+};
+
 // ADMIN-UX-RELIABILITY Wave 3A — Admin event/distance configuration. Same
 // contract shape as bib/check-in/kit above: the server either changes the one
 // row (*_UPDATED) or recognises the request as already-applied (*_UNCHANGED,

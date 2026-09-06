@@ -6028,6 +6028,189 @@ export async function setRegistrationBibInPostgres(
 }
 
 /**
+ * PARTICIPANT-OPS-003 — narrow PostgreSQL primitive for an administrative race
+ * distance correction on ONE registration (POST
+ * /api/admin/registrations/:id/distance). Stage 1 preflight proved the change is
+ * financially inert (price is lot-based, no distance term in partner-discount /
+ * coupons, and the DB trigger protect_confirmed_partner_snapshot blocks any
+ * pricing/partner/coupon column change post-confirmation), lot/sold_count inert
+ * (calculateLotCapacity is lotId-scoped only — the row stays in the same lot),
+ * and bib inert (uniqueness is event-wide). The only canonical change is
+ * run-registrations.distance_id; payload.distance is the denormalized mirror the
+ * executive-dashboard lean scope reads, so it is kept consistent in the SAME
+ * UPDATE. One 'registration.distance_corrected' audit row is appended IFF the
+ * distance actually changes (same-distance request => UNCHANGED, no audit).
+ *
+ * Never routes through transaction() / savePostgresDatabase / the
+ * 'funpace-run-write' advisory lock / ensureConfiguredLots. Touches exactly one
+ * run-registrations row + one run-audit-logs row; run-lots / run-payments /
+ * run-check-ins / run-kit-deliveries / run-email-deliveries are never written.
+ */
+export type RegistrationDistanceCorrectionInput = {
+  registrationId: string;
+  targetDistanceId: string;
+  reason: string;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type RegistrationDistanceCorrectionResult =
+  | { status: 'not_found' }
+  | { status: 'not_eligible'; message: string }
+  | { status: 'target_not_found' }
+  | { status: 'target_not_available'; message: string }
+  | { status: 'unchanged'; distanceId: string }
+  | {
+      status: 'ok';
+      previousDistanceId: string;
+      previousDistanceLabel: string | null;
+      distanceId: string;
+      distanceLabel: string;
+    };
+
+export async function correctRegistrationDistanceInPostgres(
+  input: RegistrationDistanceCorrectionInput,
+): Promise<RegistrationDistanceCorrectionResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const targetResult = await client.query(
+      `select r.id, r.status, r.event_id, r.distance_id, r.payload,
+              current.name as current_distance_label
+         from ${table.registrations} r
+         left join ${table.distances} current on current.id = r.distance_id
+        where r.id = $1
+        for update of r`,
+      [input.registrationId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { status: 'not_found' };
+    }
+
+    const currentDistanceId = String(targetRow.distance_id);
+    const previousDistanceLabel: string | null = targetRow.current_distance_label ?? null;
+
+    // §14 — idempotent no-op: the canonical distance already IS the request.
+    // No UPDATE, no audit row; the handler answers HTTP 200 DISTANCE_UNCHANGED.
+    if (currentDistanceId === input.targetDistanceId) {
+      await client.query('rollback');
+      return { status: 'unchanged', distanceId: currentDistanceId };
+    }
+
+    if (String(targetRow.status) !== 'paid') {
+      await client.query('rollback');
+      return {
+        status: 'not_eligible',
+        message: 'Somente inscricoes pagas podem ter a prova corrigida.',
+      };
+    }
+
+    // Preflight guard: a checked-in or kitted participant is out of scope for the
+    // automated correction — it requires manual operational review.
+    const operationalResult = await client.query(
+      `select
+         exists(select 1 from ${table.checkIns} where registration_id = $1) as checked_in,
+         exists(select 1 from ${table.kitDeliveries} where registration_id = $1) as kit_delivered`,
+      [input.registrationId],
+    );
+    if (operationalResult.rows[0]?.checked_in || operationalResult.rows[0]?.kit_delivered) {
+      await client.query('rollback');
+      return {
+        status: 'not_eligible',
+        message: 'Inscricao ja realizou check-in ou retirou o kit; a correcao de prova exige revisao manual.',
+      };
+    }
+
+    const distanceResult = await client.query(
+      `select id, event_id, name, status from ${table.distances} where id = $1`,
+      [input.targetDistanceId],
+    );
+    const distanceRow = distanceResult.rows[0];
+    if (!distanceRow) {
+      await client.query('rollback');
+      return { status: 'target_not_found' };
+    }
+    if (String(distanceRow.event_id) !== String(targetRow.event_id)) {
+      await client.query('rollback');
+      return {
+        status: 'target_not_available',
+        message: 'A prova de destino pertence a outro evento.',
+      };
+    }
+    if (String(distanceRow.status) !== 'active') {
+      await client.query('rollback');
+      return {
+        status: 'target_not_available',
+        message: 'A prova de destino nao esta ativa.',
+      };
+    }
+
+    const distanceLabel = String(distanceRow.name);
+
+    await client.query(
+      `update ${table.registrations}
+          set distance_id = $2,
+              payload = jsonb_set(coalesce(payload, '{}'::jsonb), '{distance}', to_jsonb($3::text)),
+              updated_at = $4
+        where id = $1`,
+      [input.registrationId, input.targetDistanceId, distanceLabel, input.audit.createdAt],
+    );
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'registration.distance_corrected', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.registrationId,
+        JSON.stringify({
+          reason: input.reason,
+          before: { distanceId: currentDistanceId, distance: previousDistanceLabel },
+          after: { distanceId: input.targetDistanceId, distance: distanceLabel },
+        }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return {
+      status: 'ok',
+      previousDistanceId: currentDistanceId,
+      previousDistanceLabel,
+      distanceId: input.targetDistanceId,
+      distanceLabel,
+    };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * ADMIN-UX-RELIABILITY Wave 2B — narrow PostgreSQL mutations for the on-site
  * check-in flow (POST /api/admin/registrations/:id/check-in and the
  * undo-check-in branch of POST /api/admin/registrations/:id/undo-check-in).
