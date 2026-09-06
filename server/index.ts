@@ -68,6 +68,7 @@ import {
   correctRegistrationDistanceInPostgres,
   updatePartnershipStatusInPostgres,
   createPartnershipLeadInPostgres,
+  recordRemarketingCampaignEventsInPostgres,
   undoRegistrationCheckInInPostgres,
   undoRegistrationKitDeliveryInPostgres,
   updateLotConfigurationInPostgres,
@@ -4951,41 +4952,42 @@ async function handleAdminRemarketingCampaignEvent(req: IncomingMessage, res: Se
     json(res, 422, { message: event === 'message_sent' ? 'Informe de 1 a 500 inscriÃ§Ãµes com envio confirmado.' : 'O limite Ã© de 500 inscriÃ§Ãµes por chamada.' }); return;
   }
 
-  const result = await transaction((database) => {
-    const projections = selectCampaignProjections(database, registrationIds.length ? registrationIds : undefined);
-    const now = new Date().toISOString();
-    let recorded = 0;
-    for (const projection of projections) {
-      const stages: RemarketingCampaignManualEvent[] = event === 'message_sent' ? ['eligible', 'message_sent'] : ['eligible'];
-      for (const stage of stages) {
-        const action = `remarketing.${stage}`;
-        const duplicate = database.auditLogs.some((log) => log.action === action
-          && (log.payload as Record<string, unknown> | null)?.campaign === VOLTA10_REMARKETING_CAMPAIGN
-          && (log.payload as Record<string, unknown> | null)?.personKey === projection.personKey);
-        if (duplicate) continue;
-        database.auditLogs.push(createAuditLog(req, session, {
-          action,
-          entityType: 'registration',
-          entityId: projection.registrationIdReference,
-          payload: {
-            campaign: VOLTA10_REMARKETING_CAMPAIGN,
-            source: VOLTA10_REMARKETING_SOURCE,
-            personKey: projection.personKey,
-            registrationIdReference: projection.registrationIdReference,
-          },
-          createdAt: now,
-        }));
-        if (stage === event) recorded += 1;
-      }
-    }
-    return {
-      requested: registrationIds.length || projections.length,
-      accepted: projections.length,
-      rejected: Math.max((registrationIds.length || projections.length) - projections.length, 0),
-      recorded,
-      metrics: summarizeVolta10RemarketingCampaign(database),
-    };
-  }, { scope: 'admin-registrations' });
+  // ADMIN-UX-RELIABILITY Wave 4C — the manual campaign-funnel event no longer
+  // routes through the generic full-blob transaction() / savePostgresDatabase /
+  // 'funpace-run-write' path. It is: a read-only scoped load for the eligible
+  // cohort -> a narrow, DB-idempotent batched INSERT
+  // (recordRemarketingCampaignEventsInPostgres, deduped by the partial unique
+  // index run-audit-logs_remarketing_campaign_stage_idx, the concurrency
+  // authority) -> a second read-only scoped load to recompute the response
+  // metrics from the committed rows. RBAC / validation / the response shape are
+  // unchanged. These rows remain pure funnel evidence.
+  const projectionDatabase = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const projections = selectCampaignProjections(projectionDatabase, registrationIds.length ? registrationIds : undefined);
+
+  const { recordedByAction } = await recordRemarketingCampaignEventsInPostgres({
+    event: event as 'eligible' | 'message_sent',
+    entries: projections.map((projection) => ({
+      personKey: projection.personKey,
+      registrationIdReference: projection.registrationIdReference,
+    })),
+    audit: {
+      actor: session.actor,
+      actorRole: session.role,
+      sessionId: session.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
+      createdAt: new Date().toISOString(),
+    },
+  });
+
+  const metricsDatabase = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const result = {
+    requested: registrationIds.length || projections.length,
+    accepted: projections.length,
+    rejected: Math.max((registrationIds.length || projections.length) - projections.length, 0),
+    recorded: recordedByAction[`remarketing.${event}` as 'remarketing.eligible' | 'remarketing.message_sent'],
+    metrics: summarizeVolta10RemarketingCampaign(metricsDatabase),
+  };
   json(res, 200, result);
 }
 
