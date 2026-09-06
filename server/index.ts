@@ -67,6 +67,7 @@ import {
   setRegistrationBibInPostgres,
   correctRegistrationDistanceInPostgres,
   updatePartnershipStatusInPostgres,
+  createPartnershipLeadInPostgres,
   undoRegistrationCheckInInPostgres,
   undoRegistrationKitDeliveryInPostgres,
   updateLotConfigurationInPostgres,
@@ -2275,23 +2276,19 @@ async function handleCreatePartnership(req: IncomingMessage, res: ServerResponse
     return;
   }
 
-  const lead = await transaction<PartnershipLeadRecord>((database) => {
-    const now = new Date().toISOString();
-    const nextLead: PartnershipLeadRecord = {
-      id: randomUUID(),
-      companyName: payload.companyName,
-      contactName: payload.contactName,
-      contactRole: payload.contactRole,
-      corporateEmail: payload.corporateEmail,
-      involvementMessage: payload.involvementMessage,
-      status: 'new',
-      source: 'site',
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    database.partnershipLeads.push(nextLead);
-    return nextLead;
+  // ADMIN-UX-RELIABILITY Wave 4B Stage 2 — the public lead intake persists via a
+  // narrow single-INSERT primitive (createPartnershipLeadInPostgres) instead of
+  // the generic full-blob transaction() / savePostgresDatabase /
+  // 'funpace-run-write' path. Validation, the honeypot, the in-memory rate limit
+  // and the 201 wording above/below are unchanged; `status`/`source` defaults,
+  // the fresh UUID id and the single createdAt==updatedAt timestamp are a
+  // faithful port. No dedupe / uniqueness / idempotency / audit row is added.
+  const lead = await createPartnershipLeadInPostgres({
+    companyName: payload.companyName,
+    contactName: payload.contactName,
+    contactRole: payload.contactRole,
+    corporateEmail: payload.corporateEmail,
+    involvementMessage: payload.involvementMessage,
   });
 
   await notifyPartnershipTeam(lead);

@@ -174,7 +174,20 @@ test('no generic persist:true transaction() whose callback ONLY pushes to auditL
 // (one row's status + updated_at) + one run-audit-logs row — never
 // registrations / payments / lots / coupons / partner attribution / email.
 // The Stage 2A administrator-only RBAC is unchanged.
-const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 14, 'server/database.ts': 2 };
+//
+// ADMIN-UX-RELIABILITY Wave 4B Stage 2: 14 -> 13. handleCreatePartnership (the
+// PUBLIC POST /api/partnerships lead intake) delegates to the narrow
+// createPartnershipLeadInPostgres primitive and no longer wraps the append in a
+// generic full-blob transaction<PartnershipLeadRecord>((db) =>
+// db.partnershipLeads.push(...)) (default scope:'all', persist:true). An
+// unauthenticated endpoint was taking the global 'funpace-run-write' lock and
+// round-tripping the whole dataset to insert one row. Independent writer (no
+// sibling handler shares it), so exactly one removed. The primitive writes ONLY
+// run-partnership-leads (one INSERT) — no run-audit-logs (the current no-audit
+// contract is preserved), no registrations / payments / lots / partners /
+// coupons / email. Validation, honeypot, in-memory rate limit and 201 wording
+// stay in the handler, unchanged.
+const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 13, 'server/database.ts': 2 };
 
 function countFullBlobWriters(src: string): number {
   const lines = src.split('\n');

@@ -29,7 +29,9 @@ function handlerBlock(): string {
 
 function primitiveBlock(): string {
   const a = serverDatabase.indexOf('export type PartnershipStatusUpdateInput = {');
-  const b = serverDatabase.indexOf('export type AuditLogAppendInput = {', a);
+  // stop before the Wave 4B Stage 2 lead-create primitive inserted right after
+  // updatePartnershipStatusInPostgres.
+  const b = serverDatabase.indexOf('ADMIN-UX-RELIABILITY Wave 4B Stage 2 — narrow PostgreSQL persistence', a);
   assert.ok(a >= 0 && b > a, 'updatePartnershipStatusInPostgres block located');
   return serverDatabase.slice(a, b);
 }
