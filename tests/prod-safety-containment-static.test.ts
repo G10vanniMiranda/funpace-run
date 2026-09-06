@@ -164,7 +164,17 @@ test('no generic persist:true transaction() whose callback ONLY pushes to auditL
 // payment confirmation — it never touches registration.status, paid_at, or
 // any run-lots field; confirmPaymentInPostgres and
 // applyNonPaidPaymentWebhookInPostgres remain untouched.
-const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 15, 'server/database.ts': 2 };
+//
+// ADMIN-UX-RELIABILITY Wave 4A Stage 2B: 15 -> 14. handleAdminPartnershipStatus
+// delegates to the narrow updatePartnershipStatusInPostgres primitive and no
+// longer wraps the partnership-lead status change in a generic full-blob
+// transaction((db) => ..., {scope:'all', persist:true}). This was an independent
+// writer (not shared with any sibling handler), so this wave removes exactly
+// one. Stage 1 forensic: partnership-status writes only run-partnership-leads
+// (one row's status + updated_at) + one run-audit-logs row — never
+// registrations / payments / lots / coupons / partner attribution / email.
+// The Stage 2A administrator-only RBAC is unchanged.
+const FULL_BLOB_WRITER_BASELINE = { 'server/index.ts': 14, 'server/database.ts': 2 };
 
 function countFullBlobWriters(src: string): number {
   const lines = src.split('\n');

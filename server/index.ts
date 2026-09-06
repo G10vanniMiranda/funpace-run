@@ -66,6 +66,7 @@ import {
   deliverRegistrationKitInPostgres,
   setRegistrationBibInPostgres,
   correctRegistrationDistanceInPostgres,
+  updatePartnershipStatusInPostgres,
   undoRegistrationCheckInInPostgres,
   undoRegistrationKitDeliveryInPostgres,
   updateLotConfigurationInPostgres,
@@ -5352,31 +5353,36 @@ async function handleAdminPartnershipStatus(req: IncomingMessage, res: ServerRes
     return;
   }
 
-  const actor = adminSession.actor;
-  const result = await transaction<{ statusCode: number; payload: unknown }>((database) => {
-    const lead = database.partnershipLeads.find((item) => item.id === partnershipId);
-
-    if (!lead) {
-      return { statusCode: 404, payload: { message: 'Proposta de parceria nao encontrada.' } };
-    }
-
-    lead.status = nextStatus;
-    lead.updatedAt = new Date().toISOString();
-
-    database.auditLogs.push(createAuditLog(req, adminSession, {
-      actor,
-      action: 'partnership.status_updated',
-      entityType: 'partnership',
-      entityId: lead.id,
-      payload: { status: nextStatus },
+  // ADMIN-UX-RELIABILITY Wave 4A Stage 2B — the partnership-status mutation is a
+  // narrow, single-row PostgreSQL primitive (updatePartnershipStatusInPostgres):
+  // `select ... for update` on the one run-partnership-leads row, one appended
+  // 'partnership.status_updated' audit row IFF the status actually changes, and a
+  // same-status request is an idempotent HTTP 200 no-op (no UPDATE, no audit, no
+  // Sheet re-sync). It never routes through the generic full-blob transaction() /
+  // savePostgresDatabase / 'funpace-run-write' path. requireAdminDatabase() above
+  // already 503s outside Postgres mode, so there is no JSON-mode fallback here.
+  // The administrator-only RBAC (Stage 2A, already live) and the 422 enum check
+  // above are unchanged; the audit payload additionally carries previousStatus.
+  const outcome = await updatePartnershipStatusInPostgres({
+    partnershipId,
+    nextStatus,
+    audit: {
+      actor: adminSession.actor,
+      actorRole: adminSession.role,
+      sessionId: adminSession.id,
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req),
       createdAt: new Date().toISOString(),
-    }));
-
-    return { statusCode: 200, payload: { partnership: toAdminPartnershipLead(lead) } };
+    },
   });
 
-  json(res, result.statusCode, result.payload);
-  if (result.statusCode === 200) {
+  if (outcome.status === 'not_found') {
+    json(res, 404, { message: 'Proposta de parceria nao encontrada.' });
+    return;
+  }
+
+  json(res, 200, { partnership: toAdminPartnershipLead(outcome.lead) });
+  if (outcome.status === 'updated') {
     const task = await queuePartnershipGoogleSheetSync(partnershipId);
     if (task) await processGoogleSheetSync(task.id);
   }
