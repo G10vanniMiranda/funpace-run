@@ -6954,6 +6954,146 @@ export async function pingDatabase() {
   }
 }
 
+/**
+ * ADMIN-UX-RELIABILITY Wave 4A Stage 2B — narrow, single-row PostgreSQL mutation
+ * for the partnership-lead status change (POST /api/admin/partnerships/:id/status).
+ *
+ * Replaces the generic full-blob path in handleAdminPartnershipStatus
+ * (transaction((db) => { db.partnershipLeads.find(...).status = ...; ... },
+ * {scope:'all', persist:true}) -> readPostgresDatabase(scope='all') ->
+ * savePostgresDatabase(16-table upsert) -> commit, all under
+ * pg_advisory_xact_lock('funpace-run-write')) for a logical one-column update.
+ * Same defect class as EVENT-OPS-001 (lot config), ADMIN-UX-HOTFIX-003 (profile
+ * edit) and ADMIN-UX-RELIABILITY Waves 2A-3C.
+ *
+ * Touches ONLY run-partnership-leads (one row's `status` + `updated_at`) and
+ * run-audit-logs (one appended 'partnership.status_updated' row, IFF the status
+ * actually changes). It does NOT read the full dataset, acquire the
+ * 'funpace-run-write' advisory lock, call ensurePostgresReady / ensureConfiguredLots,
+ * or write registrations / payments / lots / coupons / partner attribution /
+ * email tables / other partnership rows.
+ *
+ * Business semantics are a faithful port of the previous in-memory handler: the
+ * allowed-status enum check stays in the handler (422 before this call, unchanged);
+ * there is no transition state machine (none existed); the audit action name
+ * 'partnership.status_updated' is unchanged. NEW (Stage 1 §K gap, strictly
+ * additive — no consumer parses this payload, only 'status' existed): the audit
+ * payload now also carries `previousStatus`. NEW: a request whose status already
+ * equals the authoritative status is an idempotent no-op — no UPDATE, no audit
+ * row, no Google Sheet re-sync — the handler answers HTTP 200 with the unchanged
+ * lead (response shape identical to a real transition).
+ *
+ * Concurrency: `select ... for update` on the target lead row serialises two
+ * concurrent status changes of the SAME lead (deterministic; each observes the
+ * freshest committed status after acquiring the lock). Different leads proceed
+ * fully in parallel — no global lock. local lock_timeout / statement_timeout
+ * bound a contended call.
+ */
+export type PartnershipStatusUpdateInput = {
+  partnershipId: string;
+  nextStatus: PartnershipLeadStatus;
+  audit: {
+    actor: string;
+    actorRole: string | null;
+    sessionId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    createdAt: string;
+  };
+};
+
+export type PartnershipStatusUpdateResult =
+  | { status: 'not_found' }
+  | { status: 'unchanged'; lead: PartnershipLeadRecord }
+  | { status: 'updated'; previousStatus: PartnershipLeadStatus; lead: PartnershipLeadRecord };
+
+function mapPartnershipLeadRow(row: Record<string, unknown>): PartnershipLeadRecord {
+  return {
+    id: String(row.id),
+    companyName: String(row.company_name),
+    contactName: String(row.contact_name),
+    contactRole: String(row.contact_role),
+    corporateEmail: String(row.corporate_email),
+    involvementMessage: String(row.involvement_message),
+    status: row.status as PartnershipLeadStatus,
+    source: String(row.source),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+const PARTNERSHIP_LEAD_COLUMNS =
+  'id, company_name, contact_name, contact_role, corporate_email, involvement_message, status, source, created_at, updated_at';
+
+export async function updatePartnershipStatusInPostgres(
+  input: PartnershipStatusUpdateInput,
+): Promise<PartnershipStatusUpdateResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) {
+    throw new Error(configurationIssue);
+  }
+
+  const client = await requirePool().connect();
+
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const targetResult = await client.query(
+      `select ${PARTNERSHIP_LEAD_COLUMNS} from ${table.partnershipLeads} where id = $1 for update`,
+      [input.partnershipId],
+    );
+    const targetRow = targetResult.rows[0];
+    if (!targetRow) {
+      await client.query('rollback');
+      return { status: 'not_found' };
+    }
+
+    const previousStatus = targetRow.status as PartnershipLeadStatus;
+
+    // §9 — idempotent no-op: the authoritative status already IS the requested
+    // one. No UPDATE, no audit row; the handler answers HTTP 200 with the
+    // unchanged lead.
+    if (previousStatus === input.nextStatus) {
+      await client.query('rollback');
+      return { status: 'unchanged', lead: mapPartnershipLeadRow(targetRow) };
+    }
+
+    const now = input.audit.createdAt;
+    const updatedResult = await client.query(
+      `update ${table.partnershipLeads} set status = $2, updated_at = $3 where id = $1
+       returning ${PARTNERSHIP_LEAD_COLUMNS}`,
+      [input.partnershipId, input.nextStatus, now],
+    );
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'partnership.status_updated', 'partnership', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(),
+        input.audit.actor,
+        input.audit.actorRole,
+        input.partnershipId,
+        JSON.stringify({ status: input.nextStatus, previousStatus }),
+        input.audit.sessionId,
+        input.audit.ipAddress,
+        input.audit.userAgent,
+        now,
+      ],
+    );
+
+    await client.query('commit');
+    return { status: 'updated', previousStatus, lead: mapPartnershipLeadRow(updatedResult.rows[0]) };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export type AuditLogAppendInput = {
   actor?: string;
   actorRole?: string | null;
