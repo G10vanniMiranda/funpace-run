@@ -53,6 +53,7 @@ import {
   type ProfileEditFormState,
 } from '../lib/admin-registration-edit';
 import { PartnersPanel } from '../components/admin/PartnersPanel';
+import { StartListCard } from '../components/admin/StartListPrint';
 import QRCode from 'qrcode';
 import {
   type AdminSession,
@@ -2250,6 +2251,10 @@ function OperationControlPanel({
             <OperationFilterButton active={statusFilter === 'checkin_pending'} label="Check-in pendente" onClick={() => setStatusFilter('checkin_pending')} />
             <OperationFilterButton active={statusFilter === 'completed'} label="Concluídos" onClick={() => setStatusFilter('completed')} />
           </div>
+        </div>
+
+        <div className="mt-4">
+          <StartListCard adminKey={adminKey} />
         </div>
 
         <div className="mt-4">

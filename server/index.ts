@@ -157,6 +157,13 @@ import {
 } from './registration-visibility.js';
 import { businessDateKey, businessDateKeysEndingToday, businessTodayKey, businessWeekStart } from './business-time.js';
 import { createExcelXml, createSimplePdf } from './report-export.js';
+import {
+  buildStartList,
+  normalizeStartListSort,
+  startListCsvCells,
+  type StartListSort,
+  type StartListSourceRow,
+} from './start-list.js';
 import { calculatePartnerPricing } from './partner-discount.js';
 import { calculateCouponPricing, normalizeCouponCode } from './coupons.js';
 import { readCookie, signPartnerSession, verifyPartnerSession } from './partner-session.js';
@@ -5535,6 +5542,98 @@ async function handleAdminReportExport(req: IncomingMessage, res: ServerResponse
   csv(res, 'funpace-relatorio.csv', [headers.map(escapeCsv).join(','), ...values.map((row) => row.map(escapeCsv).join(','))].join('\n'));
 }
 
+// EVENT-DAY-OFFLINE-FALLBACK & START-LIST — the printable / exportable event-day
+// roster. Dedicated read-only surface: it is NOT a preset on registrations.csv
+// (that handler 403s `operation` and carries 34 PII columns). RBAC is
+// administrator + operation; the response is a hand-built field allowlist
+// (server/start-list.ts); event scope is mandatory (reuses the dashboard's
+// resolver → 400 EVENT_* on missing / unknown / ambiguous). No write, no audit.
+function setStartListCacheHeaders(res: ServerResponse) {
+  res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+  res.setHeader('Vary', 'Cookie');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+}
+
+async function resolveStartListRequest(req: IncomingMessage, res: ServerResponse, url: URL) {
+  const session = await requireAdmin(req, res, ['administrator', 'operation']);
+  if (!session || !requireAdminDatabase(res)) return null;
+
+  const sort = normalizeStartListSort(url.searchParams.get('sort'));
+  if (sort === null) {
+    json(res, 400, { code: 'INVALID_SORT', message: 'Ordenacao invalida. Use sort=bib ou sort=name.' });
+    return null;
+  }
+
+  const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
+  const eventScope = resolveDashboardEventScope(res, database, url);
+  if (!eventScope) return null;
+
+  const sourceRows: StartListSourceRow[] = eventScope.scoped.registrations.map((registration) => {
+    const row = toAdminRow(eventScope.scoped, registration);
+    return {
+      id: row.id,
+      name: row.fullName,
+      cpfMasked: row.cpfMasked,
+      bibNumber: row.bibNumber,
+      distance: row.distance,
+      distanceId: row.distanceId,
+      shirtSize: row.shirtSize,
+      status: row.status,
+      checkInRecorded: row.checkInStatus === 'checked_in',
+      checkInAt: row.checkInAt,
+      kitRecorded: row.kitStatus === 'delivered',
+      kitAt: row.kitDeliveredAt,
+      personKey: registration.cpfHash ? `cpf:${registration.cpfHash}` : `id:${registration.id}`,
+    };
+  });
+
+  return { session, sort: sort as StartListSort, sourceRows, event: eventScope.context };
+}
+
+async function handleAdminStartList(req: IncomingMessage, res: ServerResponse, url: URL) {
+  const resolved = await resolveStartListRequest(req, res, url);
+  if (!resolved) return;
+  const list = buildStartList(resolved.sourceRows, { sort: resolved.sort });
+  setStartListCacheHeaders(res);
+  json(res, 200, {
+    event: resolved.event,
+    generatedAt: new Date().toISOString(),
+    sort: list.sort,
+    status: list.outcome.status,
+    releasable: list.outcome.releasable,
+    failures: list.outcome.failures,
+    warnings: list.outcome.warnings,
+    integrity: list.integrity,
+    contentHash: list.contentHash,
+    contentRef: list.contentRef,
+    rows: list.rows,
+  });
+}
+
+async function handleAdminStartListCsv(req: IncomingMessage, res: ServerResponse, url: URL) {
+  const resolved = await resolveStartListRequest(req, res, url);
+  if (!resolved) return;
+  const list = buildStartList(resolved.sourceRows, { sort: resolved.sort });
+  setStartListCacheHeaders(res);
+  if (list.outcome.status === 'blocked') {
+    json(res, 409, {
+      code: 'START_LIST_INTEGRITY_FAILED',
+      failures: list.outcome.failures,
+      integrity: list.integrity,
+    });
+    return;
+  }
+  const grid = startListCsvCells(list);
+  // UTF-8 BOM (U+FEFF) + CRLF so pt-BR Excel / Google Sheets / LibreOffice open
+  // it with correct accents and delimiter; every cell through the canonical
+  // escapeCsv (formula-injection guard + RFC-4180 quoting).
+  const body = `﻿${grid.map((cells) => cells.map(escapeCsv).join(',')).join('\r\n')}\r\n`;
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const slug = resolved.event.slug.replace(/[^a-z0-9-]/gi, '') || 'evento';
+  const order = list.sort === 'name' ? 'por-nome' : 'por-dorsal';
+  csv(res, `${slug}-lista-largada-${order}-${day}.csv`, body);
+}
+
 async function handleAdminPartnershipsCsv(req: IncomingMessage, res: ServerResponse) {
   if (!await requireAdmin(req, res)) {
     return;
@@ -5678,6 +5777,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/operation') { await handleAdminOperation(req, res, url); return; }
+
+    if (req.method === 'GET' && url.pathname === '/api/admin/start-list') { await handleAdminStartList(req, res, url); return; }
+    if (req.method === 'GET' && url.pathname === '/api/admin/start-list.csv') { await handleAdminStartListCsv(req, res, url); return; }
 
     if (req.method === 'GET' && url.pathname === '/api/admin/registrations.csv') {
       await handleAdminRegistrationsCsv(req, res, url);
