@@ -2749,9 +2749,17 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
       [now, input.providerPaymentId, input.providerTransactionId, input.gatewayStatus || 'paid', input.payload, row.payment_id],
     );
     if (!wasAlreadyPaid) {
+      // EVENT-DAY-REGISTRATION-CUTOFF-SAFETY-001: a confirmation for a checkout
+      // that pre-dated an operator cut-off must still settle (sold_count stays a
+      // truthful projection, the payment/registration still go paid) but it MUST
+      // NOT re-open sales. `inactive` is the operator-imposed closure state and
+      // is a fixed point here; `active` <-> `sold_out` remain capacity-derived.
+      // Mirrors the `... else status end` idiom already used by the cancel path
+      // and migration 20260713_phase2_reconciliation_and_capacity.sql.
       await client.query(
         `update ${table.lots} set sold_count = sold_count + 1,
            status = case
+             when status = 'inactive' then 'inactive'
              when sold_count + 1 >= capacity then 'sold_out'
              else 'active'
            end where id = $1`,
