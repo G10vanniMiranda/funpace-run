@@ -729,3 +729,44 @@ export type AdminPartnershipsResponse = {
 export type AdminPartnershipActionResponse = {
   partnership: AdminPartnershipLead;
 };
+
+// EVENT-DAY-OFFLINE-FALLBACK & START-LIST — printable/exportable event-day roster.
+export type StartListSort = 'bib' | 'name';
+
+export type StartListRow = {
+  bib: string;
+  hasBib: boolean;
+  name: string;
+  cpfMasked: string;
+  distance: string;
+  distanceKnown: boolean;
+  shirtSize: string;
+  paid: 'SIM';
+  checkIn: { recorded: boolean; at: string | null };
+  kit: { recorded: boolean; at: string | null };
+  registrationId: string;
+};
+
+export type StartListIntegrity = {
+  totalPaid: number;
+  paidWithBib: number;
+  paidWithoutBib: number;
+  duplicateBibCount: number;
+  forbiddenKitWithoutCheckInCount: number;
+  paidIdentityReviewCount: number;
+  invalidDistanceCount: number;
+};
+
+export type AdminStartListResponse = {
+  event: { id: string; slug: string; name: string; status: string; date: string };
+  generatedAt: string;
+  sort: StartListSort;
+  status: 'final' | 'provisional' | 'blocked';
+  releasable: boolean;
+  failures: string[];
+  warnings: string[];
+  integrity: StartListIntegrity;
+  contentHash: string;
+  contentRef: string;
+  rows: StartListRow[];
+};

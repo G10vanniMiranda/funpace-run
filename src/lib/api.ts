@@ -619,6 +619,20 @@ export function getAdminOperation(adminKey: string, filters: Record<string, stri
   return adminFetch<AdminOperationResponse>(`/api/admin/operation${toQueryString(filters)}`, adminKey);
 }
 
+// EVENT-DAY-OFFLINE-FALLBACK & START-LIST — the printable / exportable event-day
+// roster. Event-scoped (?event=), administrator + operation. The response is a
+// hand-built field allowlist (no email/phone/full CPF/financials); the CSV is a
+// no-store attachment. Read-only: never mutates.
+export function getAdminStartList(adminKey: string, params: { sort: import('../types/registration').StartListSort }) {
+  return adminFetch<import('../types/registration').AdminStartListResponse>(
+    `/api/admin/start-list${toQueryString({ event: currentEventParam(), sort: params.sort })}`,
+    adminKey,
+  );
+}
+export function getAdminStartListCsvUrl(params: { sort: import('../types/registration').StartListSort }) {
+  return getApiUrl(`/api/admin/start-list.csv${toQueryString({ event: currentEventParam(), sort: params.sort })}`);
+}
+
 export function getAdminEventConfig(adminKey: string) { return adminFetch<AdminEventConfig>('/api/admin/event-config', adminKey); }
 // ADMIN-UX-RELIABILITY Wave 3A — narrow event/distance config mutation on the
 // established reliability contract: no auto-retry (an ambiguous network commit
