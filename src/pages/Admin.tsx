@@ -187,6 +187,14 @@ const formatCount = (value: number | undefined) => integerFormatter.format(Numbe
 // absence and show a neutral placeholder instead of `R$ NaN`.
 const formatCentsBRL = (cents: number | null | undefined) =>
   typeof cents === 'number' && Number.isFinite(cents) ? currencyFormatter.format(cents / 100) : '—';
+// EVENT-DAY CHECK-IN HISTORY UX — the operator floor works in Porto Velho time.
+// Reuses the existing check-in / kit timestamps (registration.checkInAt /
+// kitDeliveredAt) already returned by /api/admin/operation; no new state.
+const formatOperationTime = (value: string | null | undefined) => {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : businessDateTimeFormatter.format(date);
+};
 
 // ADMIN-002 Stage 7B §13 — lot capacity status carries text, never colour alone.
 export const LOT_LEVEL_LABEL: Record<string, string> = {
@@ -2178,7 +2186,11 @@ function OperationControlPanel({
   onRefreshAdminData: () => void;
 }) {
   const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'kit_pending' | 'checkin_pending' | 'completed'>('all');
+  // EVENT-DAY CHECK-IN HISTORY UX — four read-only views over the same check-in /
+  // kit authority. `checked_in` / `kit_delivered` are new server filters that
+  // read run-check-ins / run-kit-deliveries via toAdminRow; no new writer.
+  const [statusFilter, setStatusFilter] = useState<'all' | 'checkin_pending' | 'checked_in' | 'kit_delivered'>('all');
+  const operationSort = statusFilter === 'checked_in' || statusFilter === 'kit_delivered' ? 'recent' : '';
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanError, setScanError] = useState('');
   const [operationRows, setOperationRows] = useState<AdminRegistration[]>([]);
@@ -2190,10 +2202,10 @@ function OperationControlPanel({
   const [quickActionDraft, setQuickActionDraft] = useState<{ registration: AdminRegistration; action: 'check-in' | 'kit'; notes: string } | null>(null);
   useEffect(() => {
     const timeout = window.setTimeout(() => {
-      void getAdminOperation(adminKey, { q: query, filter: statusFilter, page: String(operationPage), pageSize: '25' }).then((response) => { setOperationRows(response.registrations); setOperationTotals(response.totals); setOperationPagination(response.pagination); });
+      void getAdminOperation(adminKey, { q: query, filter: statusFilter, sort: operationSort, page: String(operationPage), pageSize: '25' }).then((response) => { setOperationRows(response.registrations); setOperationTotals(response.totals); setOperationPagination(response.pagination); });
     }, 250);
     return () => window.clearTimeout(timeout);
-  }, [adminKey, query, statusFilter, operationPage]);
+  }, [adminKey, query, statusFilter, operationSort, operationPage]);
   useEffect(() => { setOperationPage(1); }, [query, statusFilter]);
 
   const quickAction = async (registration: AdminRegistration, action: 'check-in' | 'kit') => {
@@ -2206,7 +2218,7 @@ function OperationControlPanel({
     try {
       const response = quickActionDraft.action === 'check-in' ? await checkInAdminRegistration(adminKey, quickActionDraft.registration.id, quickActionDraft.notes) : await deliverAdminKit(adminKey, quickActionDraft.registration.id, quickActionDraft.notes);
       onRegistrationUpdated(response.registration);
-      const refreshed = await getAdminOperation(adminKey, { q: query, filter: statusFilter, page: String(operationPage), pageSize: '25' });
+      const refreshed = await getAdminOperation(adminKey, { q: query, filter: statusFilter, sort: operationSort, page: String(operationPage), pageSize: '25' });
       setOperationRows(refreshed.registrations); setOperationTotals(refreshed.totals); setOperationPagination(refreshed.pagination);
       setQuickActionDraft(null);
       await onRefreshAdminData();
@@ -2226,11 +2238,14 @@ function OperationControlPanel({
   return (
     <section className="mt-4 grid gap-4 xl:grid-cols-[0.72fr_1.28fr]">
       <Panel title="Controle presencial" eyebrow="Operação">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <MetricBox label="Aptos para operação" value={operationTotals.paid} detail="Inscrições pagas" />
-          <MetricBox label="Kit pendente" value={operationTotals.kitPending} detail="Ainda não retirado" tone={operationTotals.kitPending > 0 ? 'warning' : 'default'} />
-          <MetricBox label="Check-in pendente" value={operationTotals.checkInPending} detail="Ainda não realizado" tone={operationTotals.checkInPending > 0 ? 'warning' : 'default'} />
-          <MetricBox label="Concluídos" value={operationTotals.completed} detail="Kit + check-in" />
+        {/* EVENT-DAY CHECK-IN HISTORY UX — counters from the current authority.
+            Invariants: PENDENTES = PAGOS − CHECK-INS; KITS ENTREGUES ≤ CHECK-INS
+            (kit delivery requires check-in). */}
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <MetricBox label="Total pagos" value={operationTotals.paid} detail="Inscrições pagas" />
+          <MetricBox label="Pendentes" value={operationTotals.checkInPending} detail="Sem check-in" tone={operationTotals.checkInPending > 0 ? 'warning' : 'default'} />
+          <MetricBox label="Check-ins" value={operationTotals.paid - operationTotals.checkInPending} detail="Presença registrada" />
+          <MetricBox label="Kits entregues" value={operationTotals.completed} detail="Após check-in" />
         </div>
 
         <div className="mt-4 border border-white/10 bg-black/35 p-4">
@@ -2245,11 +2260,13 @@ function OperationControlPanel({
             />
           </div>
           <button type="button" onClick={() => { setScanError(''); setScannerOpen(true); }} className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 bg-brand px-4 text-xs font-black uppercase text-black"><ScanLine className="h-4 w-4" /> Ler QR Code</button>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            <OperationFilterButton active={statusFilter === 'all'} label="Todos pagos" onClick={() => setStatusFilter('all')} />
-            <OperationFilterButton active={statusFilter === 'kit_pending'} label="Kit pendente" onClick={() => setStatusFilter('kit_pending')} />
-            <OperationFilterButton active={statusFilter === 'checkin_pending'} label="Check-in pendente" onClick={() => setStatusFilter('checkin_pending')} />
-            <OperationFilterButton active={statusFilter === 'completed'} label="Concluídos" onClick={() => setStatusFilter('completed')} />
+          {/* EVENT-DAY CHECK-IN HISTORY UX — the four operational views, each with a
+              live count. Big touch targets, wraps on small screens. */}
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <OperationFilterButton active={statusFilter === 'checkin_pending'} label="Pendentes" count={operationTotals.checkInPending} onClick={() => setStatusFilter('checkin_pending')} />
+            <OperationFilterButton active={statusFilter === 'checked_in'} label="Check-in realizado" count={operationTotals.paid - operationTotals.checkInPending} onClick={() => setStatusFilter('checked_in')} />
+            <OperationFilterButton active={statusFilter === 'kit_delivered'} label="Kit entregue" count={operationTotals.completed} onClick={() => setStatusFilter('kit_delivered')} />
+            <OperationFilterButton active={statusFilter === 'all'} label="Todos" count={operationTotals.paid} onClick={() => setStatusFilter('all')} />
           </div>
         </div>
 
@@ -2318,20 +2335,24 @@ function QrScannerModal({ error, onDetected, onClose }: { error: string; onDetec
 function OperationFilterButton({
   active,
   label,
+  count,
   onClick,
 }: {
   active: boolean;
   label: string;
+  count?: number;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
-      className={`min-h-10 border px-3 text-left text-xs font-black uppercase tracking-widest transition-colors ${active ? 'border-brand bg-brand text-black' : 'border-white/10 bg-white/3 text-zinc-300 hover:border-brand hover:text-brand'
+      className={`flex min-h-12 flex-col justify-center border px-3 py-2 text-left text-[11px] font-black uppercase tracking-widest transition-colors ${active ? 'border-brand bg-brand text-black' : 'border-white/10 bg-white/3 text-zinc-300 hover:border-brand hover:text-brand'
         }`}
     >
-      {label}
+      <span>{label}</span>
+      {typeof count === 'number' && <span className="mt-0.5 text-base leading-none">{count}</span>}
     </button>
   );
 }
@@ -2351,51 +2372,42 @@ function OperationalQueue({
     return <EmptyState />;
   }
 
+  // EVENT-DAY CHECK-IN HISTORY UX — a responsive card list (no horizontal-scroll
+  // table). Dorsal + name always visible; check-in / kit state and their
+  // timestamps read straight from the registration row. Actions stay large.
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-190 text-left">
-        <thead className="bg-black/50 text-xs uppercase tracking-widest text-zinc-500">
-          <tr>
-            <th className="p-3">Atleta</th>
-            <th className="p-3">Prova</th>
-            <th className="p-3">Kit</th>
-            <th className="p-3">Check-in</th>
-            <th className="p-3 text-right">Acao</th>
-          </tr>
-        </thead>
-        <tbody>
-          {registrations.map((registration) => (
-            <tr key={registration.id} className="border-t border-white/10">
-              <td className="p-3">
-                <p className="font-bold">{registration.fullName}</p>
-                <p className="mt-1 font-mono text-xs text-zinc-500">{registration.cpfMasked}</p>
-                {registration.bibNumber && <p className="mt-1 text-xs font-black uppercase text-brand">Peito {registration.bibNumber}</p>}
-              </td>
-              <td className="p-3 text-sm font-bold text-zinc-300">{registration.distance} / camisa {registration.shirtSize}</td>
-              <td className="p-3 text-xs font-black uppercase tracking-widest text-zinc-400">
-                {registration.kitStatus === 'delivered' ? 'Entregue' : 'Pendente'}
-              </td>
-              <td className="p-3 text-xs font-black uppercase tracking-widest text-zinc-400">
-                {registration.checkInStatus === 'checked_in' ? 'Realizado' : 'Pendente'}
-              </td>
-              <td className="p-3 text-right">
-                <div className="mb-2 flex justify-end gap-1">
-                  {registration.kitStatus !== 'delivered' && <button type="button" disabled={busyAction !== ''} onClick={() => void onQuickAction(registration, 'kit')} className="border border-white/10 px-2 py-1 text-[10px] font-black uppercase text-zinc-300 disabled:opacity-30">Kit</button>}
-                  {registration.checkInStatus !== 'checked_in' && <button type="button" disabled={busyAction !== ''} onClick={() => void onQuickAction(registration, 'check-in')} className="border border-brand/30 px-2 py-1 text-[10px] font-black uppercase text-brand disabled:opacity-30">Check-in</button>}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onOpenRegistration(registration)}
-                  className="inline-flex min-h-10 items-center gap-2 border border-white/10 px-3 text-xs font-black uppercase tracking-widest text-zinc-200 transition-colors hover:border-brand hover:text-brand"
-                >
-                  <Eye className="h-4 w-4" /> Abrir
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <ul className="space-y-2">
+      {registrations.map((registration) => {
+        const checkedIn = registration.checkInStatus === 'checked_in';
+        const kitDelivered = registration.kitStatus === 'delivered';
+        return (
+          <li key={registration.id} className="border border-white/10 bg-black/35 p-3">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              {registration.bibNumber
+                ? <span className="text-lg font-black uppercase text-brand">#{registration.bibNumber}</span>
+                : <span className="text-xs font-black uppercase text-zinc-500">Sem dorsal</span>}
+              <span className="text-base font-bold">{registration.fullName}</span>
+            </div>
+            <p className="mt-1 text-sm text-zinc-400">{registration.distance} · camisa {registration.shirtSize} · <span className="font-mono text-xs text-zinc-500">{registration.cpfMasked}</span></p>
+            <div className="mt-2 flex flex-wrap gap-2 text-[11px] font-black uppercase tracking-widest">
+              <span className={`border px-2 py-1 ${checkedIn ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-white/10 text-zinc-500'}`}>
+                {checkedIn ? `Check-in ${formatOperationTime(registration.checkInAt)}` : 'Check-in pendente'}
+              </span>
+              <span className={`border px-2 py-1 ${kitDelivered ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-white/10 text-zinc-500'}`}>
+                {kitDelivered ? `Kit ${formatOperationTime(registration.kitDeliveredAt)}` : 'Kit pendente'}
+              </span>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {!checkedIn && <button type="button" disabled={busyAction !== ''} onClick={() => void onQuickAction(registration, 'check-in')} className="min-h-11 flex-1 border border-brand/40 px-3 text-xs font-black uppercase text-brand disabled:opacity-30">Registrar check-in</button>}
+              {!kitDelivered && <button type="button" disabled={busyAction !== ''} onClick={() => void onQuickAction(registration, 'kit')} className="min-h-11 flex-1 border border-white/15 px-3 text-xs font-black uppercase text-zinc-200 disabled:opacity-30">Entregar kit</button>}
+              <button type="button" onClick={() => onOpenRegistration(registration)} className="inline-flex min-h-11 items-center justify-center gap-2 border border-white/10 px-3 text-xs font-black uppercase tracking-widest text-zinc-200 transition-colors hover:border-brand hover:text-brand">
+                <Eye className="h-4 w-4" /> Abrir
+              </button>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

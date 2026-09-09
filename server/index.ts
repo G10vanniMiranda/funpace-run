@@ -5051,16 +5051,32 @@ async function handleAdminOperation(req: IncomingMessage, res: ServerResponse, u
   const database = await transaction((current) => current, { persist: false, scope: 'admin-registrations' });
   const query = (url.searchParams.get('q') || '').trim().toLowerCase();
   const filter = url.searchParams.get('filter') || 'all';
+  // EVENT-DAY CHECK-IN HISTORY UX: `checked_in` / `kit_delivered` are read-only
+  // views over the SAME check-in / kit authority (toAdminRow derives
+  // checkInStatus/kitStatus from run-check-ins / run-kit-deliveries rows). No new
+  // state, no new writer. `sort=recent` orders by the existing checkInAt /
+  // kitDeliveredAt timestamp so the operator sees the latest first.
+  const sort = url.searchParams.get('sort') === 'recent' ? 'recent' : 'name';
   const allPaid = database.registrations.filter((item) => item.status === 'paid').map((item) => toAdminRow(database, item));
   const rows = allPaid.filter((row) => {
     if (filter === 'kit_pending' && row.kitStatus === 'delivered') return false;
     if (filter === 'checkin_pending' && row.checkInStatus === 'checked_in') return false;
+    if (filter === 'checked_in' && row.checkInStatus !== 'checked_in') return false;
+    if (filter === 'kit_delivered' && row.kitStatus !== 'delivered') return false;
     if (filter === 'completed' && !(row.kitStatus === 'delivered' && row.checkInStatus === 'checked_in')) return false;
     // ADMIN-003 Stage 3: search still runs over the full row (search-data access
     // != response-data disclosure); the response below is role-minimised.
     if (query && ![row.id, row.fullName, row.email, row.phone, row.cpfMasked, row.bibNumber || ''].some((value) => value.toLowerCase().includes(query))) return false;
     return true;
-  }).sort((a, b) => a.fullName.localeCompare(b.fullName, 'pt-BR'));
+  }).sort((a, b) => {
+    if (sort === 'recent') {
+      const at = filter === 'kit_delivered' ? a.kitDeliveredAt : a.checkInAt;
+      const bt = filter === 'kit_delivered' ? b.kitDeliveredAt : b.checkInAt;
+      const recent = String(bt || '').localeCompare(String(at || ''));
+      if (recent !== 0) return recent;
+    }
+    return a.fullName.localeCompare(b.fullName, 'pt-BR');
+  });
   const pageSize = Math.min(Math.max(Number(url.searchParams.get('pageSize') || 25), 1), 100);
   const totalPages = Math.max(Math.ceil(rows.length / pageSize), 1); const page = Math.min(Math.max(Number(url.searchParams.get('page') || 1), 1), totalPages);
   json(res, 200, {
