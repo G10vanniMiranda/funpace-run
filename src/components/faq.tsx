@@ -17,6 +17,18 @@ const faqs = [
     answer: 'O local, a data e o horário para a retirada dos kits serão divulgados aproximadamente 1 semana antes do evento. Todas as informações oficiais serão publicadas em nossos canais de comunicação e enviadas aos atletas inscritos. Fique atento ao seu e-mail e às redes sociais da Funpace para acompanhar as atualizações.',
   },
   {
+    question: 'Posso participar apenas do After?',
+    answer: 'Sim. Quem quiser participar somente do After paga o valor normal do ingresso/inscrição vigente.',
+  },
+  {
+    question: 'Posso participar apenas da corrida?',
+    answer: 'Sim. Quem quiser participar somente da corrida paga o valor normal da inscrição vigente.',
+  },
+  {
+    question: 'Quero participar da corrida, mas não quero o kit. Quanto custa?',
+    answer: 'Existe a opção de participar da corrida sem o kit do atleta, pelo valor de R$ 89,90.',
+  },
+  {
     question: 'Teremos guarda-volumes no local da prova?',
     answer: 'Não. O evento não contará com serviço de guarda-volumes. Recomendamos que os participantes levem apenas itens essenciais para a prova e evitem portar objetos de valor. A organização não se responsabiliza por pertences deixados no local do evento.',
   },
