@@ -91,6 +91,118 @@ test('does not churn managed conditional formatting, banding or protection when 
   assert.equal(second.some((item) => 'addConditionalFormatRule' in item || 'deleteConditionalFormatRule' in item), false);
 });
 
+// GOOGLE-SHEETS-BANDING-IDEMPOTENCY-001 ---------------------------------------
+// Reproduces the exact live incident (confirmed_payments columnCount 19 -> 20:
+// "Invalid requests[41].addBanding: You cannot add alternating background
+// colors to a range that already has alternating background colors.") and
+// proves the fix for every case in the brief.
+
+// The banding the deployed code creates from scratch for a fresh sheet -
+// captured once, reused as the "already-managed" fixture across the tests
+// below, exactly like the pattern above.
+function freshConfirmedPaymentsBanding(rowCount = 1000) {
+  const requests = buildGoogleSheetLayoutRequests('confirmed_payments', 99, {
+    properties: { sheetId: 99, gridProperties: { rowCount } },
+  }, 'service@example.com');
+  return (requests.find((item) => 'addBanding' in item) as any).addBanding.bandedRange;
+}
+
+test('A. exact matching banding -> no duplication (no addBanding, no updateBanding)', () => {
+  const managed = freshConfirmedPaymentsBanding();
+  const actual: ActualGoogleSheetLayout = {
+    properties: { sheetId: 99, gridProperties: { rowCount: 1000, columnCount: 20 } },
+    bandedRanges: [{ ...managed, bandedRangeId: 501 }],
+  };
+  const requests = buildGoogleSheetLayoutRequests('confirmed_payments', 99, actual, 'service@example.com');
+  assert.equal(requests.some((item) => 'addBanding' in item || 'updateBanding' in item), false);
+});
+
+test('B. existing banding at the OLD 19-column extent -> UPDATE/EXTEND, never ADD', () => {
+  const managed = freshConfirmedPaymentsBanding();
+  const staleBanding = { ...managed, range: { ...managed.range, endColumnIndex: 19 } }; // the live incident's exact shape
+  const actual: ActualGoogleSheetLayout = {
+    properties: { sheetId: 99, gridProperties: { rowCount: 1000, columnCount: 26 } }, // real sheet keeps its original 26-col grid
+    bandedRanges: [{ ...staleBanding, bandedRangeId: 1025127700 }], // real production bandedRangeId from the incident
+  };
+  const requests = buildGoogleSheetLayoutRequests('confirmed_payments', 99, actual, 'service@example.com');
+  assert.equal(requests.some((item) => 'addBanding' in item), false, 'must never issue addBanding over an overlapping existing range');
+  const update = requests.find((item) => 'updateBanding' in item) as any;
+  assert.ok(update, 'must issue updateBanding to extend the existing range');
+  assert.equal(update.updateBanding.bandedRange.bandedRangeId, 1025127700, 'must preserve the existing bandedRangeId');
+  assert.equal(update.updateBanding.bandedRange.range.endColumnIndex, 20, 'must extend to the new columnCount');
+  assert.deepEqual(update.updateBanding.bandedRange.rowProperties, managed.rowProperties, 'must preserve the existing visual appearance (same colors)');
+  assert.equal(update.updateBanding.fields, 'range,rowProperties');
+});
+
+test('C. a second run after the extension is a NO-OP (idempotent)', () => {
+  const managed = freshConfirmedPaymentsBanding();
+  const staleBanding = { ...managed, range: { ...managed.range, endColumnIndex: 19 } };
+  const first = buildGoogleSheetLayoutRequests('confirmed_payments', 99, {
+    properties: { sheetId: 99, gridProperties: { rowCount: 1000, columnCount: 26 } },
+    bandedRanges: [{ ...staleBanding, bandedRangeId: 1025127700 }],
+  }, 'service@example.com');
+  const applied = (first.find((item) => 'updateBanding' in item) as any).updateBanding.bandedRange;
+
+  // Simulate the real Sheets API now reporting the range as updated.
+  const second = buildGoogleSheetLayoutRequests('confirmed_payments', 99, {
+    properties: { sheetId: 99, gridProperties: { rowCount: 1000, columnCount: 26 } },
+    bandedRanges: [applied],
+  }, 'service@example.com');
+  assert.equal(second.some((item) => 'addBanding' in item || 'updateBanding' in item), false);
+});
+
+test('D. a tab with no banding at all -> ADD works normally', () => {
+  const requests = buildGoogleSheetLayoutRequests('confirmed_payments', 99, {
+    properties: { sheetId: 99, gridProperties: { rowCount: 1000, columnCount: 20 } },
+    bandedRanges: [],
+  }, 'service@example.com');
+  const added = requests.filter((item) => 'addBanding' in item);
+  assert.equal(added.length, 1);
+  assert.equal(requests.some((item) => 'updateBanding' in item), false);
+});
+
+test('E. an unrelated banding elsewhere on the sheet is never adopted or overwritten', () => {
+  const managed = freshConfirmedPaymentsBanding();
+  const unrelated = {
+    range: { sheetId: 99, startRowIndex: 0, endRowIndex: 5, startColumnIndex: 15, endColumnIndex: 18 },
+    rowProperties: managed.rowProperties,
+    bandedRangeId: 777, // an operator's own decorative banding somewhere else on the tab
+  };
+  const requests = buildGoogleSheetLayoutRequests('confirmed_payments', 99, {
+    properties: { sheetId: 99, gridProperties: { rowCount: 1000, columnCount: 20 } },
+    bandedRanges: [unrelated],
+  }, 'service@example.com');
+  assert.equal(requests.some((item) => 'updateBanding' in item && (item as any).updateBanding.bandedRange.bandedRangeId === 777), false);
+  const added = requests.find((item) => 'addBanding' in item) as any;
+  assert.ok(added, 'the managed banding is still added fresh, independent of the unrelated one');
+  assert.notEqual(added.addBanding.bandedRange.range.startColumnIndex, unrelated.range.startColumnIndex);
+});
+
+test('F. ambiguous candidates (two bandings sharing the managed corner) -> fail-safe, never guess', () => {
+  const managed = freshConfirmedPaymentsBanding();
+  const candidateA = { ...managed, range: { ...managed.range, endColumnIndex: 19 }, bandedRangeId: 1 };
+  const candidateB = { ...managed, range: { ...managed.range, endColumnIndex: 15 }, bandedRangeId: 2 };
+  assert.throws(() => buildGoogleSheetLayoutRequests('confirmed_payments', 99, {
+    properties: { sheetId: 99, gridProperties: { rowCount: 1000, columnCount: 26 } },
+    bandedRanges: [candidateA, candidateB],
+  }, 'service@example.com'), /AMBIGUOUS_MANAGED_BANDING:confirmed_payments/);
+});
+
+test('G. the column-count fix does not disturb any other declared layout property', () => {
+  const managed = freshConfirmedPaymentsBanding();
+  const staleBanding = { ...managed, range: { ...managed.range, endColumnIndex: 19 }, bandedRangeId: 1025127700 };
+  const requests = buildGoogleSheetLayoutRequests('confirmed_payments', 99, {
+    properties: { sheetId: 99, gridProperties: { rowCount: 1000, columnCount: 26 } },
+    bandedRanges: [staleBanding],
+  }, 'service@example.com');
+  assert.ok(requests.some((item) => 'updateSheetProperties' in item));
+  assert.ok(requests.some((item) => 'setBasicFilter' in item));
+  assert.equal(requests.filter((item) => 'updateDimensionProperties' in item).length, 22);
+  assert.equal(requests.filter((item) => 'updateCells' in item).length, 3);
+  assert.ok(requests.some((item) => 'addProtectedRange' in item));
+  assert.equal(requests.filter((item) => 'addBanding' in item || 'updateBanding' in item).length, 1);
+});
+
 // --- RELEASE-04 Stage 1: canonical colour precision -------------------------
 
 test('treats Google float colour serialization as equal and does not re-churn', () => {
