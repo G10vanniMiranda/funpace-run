@@ -55,7 +55,15 @@ export const GOOGLE_SHEET_HEADERS = {
   partnerships: ['Empresa', 'Contato', 'Cargo', 'E-mail', 'Status', 'Origem', 'Criado em', 'ID'],
   emails: ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro', 'Delivery ID'],
   remarketing: ['person_key', 'registration_id_reference', 'full_name', 'whatsapp', 'email', 'cpf_masked', 'first_registration_at', 'last_registration_at', 'last_payment_attempt_at', 'amount', 'lot', 'distance', 'registration_status', 'payment_status', 'attempt_count', 'checkout_count', 'partner_or_origin', 'remarketing_status', 'eligible', 'suppression_reason', 'last_payment_check_at', 'updated_at'],
-  confirmed_payments: ['Data do pagamento', 'Nome completo', 'CPF parcial', 'WhatsApp', 'E-mail', 'Distância', 'Camisa', 'Lote', 'Número de peito', 'Valor pago', 'Meio de pagamento', 'Parceiro', 'Tipo de parceiro', 'Origem de aquisição', 'Cupom', 'Desconto', 'ID da inscrição', 'ID do pagamento', 'Provider'],
+  // GOOGLE-SHEETS-SEX-001 — 'Sexo' appended LAST (not inserted next to 'E-mail'
+  // like the 'Inscrições' tab) so every existing columnIndex reference in
+  // google-sheets-layout.ts's `confirmed_payments` entry (hiddenColumns,
+  // numberFormats, headerNotes — all pointing at columns 0-18) stays correct
+  // without renumbering. ensureSpreadsheetStructure() fails closed on ANY header
+  // mismatch (`Cabeçalho inesperado`), so the live 'Pagamentos Confirmados'
+  // header row MUST be updated to append 'Sexo' before/at the same moment this
+  // deploys — see the release's backfill/resync plan.
+  confirmed_payments: ['Data do pagamento', 'Nome completo', 'CPF parcial', 'WhatsApp', 'E-mail', 'Distância', 'Camisa', 'Lote', 'Número de peito', 'Valor pago', 'Meio de pagamento', 'Parceiro', 'Tipo de parceiro', 'Origem de aquisição', 'Cupom', 'Desconto', 'ID da inscrição', 'ID do pagamento', 'Provider', 'Sexo'],
 } as const;
 
 export const LEGACY_EMAIL_SHEET_HEADERS = ['Data', 'Inscrição', 'Destinatário', 'Status', 'Provedor', 'Message ID', 'Erro'] as const;
@@ -279,6 +287,7 @@ export function buildConfirmedPaymentSheetRow(projection: ConfirmedPaymentProjec
     projection.registrationId,
     projection.paymentId,
     sanitizeSheetText(projection.provider),
+    displayGender(projection.gender),
   ];
 }
 
