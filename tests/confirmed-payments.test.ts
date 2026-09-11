@@ -6,7 +6,7 @@ import {
   confirmedPaymentProviderLabel,
   maskConfirmedPaymentCpf,
 } from '../server/confirmed-payments.js';
-import { buildConfirmedPaymentSheetRow, executeGoogleSheetSyncTask, type GoogleSheetsClient } from '../server/google-sheets.js';
+import { buildConfirmedPaymentSheetRow, executeGoogleSheetSyncTask, GOOGLE_SHEET_HEADERS, type GoogleSheetsClient } from '../server/google-sheets.js';
 import { googleSheetsDateSerial } from '../server/google-sheets-layout.js';
 
 function registration(overrides: Partial<RegistrationRecord> = {}): RegistrationRecord {
@@ -104,14 +104,117 @@ test('sorts projections by payment date descending', () => {
   assert.deepEqual(result.projections.map((item) => item.registrationId), ['registration-2', 'registration-1']);
 });
 
-test('builds exactly the approved 19 columns with real date and currency numbers', () => {
+test('builds exactly the approved 20 columns with real date and currency numbers', () => {
   const projected = buildConfirmedPaymentsProjection(database([registration()], [payment()])).projections[0];
   const row = buildConfirmedPaymentSheetRow(projected);
-  assert.equal(row.length, 19);
+  assert.equal(row.length, 20);
   assert.equal(row[0], googleSheetsDateSerial(projected.paidAt));
   assert.equal(row[9], 79.9);
   assert.equal(row[15], 0);
-  assert.deepEqual(row.slice(16), ['registration-1', 'payment-1', 'infinitepay']);
+  assert.deepEqual(row.slice(16), ['registration-1', 'payment-1', 'infinitepay', 'Feminino']);
+});
+
+// GOOGLE-SHEETS-SEX-001 ------------------------------------------------------
+
+test('projects the canonical gender field exactly as stored, never inferred', () => {
+  const female = buildConfirmedPaymentsProjection(database([registration()], [payment()])).projections[0];
+  assert.equal(female.gender, 'female');
+
+  const male = buildConfirmedPaymentsProjection(database(
+    [registration({ payload: { ...registration().payload, gender: 'male', fullName: 'Maria da Silva' } })],
+    [payment()],
+  )).projections[0];
+  assert.equal(male.gender, 'male');
+
+  // A name that reads as feminine but a canonical value of 'male': the
+  // projection must follow the stored field, never the name.
+  assert.equal(male.fullName, 'Maria da Silva');
+});
+
+test('leaves gender empty for a historical row that never recorded it — never inferred', () => {
+  const missing = buildConfirmedPaymentsProjection(database(
+    [registration({ payload: { ...registration().payload, gender: '' } })],
+    [payment()],
+  )).projections[0];
+  assert.equal(missing.gender, '');
+  const row = buildConfirmedPaymentSheetRow(missing);
+  assert.equal(row[19], '');
+});
+
+test('header contains "Sexo" exactly once, as the last column', () => {
+  const headers = GOOGLE_SHEET_HEADERS.confirmed_payments;
+  assert.equal(headers.filter((header) => header === 'Sexo').length, 1);
+  assert.equal(headers.indexOf('Sexo'), headers.length - 1);
+  assert.equal(headers.indexOf('Sexo'), 19);
+});
+
+test('row/header alignment: every built row has exactly one cell per header, in order', () => {
+  const projected = buildConfirmedPaymentsProjection(database([registration()], [payment()])).projections[0];
+  const row = buildConfirmedPaymentSheetRow(projected);
+  assert.equal(row.length, GOOGLE_SHEET_HEADERS.confirmed_payments.length);
+  const sexoIndex = GOOGLE_SHEET_HEADERS.confirmed_payments.indexOf('Sexo');
+  assert.equal(row[sexoIndex], 'Feminino');
+});
+
+test('adding gender leaves every other column value exactly as before', () => {
+  const projected = buildConfirmedPaymentsProjection(database([registration()], [payment()])).projections[0];
+  const row = buildConfirmedPaymentSheetRow(projected);
+  assert.deepEqual(row.slice(0, 19), [
+    googleSheetsDateSerial(projected.paidAt),
+    'Maria da Silva',
+    '123.***.***-01',
+    "'+55 69 99999-0000",
+    'maria@example.com',
+    '5K',
+    'M',
+    'Lote 1',
+    '501',
+    79.9,
+    'InfinitePay',
+    'Sem parceiro',
+    '',
+    'instagram',
+    '',
+    0,
+    'registration-1',
+    'payment-1',
+    'infinitepay',
+  ]);
+});
+
+test('the new column never carries anything beyond the two canonical display labels or blank', () => {
+  for (const gender of ['female', 'male', ''] as const) {
+    const projected = buildConfirmedPaymentsProjection(database(
+      [registration({ payload: { ...registration().payload, gender } })],
+      [payment()],
+    )).projections[0];
+    const row = buildConfirmedPaymentSheetRow(projected);
+    assert.ok(['Feminino', 'Masculino', ''].includes(String(row[19])));
+  }
+  // no CPF, phone or e-mail digits leak into the gender cell under any input
+  const row = buildConfirmedPaymentSheetRow(
+    buildConfirmedPaymentsProjection(database([registration()], [payment()])).projections[0],
+  );
+  assert.doesNotMatch(String(row[19]), /\d/);
+});
+
+test('reconciliation replace stays a single row per registration — no duplicate from the new column', async () => {
+  const seenRowCounts: number[] = [];
+  const client = { replaceRows: async (_sheet: string, rows: unknown[][]) => { seenRowCounts.push(rows.length); return { rowCount: rows.length }; } } as unknown as GoogleSheetsClient;
+  const db = database([registration(), registration({ id: 'registration-2' })], [
+    payment(), payment({ id: 'payment-2', registrationId: 'registration-2' }),
+  ]);
+  const task = {
+    id: 'sync-confirmed', entityType: 'confirmed_payments_projection' as const, entityId: 'paid-and-paid', sheetName: 'confirmed_payments' as const,
+    operation: 'replace' as const, status: 'processing' as const, rowNumber: null, attempts: 1, lastAttemptAt: null, synchronizedAt: null,
+    lastError: null, createdAt: '2026-08-20T00:00:00.000Z', updatedAt: '2026-08-20T00:00:00.000Z',
+  };
+  const first = await executeGoogleSheetSyncTask(task, db, client);
+  const second = await executeGoogleSheetSyncTask(task, db, client);
+  assert.equal(first.action, 'replaced');
+  assert.equal(second.action, 'replaced');
+  // same DB state reconciled twice -> same 2 rows both times, never accumulating
+  assert.deepEqual(seenRowCounts, [2, 2]);
 });
 
 test('executor performs one global replace and returns mismatch diagnostics', async () => {

@@ -43,17 +43,17 @@ test('converts timestamps to Google serial numbers in America/Manaus wall time',
 test('declares all ten operational sheet layouts with exact column widths', () => {
   assert.equal(Object.keys(GOOGLE_SHEET_LAYOUTS).length, 10);
   for (const layout of Object.values(GOOGLE_SHEET_LAYOUTS)) assert.equal(layout.widths.length, layout.columnCount);
-  assert.equal(GOOGLE_SHEET_LAYOUTS.confirmed_payments.columnCount, 19);
+  assert.equal(GOOGLE_SHEET_LAYOUTS.confirmed_payments.columnCount, 20);
   assert.equal(GOOGLE_SHEET_LAYOUTS.remarketing.columnCount, 22);
 });
 
 test('builds frozen panes, filters, hidden technical columns, notes, banding and protection', () => {
   const requests = buildGoogleSheetLayoutRequests('confirmed_payments', 42, {
-    properties: { sheetId: 42, gridProperties: { rowCount: 500, columnCount: 19 } },
+    properties: { sheetId: 42, gridProperties: { rowCount: 500, columnCount: 20 } },
   }, 'service@example.iam.gserviceaccount.com');
   assert.ok(requests.some((item) => 'updateSheetProperties' in item));
   assert.ok(requests.some((item) => 'setBasicFilter' in item));
-  assert.equal(requests.filter((item) => 'updateDimensionProperties' in item).length, 21);
+  assert.equal(requests.filter((item) => 'updateDimensionProperties' in item).length, 22);
   assert.equal(requests.filter((item) => 'updateCells' in item).length, 3);
   assert.ok(requests.some((item) => 'addBanding' in item));
   const protection = requests.find((item) => 'addProtectedRange' in item) as { addProtectedRange: { protectedRange: { editors: { users: string[] } } } };

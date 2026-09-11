@@ -13,6 +13,11 @@ export type ConfirmedPaymentProjection = {
   cpfMasked: string;
   whatsapp: string;
   email: string;
+  // GOOGLE-SHEETS-SEX-001 — canonical field the participant explicitly chose at
+  // registration (server/database.ts RegistrationRecord['payload']['gender']).
+  // Never inferred from the name; '' when the participant left it unanswered
+  // (e.g. pre-existing rows created before the field was mandatory).
+  gender: RegistrationRecord['payload']['gender'];
   distance: string;
   shirtSize: string;
   lot: string;
@@ -121,6 +126,7 @@ export function buildConfirmedPaymentsProjection(
       cpfMasked: maskConfirmedPaymentCpf(registration.payload.cpf),
       whatsapp: registration.payload.phone.trim(),
       email: registration.payload.email.trim(),
+      gender: registration.payload.gender,
       distance: distance?.name || registration.distanceId,
       shirtSize: registration.payload.shirtSize,
       lot: lot?.name || registration.lotId,

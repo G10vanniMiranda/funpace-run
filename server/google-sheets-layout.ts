@@ -228,8 +228,11 @@ export const GOOGLE_SHEET_LAYOUTS: Record<GoogleSheetLayoutKey, GoogleSheetLayou
     rowHeight: 26, headerHeight: 32,
   },
   confirmed_payments: {
-    columnCount: 19,
-    widths: [155, 220, 115, 125, 235, 90, 80, 105, 95, 105, 135, 180, 145, 180, 105, 105, 190, 190, 145],
+    // GOOGLE-SHEETS-SEX-001 — 'Sexo' is column 19, appended after 'Provider'.
+    // Every index below (hiddenColumns 16-18, numberFormats 0/9/15, headerNotes
+    // 16-18) still points at its original column: nothing shifted.
+    columnCount: 20,
+    widths: [155, 220, 115, 125, 235, 90, 80, 105, 95, 105, 135, 180, 145, 180, 105, 105, 190, 190, 145, 90],
     hiddenColumns: [16, 17, 18], freezeRows: 1, freezeColumns: 2, filter: true,
     dateColumns: [0],
     numberFormats: [
@@ -237,7 +240,7 @@ export const GOOGLE_SHEET_LAYOUTS: Record<GoogleSheetLayoutKey, GoogleSheetLayou
       { columnIndex: 9, pattern: 'R$ #,##0.00', type: 'CURRENCY' },
       { columnIndex: 15, pattern: 'R$ #,##0.00', type: 'CURRENCY' },
     ],
-    centeredColumns: [5, 6, 7, 8, 10, 12, 14], wrappedColumns: [], checkboxColumns: [],
+    centeredColumns: [5, 6, 7, 8, 10, 12, 14, 19], wrappedColumns: [], checkboxColumns: [],
     headerNotes: { 16: technicalIdNote, 17: technicalIdNote, 18: technicalIdNote },
     conditionalFormatting: [], rowHeight: 26, headerHeight: 32,
   },
