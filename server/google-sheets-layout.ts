@@ -344,6 +344,33 @@ function bandingMatches(actual: Record<string, unknown>, desired: Record<string,
     });
 }
 
+// GOOGLE-SHEETS-BANDING-IDEMPOTENCY-001 — identifies the ONE existing banded
+// range that IS the layout's managed row-stripe banding for this table, even
+// when its extent is stale (e.g. a `columnCount` grew after adding a column).
+// Matching is by the banding's fixed corner — same sheet, same start row
+// (always right after the header), same start column (always 0) — plus an
+// overlap check as a defensive sanity guard, never by exact range equality.
+// That corner is unique to this layout's own banding by construction
+// (`gridRange(sheetId, 0, layout.columnCount, 1)`), so it cannot mis-adopt an
+// unrelated banding a human added elsewhere on the same sheet (that banding
+// would need to coincidentally start at the exact same row+column AND overlap
+// to be mistaken for this one). If more than one banded range shares that
+// corner — a state this layout should never itself produce — this throws
+// rather than guessing which one to extend.
+function findManagedBandingCandidates(
+  bandedRanges: ReadonlyArray<Record<string, unknown>>,
+  desired: Record<string, unknown>,
+) {
+  const desiredRange = canonicalRange(desired.range);
+  return bandedRanges.filter((item) => {
+    const actualRange = canonicalRange(item.range);
+    return actualRange.sheetId === desiredRange.sheetId
+      && actualRange.startRowIndex === desiredRange.startRowIndex
+      && actualRange.startColumnIndex === desiredRange.startColumnIndex
+      && rangesOverlap(item.range, desired.range);
+  });
+}
+
 export function googleSheetsDateSerial(value: string, timeZone = 'America/Manaus') {
   const date = new Date(value);
   if (!value || Number.isNaN(date.getTime())) return null;
@@ -534,12 +561,21 @@ export function buildGoogleSheetLayoutRequests(
     },
   };
   const bandedRanges = actual.bandedRanges || [];
-  const currentBanding = bandedRanges.find((item) => (
-    JSON.stringify(canonicalRange(item.range)) === JSON.stringify(canonicalRange(desiredBanding.range))
-  ));
+  const bandingCandidates = findManagedBandingCandidates(bandedRanges, desiredBanding);
+  if (bandingCandidates.length > 1) {
+    // GOOGLE-SHEETS-BANDING-IDEMPOTENCY-001 §4 — never guess between ambiguous
+    // candidates; a human needs to look at the sheet before this can proceed.
+    throw new Error(`AMBIGUOUS_MANAGED_BANDING:${sheetKey}`);
+  }
+  const currentBanding = bandingCandidates[0];
   if (!currentBanding) {
     requests.push({ addBanding: { bandedRange: desiredBanding } });
   } else if (!bandingMatches(currentBanding, desiredBanding)) {
+    // Extends/updates the SAME banded range (bandedRangeId preserved) instead
+    // of adding a new, overlapping one — e.g. when `layout.columnCount` grew
+    // after a column was appended. Idempotent: once the API confirms the
+    // range+colors above, the next run's `bandingMatches` is true and this
+    // becomes a no-op.
     requests.push({
       updateBanding: {
         bandedRange: { ...desiredBanding, bandedRangeId: currentBanding.bandedRangeId },
