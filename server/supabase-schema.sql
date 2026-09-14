@@ -111,7 +111,8 @@ create table if not exists "run-payment-events" (
 create table if not exists "run-email-deliveries" (
   id text primary key,
   registration_id text not null references "run-registrations"(id),
-  kind text not null check (kind in ('confirmation')),
+  -- KIT-DELIVERY-EMAIL-001: widened by server/migrations/20260914_email_deliveries_event_campaign_kind.sql
+  kind text not null check (kind in ('confirmation', 'event_campaign')),
   recipient_email text not null,
   recipient_hash text not null check (recipient_hash ~ '^[0-9a-f]{64}$'),
   context_key text not null,

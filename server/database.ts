@@ -12,6 +12,7 @@ import { assertDatabaseEnvironmentIsolation } from './environment.js';
 import { assertRuntimeAutoMigrateAllowed } from './migration-environment.js';
 import { resolveEventScope } from './event-scope.js';
 import { validateBibAssignment } from './admin-guards.js';
+import { isPlausibleRecipientEmail } from './confirmation-recovery.js';
 import {
   EMAIL_DELIVERY_COOLDOWN_MS,
   buildLegacyEmailSummaryPatch,
@@ -802,7 +803,11 @@ async function ensurePostgresDatabase(client: Queryable) {
     create table if not exists ${table.emailDeliveries} (
       id text primary key,
       registration_id text not null references ${table.registrations}(id),
-      kind text not null check (kind in ('confirmation')),
+      -- KIT-DELIVERY-EMAIL-001: kept in sync with
+      -- server/migrations/20260914_email_deliveries_event_campaign_kind.sql —
+      -- this IF NOT EXISTS bootstrap never touches an already-live table (see
+      -- assertRuntimeAutoMigrateAllowed), it only matters for a from-scratch DB.
+      kind text not null check (kind in ('confirmation', 'event_campaign')),
       recipient_email text not null,
       recipient_hash text not null check (recipient_hash ~ '^[0-9a-f]{64}$'),
       context_key text not null,
@@ -7898,4 +7903,263 @@ export async function getMetaIntegrationStatusInPostgres() {
     pendingEvents: Number(result.rows[0]?.pending_events || 0),
     deadEvents: Number(result.rows[0]?.dead_events || 0),
   };
+}
+
+
+// KIT-DELIVERY-EMAIL-001 Stage 1B ------------------------------------------
+// The event_campaign lifecycle lives ENTIRELY on run-email-deliveries (kind
+// widened to allow 'event_campaign' by
+// server/migrations/20260914_email_deliveries_event_campaign_kind.sql) plus
+// the existing generic audit trail — mirroring the exact shape of
+// claimRegistrationEmailInPostgres/completeRegistrationEmailInPostgres, but
+// as two BRAND NEW, structurally isolated functions that never reference
+// run-registrations.confirmation_email_* (not even
+// confirmation_email_last_attempt_at, which claimRegistrationEmailInPostgres
+// writes unconditionally on every claim). Because
+// ingestResendWebhookEventInPostgres's correlation query
+// (`where provider = 'resend' and provider_message_id = $1`) is already
+// kind-agnostic, a real run-email-deliveries row with kind='event_campaign'
+// makes the existing Resend webhook lifecycle (sent/delivered/bounced) work
+// automatically — zero changes to the webhook path.
+
+export type EventCampaignAudienceEntry = { registrationId: string; fullName: string; email: string };
+export type EventCampaignAudienceResult = {
+  eligible: EventCampaignAudienceEntry[];
+  totalPaid: number;
+  invalidEmailCount: number;
+  alreadySentCount: number;
+};
+
+/**
+ * STRICT READ-ONLY. Effective status is recomputed the same way toAdminRow
+ * derives it. "Already sent" is now read from run-email-deliveries itself
+ * (kind='event_campaign', status='sent', context_key scoped to THIS
+ * campaign's namespace) — no more dependency on run-audit-logs for that
+ * check (Stage 1's design).
+ */
+export async function selectEventCampaignAudienceInPostgres(
+  campaignKey: string,
+): Promise<EventCampaignAudienceResult> {
+  await ensurePostgresReady();
+  const contextPrefix = `event-campaign:${campaignKey}:`;
+  const rows = (await requirePool().query(
+    `select r.id, r.payload->>'fullName' as full_name, r.payload->>'email' as email,
+            case when r.status not in ('cancelled','refunded')
+                   and (p.status = 'paid' or p.paid_at is not null)
+                 then 'paid' else r.status end as effective_status,
+            exists (
+              select 1 from ${table.emailDeliveries} d
+              where d.registration_id = r.id and d.kind = 'event_campaign'
+                and d.status = 'sent' and d.context_key like $1
+            ) as already_sent
+     from ${table.registrations} r
+     left join ${table.payments} p on p.registration_id = r.id`,
+    [`${contextPrefix}%`],
+  )).rows;
+
+  const paidRows = rows.filter((row) => row.effective_status === 'paid');
+  const eligible: EventCampaignAudienceEntry[] = [];
+  let invalidEmailCount = 0;
+  let alreadySentCount = 0;
+
+  for (const row of paidRows) {
+    if (row.already_sent) { alreadySentCount += 1; continue; }
+    if (!isPlausibleRecipientEmail(row.email)) { invalidEmailCount += 1; continue; }
+    eligible.push({ registrationId: String(row.id), fullName: String(row.full_name || ''), email: String(row.email) });
+  }
+
+  return { eligible, totalPaid: paidRows.length, invalidEmailCount, alreadySentCount };
+}
+
+export type EventCampaignClaimResult =
+  | { status: 'not_found' }
+  | { status: 'not_eligible'; reason: 'not_paid' | 'invalid_email' }
+  | { status: 'already_sent' }
+  | { status: 'in_progress' }
+  | { status: 'ok'; deliveryId: string; recipientEmail: string; fullName: string; contextKey: string; deliveryKey: string };
+
+/**
+ * Atomic per-registration claim for an event_campaign delivery. Same
+ * lock-then-check-then-insert/update shape as claimRegistrationEmailInPostgres
+ * (row lock on the registration serializes concurrent claims for the same
+ * registration; the idempotency-key row lock serializes claims that land on
+ * the exact same delivery). Structurally CANNOT touch
+ * run-registrations.confirmation_email_* — there is no UPDATE against
+ * run-registrations anywhere in this function (only the initial SELECT ...
+ * FOR UPDATE, which locks but never writes it).
+ */
+export async function claimEventCampaignEmailInPostgres(input: {
+  registrationId: string;
+  campaignKey: string;
+  provider: string;
+  audit: { actor: string; actorRole: string | null; sessionId: string | null; ipAddress: string | null; userAgent: string | null; createdAt: string };
+}): Promise<EventCampaignClaimResult> {
+  const client = await requirePool().connect();
+  try {
+    await client.query('begin');
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '10s'");
+
+    const target = await client.query(
+      `select r.id, r.payload->>'fullName' as full_name, r.payload->>'email' as email, r.status,
+              p.status as payment_status, p.paid_at
+       from ${table.registrations} r
+       left join ${table.payments} p on p.registration_id = r.id
+       where r.id = $1
+       for update of r`,
+      [input.registrationId],
+    );
+    const row = target.rows[0];
+    if (!row) { await client.query('rollback'); return { status: 'not_found' }; }
+
+    const effectiveStatus = !['cancelled', 'refunded'].includes(row.status)
+      && (row.payment_status === 'paid' || Boolean(row.paid_at))
+      ? 'paid' : row.status;
+    if (effectiveStatus !== 'paid') { await client.query('rollback'); return { status: 'not_eligible', reason: 'not_paid' }; }
+    if (!isPlausibleRecipientEmail(row.email)) { await client.query('rollback'); return { status: 'not_eligible', reason: 'invalid_email' }; }
+
+    const recipientEmail = normalizeRecipientEmail(String(row.email));
+    const recipientHash = hashEmailRecipient(recipientEmail);
+    // KIT-DELIVERY-EMAIL-001 §5 — deterministic on campaign + registration +
+    // canonical recipient, never on mutable email text alone.
+    const contextKey = `event-campaign:${input.campaignKey}:${input.registrationId}:${recipientHash}`;
+    const idempotencyKey = buildEmailDeliveryIdempotencyKey({
+      registrationId: input.registrationId,
+      kind: 'event_campaign',
+      recipientEmail,
+      contextKey,
+    });
+
+    const existingResult = await client.query(
+      `select id, status, attempted_at from ${table.emailDeliveries} where idempotency_key = $1 for update`,
+      [idempotencyKey],
+    );
+    const existing = existingResult.rows[0] || null;
+    const recentAttempt = existing?.status === 'attempting'
+      && Date.now() - new Date(existing.attempted_at).getTime() < EMAIL_DELIVERY_COOLDOWN_MS;
+
+    // "latest wins": a prior 'failed' row (or a stale, crashed-mid-flight
+    // 'attempting' row past the cooldown) is retried by reusing the SAME
+    // idempotency-keyed row; only a 'sent' row, or a fresh 'attempting' row
+    // still inside the cooldown, blocks this claim.
+    if (existing?.status === 'sent') { await client.query('rollback'); return { status: 'already_sent' }; }
+    if (recentAttempt) { await client.query('rollback'); return { status: 'in_progress' }; }
+
+    const attemptedAt = new Date().toISOString();
+    let deliveryId: string;
+    if (existing) {
+      await client.query(
+        `update ${table.emailDeliveries}
+         set provider = $1, status = 'attempting', attempt_count = attempt_count + 1,
+             attempted_at = $2, sent_at = null, failed_at = null, error = null, updated_at = $2
+         where id = $3`,
+        [input.provider, attemptedAt, existing.id],
+      );
+      deliveryId = String(existing.id);
+    } else {
+      deliveryId = randomUUID();
+      await client.query(
+        `insert into ${table.emailDeliveries}
+           (id, registration_id, kind, recipient_email, recipient_hash, context_key, idempotency_key, provider,
+            provider_message_id, status, attempt_count, attempted_at, sent_at, failed_at, error, metadata, created_at, updated_at)
+         values ($1,$2,'event_campaign',$3,$4,$5,$6,$7,null,'attempting',1,$8,null,null,null,$9::jsonb,$8,$8)`,
+        [deliveryId, input.registrationId, recipientEmail, recipientHash, contextKey, idempotencyKey, input.provider, attemptedAt,
+          JSON.stringify({ source: 'event_campaign', campaignKey: input.campaignKey })],
+      );
+    }
+
+    const deliveryKey = `event-campaign/${input.registrationId}/${deliveryId}`;
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, 'email.event_campaign.attempted', 'registration', $4, $5::jsonb, $6, $7, $8, $9)`,
+      [
+        randomUUID(), input.audit.actor, input.audit.actorRole, input.registrationId,
+        JSON.stringify({ campaignKey: input.campaignKey, deliveryId, contextKey }),
+        input.audit.sessionId, input.audit.ipAddress, input.audit.userAgent, input.audit.createdAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { status: 'ok', deliveryId, recipientEmail, fullName: String(row.full_name || ''), contextKey, deliveryKey };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export type EventCampaignCompleteResult =
+  | { status: 'not_found' }
+  | { status: 'ok'; delivered: boolean; registrationId: string };
+
+/**
+ * Completes an event_campaign delivery claimed above. Writes ONLY to
+ * run-email-deliveries (guarded by `and kind = 'event_campaign'` so this can
+ * never complete a confirmation row even if called with a foreign id) and
+ * one run-audit-logs row. There is NO query against, and NO write to,
+ * run-registrations anywhere in this function — confirmation_email_id /
+ * confirmation_email_sent_at / confirmation_email_error /
+ * confirmation_email_last_attempt_at are all structurally unreachable here.
+ * Deliberately does not enqueue a Google Sheet sync (out of scope for this
+ * campaign; the existing confirmation completion primitive does, this one
+ * does not).
+ */
+export async function completeEventCampaignEmailInPostgres(
+  deliveryId: string,
+  result: { ok: boolean; provider: string; providerMessageId?: string; error?: string },
+  audit: { actor: string; actorRole: string | null; sessionId: string | null; ipAddress: string | null; userAgent: string | null },
+): Promise<EventCampaignCompleteResult> {
+  const client = await requirePool().connect();
+  const completedAt = new Date().toISOString();
+  const effectiveResult = result.ok && !result.providerMessageId
+    ? { ...result, ok: false, error: 'Email provider did not return a message id.' }
+    : result;
+
+  try {
+    await client.query('begin');
+    const updated = await client.query(
+      `update ${table.emailDeliveries}
+       set provider = $1,
+           provider_message_id = case when $2 then $3 else provider_message_id end,
+           status = case when $2 then 'sent' else 'failed' end,
+           sent_at = case when $2 then $4 else null end,
+           failed_at = case when $2 then null else $4 end,
+           error = case when $2 then null else $5 end,
+           updated_at = $4
+       where id = $6 and kind = 'event_campaign'
+       returning registration_id`,
+      [effectiveResult.provider, effectiveResult.ok, effectiveResult.providerMessageId || null, completedAt,
+        effectiveResult.error || 'Email send failed', deliveryId],
+    );
+    if (updated.rowCount !== 1) { await client.query('rollback'); return { status: 'not_found' }; }
+    const registrationId = String(updated.rows[0].registration_id);
+
+    await client.query(
+      `insert into ${table.auditLogs}
+         (id, actor, actor_role, action, entity_type, entity_id, payload, session_id, ip_address, user_agent, created_at)
+       values ($1, $2, $3, $4, 'registration', $5, $6::jsonb, $7, $8, $9, $10)`,
+      [
+        randomUUID(), audit.actor, audit.actorRole,
+        effectiveResult.ok ? 'email.event_campaign.sent' : 'email.event_campaign.failed',
+        registrationId,
+        JSON.stringify({
+          deliveryId, provider: effectiveResult.provider,
+          providerMessageId: effectiveResult.providerMessageId || null,
+          error: effectiveResult.ok ? null : (effectiveResult.error || 'Email send failed'),
+        }),
+        audit.sessionId, audit.ipAddress, audit.userAgent, completedAt,
+      ],
+    );
+
+    await client.query('commit');
+    return { status: 'ok', delivered: effectiveResult.ok, registrationId };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
