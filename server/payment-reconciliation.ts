@@ -29,6 +29,23 @@ export function findRegistrationByPayment(database: Pick<Database, 'registration
   return database.registrations.find((registration) => registration.id === payment.registrationId) || null;
 }
 
+// SERVICE-SWAP-001 — narrowly scoped exemption. A service-swap registration is
+// an intentionally NON-GATEWAY, zero-amount, organization-authorized paid
+// participation (see createServiceSwapRegistrationInPostgres); it will never
+// have a real gateway_transaction_id and must not be flagged as suspicious
+// the way an ordinary paid-without-evidence registration would be. This does
+// NOT change hasRealGatewayTransaction's semantics — service_swap is still,
+// correctly, "not a real gateway transaction" — it only recognizes it as a
+// distinct, explicitly authorized case that should be excluded from
+// `local_paid_without_real_transaction`. It matches on all three fields
+// together so it can never accidentally cover infinitepay, manual_pix, or any
+// other/unknown provider, or a non-zero-amount payment.
+export function isAuthorizedNonGatewayParticipation(payment: PaymentRecord) {
+  return payment.provider === 'service_swap'
+    && payment.gatewayStatus === 'service_swap_authorized'
+    && payment.amountCents === 0;
+}
+
 export function hasRealGatewayTransaction(payment: PaymentRecord) {
   const isReal = (value: unknown) => {
     const normalized = typeof value === 'string' ? value.trim() : '';
@@ -72,7 +89,7 @@ export function detectLocalReconciliationIssues(database: Pick<Database, 'regist
       });
       continue;
     }
-    if (registration.status === 'paid' && !hasRealGatewayTransaction(payment)) {
+    if (registration.status === 'paid' && !hasRealGatewayTransaction(payment) && !isAuthorizedNonGatewayParticipation(payment)) {
       issues.push({
         issueKey: `local_paid_without_real_transaction:${registration.id}`,
         issueCode: 'local_paid_without_real_transaction', severity: 'warning', resolutionStatus: 'manual_review_required',

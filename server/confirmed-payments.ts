@@ -3,6 +3,7 @@ import type { Database, PaymentRecord, RegistrationRecord } from './database.js'
 export const CONFIRMED_PAYMENT_PROVIDER_LABELS = {
   infinitepay: 'InfinitePay',
   manual_pix: 'PIX Manual',
+  service_swap: 'Permuta / Troca de serviço',
 } as const;
 
 export type ConfirmedPaymentProjection = {
@@ -57,6 +58,7 @@ export function confirmedPaymentProviderLabel(provider: string) {
   const normalized = provider.trim().toLowerCase();
   if (normalized === 'manual_pix') return CONFIRMED_PAYMENT_PROVIDER_LABELS.manual_pix;
   if (normalized === 'infinitepay') return CONFIRMED_PAYMENT_PROVIDER_LABELS.infinitepay;
+  if (normalized === 'service_swap') return CONFIRMED_PAYMENT_PROVIDER_LABELS.service_swap;
   return `Outro — ${provider.trim() || 'não informado'}`;
 }
 
