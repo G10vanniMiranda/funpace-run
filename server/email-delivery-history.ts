@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-export type EmailDeliveryKind = 'confirmation';
+// KIT-DELIVERY-EMAIL-001 Stage 1B — 'event_campaign' added alongside
+// 'confirmation' (server/migrations/20260914_email_deliveries_event_campaign_kind.sql
+// widens the live CHECK to match). All existing call sites in this codebase
+// still pass 'confirmation' literally, so this widening is source-compatible.
+export type EmailDeliveryKind = 'confirmation' | 'event_campaign';
 export type EmailDeliveryStatus = 'attempting' | 'sent' | 'failed';
 
 export type EmailDeliveryRecord = {

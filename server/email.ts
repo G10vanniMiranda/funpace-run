@@ -23,7 +23,7 @@ const emailProvider = (process.env.EMAIL_PROVIDER || '').trim().toLowerCase();
 const resendApiKey = process.env.RESEND_API_KEY || '';
 const emailFrom = process.env.EMAIL_FROM || '';
 const emailReplyTo = process.env.EMAIL_REPLY_TO || emailFrom;
-const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || process.env.APP_URL || 'https://www.funpace.club').replace(/\/$/, '');
+export const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || process.env.APP_URL || 'https://www.funpace.club').replace(/\/$/, '');
 const whatsappNumber = (process.env.VITE_WHATSAPP_NUMBER || '').replace(/\D/g, '');
 
 export function getEmailProvider() {
@@ -41,7 +41,7 @@ export function isEmailConfigured() {
   return false;
 }
 
-function escapeHtml(value: unknown) {
+export function escapeHtml(value: unknown) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -208,29 +208,40 @@ async function buildRegistrationConfirmationEmail(context: RegistrationEmailCont
   return { subject, html, text };
 }
 
-export async function sendRegistrationConfirmationEmail(context: RegistrationEmailContext): Promise<EmailSendResult> {
+// KIT-DELIVERY-EMAIL-001 — the transport (console short-circuit + Resend HTTP
+// call) is identical for every email kind this system sends; extracted once
+// so a new campaign (e.g. kit-delivery) reuses it instead of re-implementing
+// provider wiring. Behaviour is unchanged from the original inline version:
+// same env reads, same not-configured/blocked short-circuits, same
+// Idempotency-Key header, same 10s timeout, same result shape.
+export async function sendEmailViaResend(input: {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+  deliveryKey?: string;
+  /** only for the console-provider structured log line */
+  logKind: string;
+  logContext?: Record<string, unknown>;
+}): Promise<EmailSendResult> {
   const provider = getEmailProvider();
 
   if (!isEmailEnabled()) {
     return { ok: false, skipped: true, provider, error: 'EMAIL_PROVIDER not configured.' };
   }
 
-  const to = context.registration.payload.email;
-
-  if (!isEmailRecipientAllowed(to)) {
+  if (!isEmailRecipientAllowed(input.to)) {
     return { ok: false, skipped: true, provider, error: 'Recipient blocked by environment policy.' };
   }
-
-  const email = await buildRegistrationConfirmationEmail(context);
 
   if (emailProvider === 'console') {
     console.log(JSON.stringify({
       at: new Date().toISOString(),
       message: 'email_console_provider',
-      kind: 'confirmation',
-      to,
-      subject: email.subject,
-      registrationId: context.registration.id,
+      kind: input.logKind,
+      to: input.to,
+      subject: input.subject,
+      ...input.logContext,
     }));
 
     return { ok: true, provider: 'console', providerMessageId: `console_${Date.now()}` };
@@ -245,16 +256,16 @@ export async function sendRegistrationConfirmationEmail(context: RegistrationEma
     headers: {
       Authorization: `Bearer ${resendApiKey}`,
       'Content-Type': 'application/json',
-      ...(context.deliveryKey ? { 'Idempotency-Key': context.deliveryKey } : {}),
+      ...(input.deliveryKey ? { 'Idempotency-Key': input.deliveryKey } : {}),
     },
     signal: AbortSignal.timeout(10_000),
     body: JSON.stringify({
       from: emailFrom,
-      to,
+      to: input.to,
       reply_to: emailReplyTo || undefined,
-      subject: email.subject,
-      html: email.html,
-      text: email.text,
+      subject: input.subject,
+      html: input.html,
+      text: input.text,
     }),
   });
 
@@ -273,4 +284,30 @@ export async function sendRegistrationConfirmationEmail(context: RegistrationEma
     provider,
     providerMessageId: payload?.id || undefined,
   };
+}
+
+export async function sendRegistrationConfirmationEmail(context: RegistrationEmailContext): Promise<EmailSendResult> {
+  const provider = getEmailProvider();
+  const to = context.registration.payload.email;
+
+  // Same early-exit order as before the transport was extracted: never pay
+  // for QR-code generation / template building when the send would be
+  // short-circuited anyway.
+  if (!isEmailEnabled()) {
+    return { ok: false, skipped: true, provider, error: 'EMAIL_PROVIDER not configured.' };
+  }
+  if (!isEmailRecipientAllowed(to)) {
+    return { ok: false, skipped: true, provider, error: 'Recipient blocked by environment policy.' };
+  }
+
+  const email = await buildRegistrationConfirmationEmail(context);
+  return sendEmailViaResend({
+    to,
+    subject: email.subject,
+    html: email.html,
+    text: email.text,
+    deliveryKey: context.deliveryKey,
+    logKind: 'confirmation',
+    logContext: { registrationId: context.registration.id },
+  });
 }
