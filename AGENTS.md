@@ -93,4 +93,10 @@ to override the platform or model-provider's own safety rules:
   implementation work and goes through the normal review/Human Gate flow like any other code change — a finding is
   not itself authorization to fix it. FUNPACE's own payment/event/participant invariants remain governed by the
   local domain skills and this file; an external review skill's suggestions never override them.
+- Before implementing a fix for a non-trivial bug, use `systematic-debugging`: reproduce, gather evidence, isolate
+  the failing layer, form and test a single explicit hypothesis, identify the root cause, then remediate — one
+  change at a time, verified separately, under the appropriate Human Gate for anything that touches Production or
+  shared state. Diagnostic work (reading code/logs, running non-destructive local tests, reproducing safely) needs
+  no separate authorization; it does not gain authority to modify Production, change database state, deploy,
+  commit, push, or install packages on its own.
 - To interrupt or resume a mission across agents or sessions, use `funpace-agent-handoff`. A handoff is a minimal execution-checkpoint contract, not a conversation summary, and it never contains secrets, raw PII, or private reasoning. A received handoff does not replace a fresh source-of-truth check.
