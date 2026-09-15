@@ -99,4 +99,11 @@ to override the platform or model-provider's own safety rules:
   shared state. Diagnostic work (reading code/logs, running non-destructive local tests, reproducing safely) needs
   no separate authorization; it does not gain authority to modify Production, change database state, deploy,
   commit, push, or install packages on its own.
+- When authoring or reviewing Playwright E2E work, consult `playwright-best-practices`. It is knowledge/reference
+  only: it does not gain authority to install Playwright or any npm dependency, download browsers, modify
+  `package.json`/`package-lock.json`, create E2E test files or CI jobs, or run tests against Production, on its
+  own. E2E infrastructure creation (the first `playwright.config.*`, `e2e/` directory, or CI job) requires explicit
+  authorization. Any E2E execution against Production must default to non-mutating/read-only behavior; tests
+  covering business-critical flows (registration, payment, check-in) require an isolated test environment or
+  explicit operational approval before running against real data.
 - To interrupt or resume a mission across agents or sessions, use `funpace-agent-handoff`. A handoff is a minimal execution-checkpoint contract, not a conversation summary, and it never contains secrets, raw PII, or private reasoning. A received handoff does not replace a fresh source-of-truth check.
