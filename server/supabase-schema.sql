@@ -23,7 +23,7 @@ create table if not exists "run-lots" (
   id text primary key,
   event_id text not null references "run-events"(id),
   name text not null,
-  price_cents integer not null,
+  price_cents integer not null check (price_cents > 0),
   capacity integer not null,
   sold_count integer not null default 0,
   status text not null check (status in ('active', 'inactive', 'sold_out')),
@@ -71,9 +71,16 @@ create table if not exists "run-registrations" (
   coupon_applied_at text,
   coupon_used_at text,
   constraint "run-registrations_partner_pricing_check" check (
-    original_price > 0 and final_price > 0 and discount_amount >= 0
-    and discount_percentage >= 0 and discount_percentage < 100
-    and original_price - discount_amount = final_price and amount_cents = final_price
+    (
+      original_price > 0 and final_price > 0 and discount_amount >= 0
+      and discount_percentage >= 0 and discount_percentage < 100
+      and original_price - discount_amount = final_price and amount_cents = final_price
+    )
+    or
+    (
+      original_price = 0 and final_price = 0
+      and discount_amount = 0 and discount_percentage = 0 and amount_cents = 0
+    )
   ),
   constraint "run-registrations_partner_metadata_check" check (
     (partner_id is null and partner_name is null and partner_type is null and coupon_code is null and discount_percentage = 0 and discount_amount = 0)

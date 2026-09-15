@@ -725,7 +725,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       id text primary key,
       event_id text not null references ${table.events}(id),
       name text not null,
-      price_cents integer not null,
+      price_cents integer not null check (price_cents > 0),
       capacity integer not null,
       sold_count integer not null default 0,
       status text not null check (status in ('active', 'inactive', 'sold_out')),
@@ -1165,7 +1165,17 @@ async function ensurePostgresDatabase(client: Queryable) {
         alter table "run-registrations" add constraint "run-registrations_partner_id_fkey" foreign key (partner_id) references "run-partners"(id);
       end if;
       if not exists (select 1 from pg_constraint where conname = 'run-registrations_partner_pricing_check') then
-        alter table "run-registrations" add constraint "run-registrations_partner_pricing_check" check (original_price > 0 and final_price > 0 and discount_amount >= 0 and discount_percentage >= 0 and discount_percentage < 100 and original_price - discount_amount = final_price and amount_cents = final_price);
+        -- SERVICE-SWAP-001 Stage 2C: two branches — the original commercial
+        -- pricing rule (final_price > 0, byte-for-byte unchanged), OR the
+        -- narrow, explicit all-zero shape only createServiceSwapRegistrationInPostgres
+        -- ever writes. See server/migrations/20260914_service_swap_zero_value_pricing.sql
+        -- for the full rationale (this branch is only reached by a fresh
+        -- install; an existing database is upgraded by that migration).
+        alter table "run-registrations" add constraint "run-registrations_partner_pricing_check" check (
+          (original_price > 0 and final_price > 0 and discount_amount >= 0 and discount_percentage >= 0 and discount_percentage < 100 and original_price - discount_amount = final_price and amount_cents = final_price)
+          or
+          (original_price = 0 and final_price = 0 and discount_amount = 0 and discount_percentage = 0 and amount_cents = 0)
+        );
       end if;
     end $$;
     alter table "run-registrations" drop constraint if exists "run-registrations_partner_type_check";
@@ -1192,6 +1202,13 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
   await client.query(`alter table ${table.lots} add column if not exists order_index integer not null default 0`);
   await client.query(`alter table ${table.lots} add column if not exists continues_after_capacity boolean not null default false`);
+  await client.query(`
+    do $$ begin
+      if not exists (select 1 from pg_constraint where conname = 'run-lots_price_cents_check') then
+        alter table "run-lots" add constraint "run-lots_price_cents_check" check (price_cents > 0);
+      end if;
+    end $$;
+  `);
   await client.query(`alter table ${table.partners} add column if not exists deleted_at text`);
   await client.query(`create index if not exists "run-lots_event_order_idx" on ${table.lots}(event_id, order_index, starts_at)`);
   await client.query(`
@@ -2806,6 +2823,257 @@ export async function confirmPaymentInPostgres(input: PaymentConfirmationInput):
     });
     await client.query('commit');
     return { statusCode: 200, registrationId: row.id, paymentId: row.payment_id, previousStatus: row.status, duplicated: duplicate };
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// SERVICE-SWAP-001 — an explicit, truthful participation model for event
+// entries granted as compensation for a service swap ("permuta/troca de
+// serviço"). Deliberately independent from InfinitePay, manual_pix (partner
+// PIX regularization — requires a real partner and a payment amount that
+// must match the partner-discounted price, never zero) and partner/coupon
+// discounting: no partnerSlug, no caller-supplied amount (always 0), own
+// provider/gateway_status values so this can never be confused with a real
+// external payment in reconciliation, alerting, or Sheets exports.
+export const SERVICE_SWAP_PROVIDER = 'service_swap';
+export const SERVICE_SWAP_GATEWAY_STATUS = 'service_swap_authorized';
+
+export type ServiceSwapAuthorization = {
+  reason: string;
+  authorizedByName: string;
+  authorizedByEmail: string;
+};
+
+export type ServiceSwapRegistrationInput = {
+  payload: RegistrationFormData;
+  cpfHash: string;
+  authorization: ServiceSwapAuthorization;
+};
+
+export type ServiceSwapRegistrationResult =
+  | { status: 'ok'; replay: boolean; registrationId: string; paymentId: string; bibNumber: string }
+  | { status: 'event_unavailable' }
+  | { status: 'distance_or_lot_unavailable' }
+  | { status: 'duplicate_active'; registrationId: string; registrationStatus: string; provider: string | null };
+
+/**
+ * Creates ONE authorized, zero-amount, non-gateway "service swap" registration
+ * in a single transaction: run-registrations (status='paid', amount_cents=0),
+ * run-payments (provider='service_swap', gateway_status='service_swap_authorized',
+ * gateway_transaction_id=NULL — never fabricated), run-lots.sold_count (+1,
+ * under the same locks confirmPaymentInPostgres uses for bib/capacity safety),
+ * and exactly one run-audit-logs 'registration.service_swap_authorized' entry.
+ * Confirmation email is only enqueued into the existing outbox (a durable
+ * 'pending' row a separate worker drains later) — never sent synchronously,
+ * so this never depends on — or fails because of — Resend availability.
+ *
+ * Idempotent per (event, cpf_hash): a replay of the exact same authorized
+ * person returns the existing service_swap registration/payment/bib
+ * unchanged (no second insert, no second sold_count increment, no second
+ * bib). Any OTHER active registration for that CPF (a real paid/pending
+ * registration, or a pending/paid row from a different provider) is a
+ * genuine identity conflict and is rejected, not silently treated as a
+ * replay.
+ */
+export async function createServiceSwapRegistrationInPostgres(
+  input: ServiceSwapRegistrationInput,
+): Promise<ServiceSwapRegistrationResult> {
+  const configurationIssue = getDatabaseConfigurationIssue();
+  if (configurationIssue) throw new Error(configurationIssue);
+
+  const client = await requirePool().connect();
+  const now = new Date().toISOString();
+
+  try {
+    await ensurePostgresReady();
+    await client.query('begin');
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-registration-lot'))");
+    await client.query("select pg_advisory_xact_lock(hashtext('funpace-run-payment-confirmation'))");
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("set local statement_timeout = '15s'");
+
+    const eventResult = await client.query(
+      `select id from ${table.events} where slug = $1 and status = $2 limit 1`,
+      ['funpace-run-2026', 'published'],
+    );
+    const event = eventResult.rows[0];
+    if (!event) {
+      await client.query('rollback');
+      return { status: 'event_unavailable' };
+    }
+
+    const existingResult = await client.query(
+      `select r.id, r.status, r.bib_number, p.id as payment_id, p.provider as payment_provider, p.status as payment_status
+       from ${table.registrations} r
+       left join ${table.payments} p on p.registration_id = r.id
+       where r.event_id = $1 and r.cpf_hash = $2 and r.status = any($3)
+       for update of r`,
+      [event.id, input.cpfHash, ['pending_payment', 'paid']],
+    );
+    const existing = existingResult.rows[0];
+    if (existing) {
+      const isServiceSwapReplay = existing.status === 'paid'
+        && existing.payment_provider === SERVICE_SWAP_PROVIDER
+        && existing.payment_status === 'paid';
+      if (isServiceSwapReplay) {
+        await client.query('commit');
+        return {
+          status: 'ok', replay: true, registrationId: String(existing.id),
+          paymentId: String(existing.payment_id), bibNumber: String(existing.bib_number || ''),
+        };
+      }
+      await client.query('rollback');
+      return {
+        status: 'duplicate_active', registrationId: String(existing.id),
+        registrationStatus: String(existing.status),
+        provider: existing.payment_provider ? String(existing.payment_provider) : null,
+      };
+    }
+
+    const distanceResult = await client.query(
+      `select id from ${table.distances} where event_id = $1 and name = $2 and status = $3 limit 1`,
+      [event.id, input.payload.distance, 'active'],
+    );
+    const distance = distanceResult.rows[0];
+    if (!distance) {
+      await client.query('rollback');
+      return { status: 'distance_or_lot_unavailable' };
+    }
+
+    const lotResult = await client.query(
+      `select id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity
+       from ${table.lots}
+       where event_id = $1 and status in ('active', 'sold_out')
+       order by order_index asc, starts_at asc
+       for update`,
+      [event.id],
+    );
+    if (lotResult.rows.length === 0) {
+      await client.query('rollback');
+      return { status: 'distance_or_lot_unavailable' };
+    }
+
+    const lotOccupancyResult = await client.query(
+      `select lot.id,
+              count(registration.id) filter (where registration.status = 'paid')::int as confirmed,
+              count(registration.id) filter (
+                where registration.status = 'pending_payment'
+                  and (registration.expires_at is null or registration.expires_at::timestamptz > now())
+              )::int as temporary_reservations
+       from ${table.lots} lot
+       left join ${table.registrations} registration on registration.lot_id = lot.id
+       where lot.event_id = $1
+       group by lot.id`,
+      [event.id],
+    );
+    const occupancyByLot = new Map(lotOccupancyResult.rows.map((row) => [String(row.id), {
+      confirmed: Number(row.confirmed || 0),
+      temporaryReservations: Number(row.temporary_reservations || 0),
+    }]));
+    const configuredLots = lotResult.rows.map((row) => ({
+      id: String(row.id),
+      eventId: String(event.id),
+      name: String(row.name),
+      priceCents: Number(row.price_cents),
+      capacity: Number(row.capacity),
+      soldCount: Number(row.sold_count),
+      status: row.status as LotRecord['status'],
+      startsAt: String(row.starts_at),
+      endsAt: String(row.ends_at),
+      orderIndex: Number(row.order_index || 0),
+      continuesAfterCapacity: Boolean(row.continues_after_capacity),
+      confirmed: occupancyByLot.get(String(row.id))?.confirmed || 0,
+      temporaryReservations: occupancyByLot.get(String(row.id))?.temporaryReservations || 0,
+    }));
+    const lot = selectAvailableLotCandidate(configuredLots);
+    if (!lot) {
+      await client.query('rollback');
+      return { status: 'distance_or_lot_unavailable' };
+    }
+
+    const bibResult = await client.query(
+      `select lpad((coalesce(max(nullif(regexp_replace(bib_number, '\\D', '', 'g'), '')::int), 0) + 1)::text, 4, '0') as next_bib_number
+       from ${table.registrations}
+       where event_id = $1 and bib_number is not null`,
+      [event.id],
+    );
+    const bibNumber = String(bibResult.rows[0]?.next_bib_number || '0001');
+
+    const registrationId = randomUUID();
+    const paymentId = randomUUID();
+
+    await client.query(
+      `insert into ${table.registrations}
+         (id, event_id, distance_id, lot_id, cpf_hash, status, amount_cents, payload, created_at, updated_at,
+          marketing_consent, marketing_consent_updated_at, meta_context, expires_at, paid_at, confirmed_at,
+          confirmation_email_sent_at, confirmation_email_last_attempt_at, confirmation_email_provider,
+          confirmation_email_id, confirmation_email_error, bib_number, partner_id, partner_name, partner_type,
+          partner_link, partner_identified_at, discount_percentage, discount_amount, original_price, final_price,
+          coupon_code, coupon_applied_at, coupon_used_at)
+       values
+         ($1, $2, $3, $4, $5, 'paid', 0, $6, $7, $7,
+          false, null, '{}'::jsonb, null, $7, $7,
+          null, null, null,
+          null, null, $8, null, null, null,
+          null, null, 0, 0, 0, 0,
+          null, null, null)`,
+      [registrationId, event.id, distance.id, lot.id, input.cpfHash, input.payload, now, bibNumber],
+    );
+
+    await client.query(
+      `insert into ${table.payments}
+         (id, registration_id, provider, status, amount_cents, provider_payment_id, checkout_url,
+          created_at, updated_at, expires_at, paid_at, gateway_status, gateway_transaction_id, gateway_payload)
+       values ($1, $2, $3, 'paid', 0, null, null, $4, $4, null, $4, $5, null, $6)`,
+      [paymentId, registrationId, SERVICE_SWAP_PROVIDER, now, SERVICE_SWAP_GATEWAY_STATUS, {
+        type: 'service_swap',
+        reason: input.authorization.reason,
+        authorizedBy: { name: input.authorization.authorizedByName, email: input.authorization.authorizedByEmail },
+        infinitePayInvolved: false,
+        moneyReceived: false,
+      }],
+    );
+
+    await client.query(
+      `update ${table.lots} set sold_count = sold_count + 1,
+         status = case
+           when status = 'inactive' then 'inactive'
+           when sold_count + 1 >= capacity then 'sold_out'
+           else 'active'
+         end where id = $1`,
+      [lot.id],
+    );
+
+    await client.query(
+      `insert into ${table.auditLogs} (id, actor, action, entity_type, entity_id, payload, created_at)
+       values ($1, $2, 'registration.service_swap_authorized', 'registration', $3, $4, $5)`,
+      [randomUUID(), input.authorization.authorizedByEmail, registrationId, {
+        reason: input.authorization.reason,
+        authorizedBy: { name: input.authorization.authorizedByName, email: input.authorization.authorizedByEmail },
+        amountReceivedCents: 0,
+        moneyReceived: false,
+        infinitePayInvolved: false,
+        previousState: 'none',
+        nextState: 'paid',
+        provider: SERVICE_SWAP_PROVIDER,
+        bibNumber,
+        lotId: lot.id,
+        lotPriceCentsAtAuthorization: Number(lot.priceCents),
+      }, now],
+    );
+
+    await enqueueConfirmationEmailInPostgres(client, registrationId, {
+      eventId: event.id,
+      source: 'registration.service_swap_authorized',
+      now,
+    });
+
+    await client.query('commit');
+    return { status: 'ok', replay: false, registrationId, paymentId, bibNumber };
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;
@@ -5514,7 +5782,13 @@ export async function updateLotConfigurationInPostgres(
         payload: { message: `A capacidade nao pode ser menor que ${before.soldCount} vagas ocupadas.` },
       };
     }
-    if (!Number.isFinite(priceCents) || priceCents < 0) {
+    // SERVICE-SWAP-001 Stage 2C: a commercial lot must always be priced —
+    // price_cents = 0 used to be accepted here (only negative was rejected),
+    // which would have let an ordinary public checkout against that lot
+    // produce a zero-value registration indistinguishable from an authorized
+    // service_swap row. Rejected at the application layer AND at the DB
+    // layer (run-lots_price_cents_check) — never rely on only one.
+    if (!Number.isFinite(priceCents) || priceCents <= 0) {
       await client.query('rollback');
       return { statusCode: 400, payload: { message: 'Preco invalido.' } };
     }
