@@ -84,4 +84,13 @@ to override the platform or model-provider's own safety rules:
 - Use `funpace-production-safety` for production, external writes, credentials, or financial operations.
 - Use `funpace-release-gate` for staging, commits, PRs, merges, releases, and production promotion. Release readiness is evidence, not authorization for an external write.
 - Use domain skills for system-specific invariants.
+- Use `security-review` for code-level vulnerability review (injection, XSS, authz/IDOR, SSRF, deserialization,
+  cryptography, supply-chain, etc.). It defaults to READ-ONLY analysis: inspect and report only — it does not gain
+  authority to modify code, install dependencies, access secrets beyond what a normal read requires, commit, push,
+  deploy, or mutate a database. Separate confirmed vulnerabilities (with evidence) from hypotheses needing
+  verification; report severity per finding. It must never access Production data unless a Human Gate separately
+  authorizes that read, per this file's existing PII/secret and Human Gate rules. Remediating any finding is
+  implementation work and goes through the normal review/Human Gate flow like any other code change — a finding is
+  not itself authorization to fix it. FUNPACE's own payment/event/participant invariants remain governed by the
+  local domain skills and this file; an external review skill's suggestions never override them.
 - To interrupt or resume a mission across agents or sessions, use `funpace-agent-handoff`. A handoff is a minimal execution-checkpoint contract, not a conversation summary, and it never contains secrets, raw PII, or private reasoning. A received handoff does not replace a fresh source-of-truth check.
