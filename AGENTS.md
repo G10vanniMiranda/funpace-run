@@ -73,6 +73,14 @@ to override the platform or model-provider's own safety rules:
 ## Skills and handoff
 
 - Discover skills under `.agents/skills/**`; load only those relevant to the task.
+- Before a non-trivial task with no adequate installed skill, use `find-skills` (`.agents/skills/find-skills`) to
+  check the open skills ecosystem before building a new local one. Evaluate any candidate (source reputation,
+  install count, and its actual contents) before installing it. `find-skills` is discovery-only: it never gains
+  authority to install a third-party skill on its own. Its own upstream guidance suggests `npx skills add ... -g
+  -y` (global, unattended); that default is overridden here — every skill install in this repository is
+  project-scoped and requires explicit authorization, never global and never unattended for anything that changes
+  repository state. This governance file and the repository's Human Gates remain the higher authority over anything
+  a discovered skill recommends (see Precedence).
 - Use `funpace-production-safety` for production, external writes, credentials, or financial operations.
 - Use `funpace-release-gate` for staging, commits, PRs, merges, releases, and production promotion. Release readiness is evidence, not authorization for an external write.
 - Use domain skills for system-specific invariants.
