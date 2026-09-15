@@ -725,7 +725,7 @@ async function ensurePostgresDatabase(client: Queryable) {
       id text primary key,
       event_id text not null references ${table.events}(id),
       name text not null,
-      price_cents integer not null,
+      price_cents integer not null check (price_cents > 0),
       capacity integer not null,
       sold_count integer not null default 0,
       status text not null check (status in ('active', 'inactive', 'sold_out')),
@@ -1165,7 +1165,17 @@ async function ensurePostgresDatabase(client: Queryable) {
         alter table "run-registrations" add constraint "run-registrations_partner_id_fkey" foreign key (partner_id) references "run-partners"(id);
       end if;
       if not exists (select 1 from pg_constraint where conname = 'run-registrations_partner_pricing_check') then
-        alter table "run-registrations" add constraint "run-registrations_partner_pricing_check" check (original_price > 0 and final_price > 0 and discount_amount >= 0 and discount_percentage >= 0 and discount_percentage < 100 and original_price - discount_amount = final_price and amount_cents = final_price);
+        -- SERVICE-SWAP-001 Stage 2C: two branches — the original commercial
+        -- pricing rule (final_price > 0, byte-for-byte unchanged), OR the
+        -- narrow, explicit all-zero shape only createServiceSwapRegistrationInPostgres
+        -- ever writes. See server/migrations/20260914_service_swap_zero_value_pricing.sql
+        -- for the full rationale (this branch is only reached by a fresh
+        -- install; an existing database is upgraded by that migration).
+        alter table "run-registrations" add constraint "run-registrations_partner_pricing_check" check (
+          (original_price > 0 and final_price > 0 and discount_amount >= 0 and discount_percentage >= 0 and discount_percentage < 100 and original_price - discount_amount = final_price and amount_cents = final_price)
+          or
+          (original_price = 0 and final_price = 0 and discount_amount = 0 and discount_percentage = 0 and amount_cents = 0)
+        );
       end if;
     end $$;
     alter table "run-registrations" drop constraint if exists "run-registrations_partner_type_check";
@@ -1192,6 +1202,13 @@ async function ensurePostgresDatabase(client: Queryable) {
   await client.query(`create unique index if not exists "run-registrations_event_bib_idx" on ${table.registrations}(event_id, bib_number) where bib_number is not null`);
   await client.query(`alter table ${table.lots} add column if not exists order_index integer not null default 0`);
   await client.query(`alter table ${table.lots} add column if not exists continues_after_capacity boolean not null default false`);
+  await client.query(`
+    do $$ begin
+      if not exists (select 1 from pg_constraint where conname = 'run-lots_price_cents_check') then
+        alter table "run-lots" add constraint "run-lots_price_cents_check" check (price_cents > 0);
+      end if;
+    end $$;
+  `);
   await client.query(`alter table ${table.partners} add column if not exists deleted_at text`);
   await client.query(`create index if not exists "run-lots_event_order_idx" on ${table.lots}(event_id, order_index, starts_at)`);
   await client.query(`
@@ -3002,9 +3019,9 @@ export async function createServiceSwapRegistrationInPostgres(
           false, null, '{}'::jsonb, null, $7, $7,
           null, null, null,
           null, null, $8, null, null, null,
-          null, null, 0, 0, $9, 0,
+          null, null, 0, 0, 0, 0,
           null, null, null)`,
-      [registrationId, event.id, distance.id, lot.id, input.cpfHash, input.payload, now, bibNumber, Number(lot.priceCents)],
+      [registrationId, event.id, distance.id, lot.id, input.cpfHash, input.payload, now, bibNumber],
     );
 
     await client.query(
@@ -3045,6 +3062,7 @@ export async function createServiceSwapRegistrationInPostgres(
         provider: SERVICE_SWAP_PROVIDER,
         bibNumber,
         lotId: lot.id,
+        lotPriceCentsAtAuthorization: Number(lot.priceCents),
       }, now],
     );
 
@@ -5764,7 +5782,13 @@ export async function updateLotConfigurationInPostgres(
         payload: { message: `A capacidade nao pode ser menor que ${before.soldCount} vagas ocupadas.` },
       };
     }
-    if (!Number.isFinite(priceCents) || priceCents < 0) {
+    // SERVICE-SWAP-001 Stage 2C: a commercial lot must always be priced —
+    // price_cents = 0 used to be accepted here (only negative was rejected),
+    // which would have let an ordinary public checkout against that lot
+    // produce a zero-value registration indistinguishable from an authorized
+    // service_swap row. Rejected at the application layer AND at the DB
+    // layer (run-lots_price_cents_check) — never rely on only one.
+    if (!Number.isFinite(priceCents) || priceCents <= 0) {
       await client.query('rollback');
       return { statusCode: 400, payload: { message: 'Preco invalido.' } };
     }

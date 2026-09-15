@@ -92,7 +92,11 @@ test('§7 backend contract for PATCH /api/admin/lots/:id is intact (no business-
   assert.ok(fn.length > 0, 'updateLotConfigurationInPostgres located');
   assert.match(fn, /from \$\{table\.lots\} where id = \$1 for update/, 'target lot row is locked FOR UPDATE');
   assert.match(fn, /capacity < before\.soldCount[\s\S]*?statusCode: 409/, 'capacity vs soldCount invariant (409)');
-  assert.match(fn, /priceCents < 0[\s\S]*?statusCode: 400/, 'invalid price rejected (400)');
+  // SERVICE-SWAP-001 Stage 2C: a lot price of exactly 0 is now also rejected
+  // here (not just negative) — see server/migrations/20260914_service_swap_zero_value_pricing.sql
+  // for why (a $0 lot would let ordinary public checkout reach the same
+  // all-zero shape a service_swap registration uses).
+  assert.match(fn, /priceCents <= 0[\s\S]*?statusCode: 400/, 'invalid or zero price rejected (400)');
   assert.match(fn, /\['active', 'inactive', 'sold_out', 'scheduled', 'closed'\]\.includes/, 'status enum enforced');
   assert.match(fn, /where event_id = \$1 and id <> \$2 and status = 'active'[\s\S]*?statusCode: 409/, 'one-active-lot invariant (409)');
   assert.match(fn, /input\.startsAt >= input\.endsAt[\s\S]*?statusCode: 400/, 'inverted sale window rejected (400)');

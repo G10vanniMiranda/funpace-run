@@ -258,3 +258,57 @@ test('the primitive is structurally independent from partner discounts, coupons,
     assert.ok(!serviceSwapSrc.includes(forbidden), `must not reference ${forbidden}`);
   }
 });
+
+// --- Stage 2C: closing the zero-price public-checkout path ------------------
+
+test('T. the registration insert writes original_price=0 (not the lot price) — the zero branch is all-zero, internally consistent', () => {
+  assert.match(serviceSwapSrc, /null, null, 0, 0, 0, 0,\s*\n\s*null, null, null\)/);
+  // the INSERT's own params array must not pass the lot price as original_price
+  const insertBlock = serviceSwapSrc.slice(serviceSwapSrc.indexOf('insert into ${table.registrations}'), serviceSwapSrc.indexOf('insert into ${table.payments}'));
+  assert.ok(!insertBlock.includes('Number(lot.priceCents)'), 'original_price must not be sourced from the lot price');
+  assert.ok(serviceSwapSrc.includes('lotPriceCentsAtAuthorization: Number(lot.priceCents)'), 'the informational lot price is preserved in the audit trail instead');
+});
+
+test('U. the migration adds a lot price floor AND a narrow, additive zero-value registration branch', () => {
+  const sql = readFileSync(new URL('../server/migrations/20260914_service_swap_zero_value_pricing.sql', import.meta.url), 'utf8');
+  assert.match(sql, /add constraint "run-lots_price_cents_check"\s*\n\s*check \(price_cents > 0\)/);
+  assert.match(sql, /drop constraint if exists "run-registrations_partner_pricing_check"/);
+  assert.match(sql, /original_price = 0 and final_price = 0/);
+  assert.match(sql, /discount_amount = 0 and discount_percentage = 0/);
+  assert.match(sql, /and amount_cents = 0/);
+  // the original branch must survive byte-for-byte inside the new OR expression
+  assert.match(sql, /original_price > 0 and final_price > 0 and discount_amount >= 0/);
+  assert.ok(!/add column|create index|create unique index/i.test(sql));
+  assert.ok(!/update\s+public\."run-(lots|registrations)"\s+set/i.test(sql), 'must not rewrite existing rows');
+});
+
+test('V. supabase-schema.sql and the runtime bootstrap DDL stay in sync with the migration', () => {
+  const schemaDump = readFileSync(new URL('../server/supabase-schema.sql', import.meta.url), 'utf8');
+  assert.match(schemaDump, /price_cents integer not null check \(price_cents > 0\)/);
+  assert.match(schemaDump, /original_price = 0 and final_price = 0/);
+  assert.match(databaseSource, /price_cents integer not null check \(price_cents > 0\)/);
+  assert.match(databaseSource, /run-lots_price_cents_check/);
+  assert.match(databaseSource, /original_price = 0 and final_price = 0 and discount_amount = 0 and discount_percentage = 0 and amount_cents = 0/);
+});
+
+test('W. updateLotConfigurationInPostgres rejects price_cents <= 0 at the application layer, not just < 0', () => {
+  const start = databaseSource.indexOf('export async function updateLotConfigurationInPostgres(');
+  assert.ok(start >= 0);
+  const src = databaseSource.slice(start, start + 3000);
+  assert.match(src, /priceCents <= 0/);
+  assert.ok(!/priceCents < 0(?!\d)/.test(src) || src.includes('priceCents <= 0'), 'must no longer accept a bare zero price');
+});
+
+test('X. the public checkout pricing path is unreachable for zero once the lot floor is enforced (documented proof, executed live in Stage 2C homolog)', () => {
+  // server/index.ts:1933,1954 — amountCents/finalPriceCents fall back to
+  // activeLot.priceCents whenever there is no coupon/partner. With
+  // run-lots_price_cents_check now requiring price_cents > 0, that fallback
+  // can never again be 0. Coupon/partner pricing already reject
+  // finalPriceCents <= 0 (server/partner-discount.ts:24, server/coupons.ts:37),
+  // confirmed unchanged in this stage.
+  assert.match(indexSource, /amountCents: couponPricing\?\.finalPriceCents \?\? partnerPricing\?\.finalPriceCents \?\? activeLot\.priceCents,/);
+  const partnerDiscountSource = readFileSync(new URL('../server/partner-discount.ts', import.meta.url), 'utf8');
+  const couponsSource = readFileSync(new URL('../server/coupons.ts', import.meta.url), 'utf8');
+  assert.match(partnerDiscountSource, /finalPriceCents <= 0/);
+  assert.match(couponsSource, /finalPriceCents <= 0/);
+});
