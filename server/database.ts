@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import type { CreateRegistrationResponse, RegistrationFormData, RegistrationStatus } from '../src/types/registration';
 import type { MetaServerEvent, MetaUserData, MetaCustomData } from './meta-conversions-api.js';
 import { selectAvailableLotCandidate } from './lot-capacity.js';
-import { calculatePartnerPricing } from './partner-discount.js';
+import { calculatePartnerPricing, isPartnerRowEligibleForDiscount } from './partner-discount.js';
 import { calculateCouponPricing, getCouponCampaignAttribution } from './coupons.js';
 import { assertDatabaseEnvironmentIsolation } from './environment.js';
 import { assertRuntimeAutoMigrateAllowed } from './migration-environment.js';
@@ -2212,8 +2212,39 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       };
     }
 
+    // Resolve the currently-requested distance and (if presented) a currently-eligible
+    // partner up front. Both are needed to detect a pricing/content-relevant mismatch
+    // against any already-persisted pending registration for this CPF, below — this is
+    // the P0 fix for stale-checkout reuse (distance/partner divergence silently ignored).
+    const requestedDistanceResult = await client.query(
+      `select id, name, capacity from ${table.distances} where event_id = $1 and name = $2 and status = $3 limit 1`,
+      [event.id, input.payload.distance, 'active'],
+    );
+    const requestedDistance = requestedDistanceResult.rows[0] || null;
+
+    let requestedEligiblePartnerId: string | null = null;
+    if (input.partnerId) {
+      const requestedPartnerResult = await client.query(
+        `select id, slug, partner_type, discount_percentage, status, deleted_at from ${table.partners} where id = $1 limit 1`,
+        [input.partnerId],
+      );
+      const requestedPartnerRow = requestedPartnerResult.rows[0];
+      const requestedPartnerIdentityMatches = requestedPartnerRow
+        && requestedPartnerRow.slug === input.partnerSlug
+        && (!input.partnerType || requestedPartnerRow.partner_type === input.partnerType);
+      if (requestedPartnerIdentityMatches && isPartnerRowEligibleForDiscount({
+        status: requestedPartnerRow.status,
+        deletedAt: requestedPartnerRow.deleted_at,
+        discountPercentage: Number(requestedPartnerRow.discount_percentage),
+      })) {
+        requestedEligiblePartnerId = String(requestedPartnerRow.id);
+      }
+    }
+
     const stalePendingResult = await client.query(
-      `select registration.id, registration.lot_id
+      `select registration.id, registration.lot_id, registration.distance_id, registration.partner_id,
+              registration.amount_cents, registration.final_price,
+              payment.id as payment_id, payment.amount_cents as payment_amount_cents
        from ${table.registrations} registration
        left join ${table.payments} payment on payment.registration_id = registration.id
        where registration.event_id = $1
@@ -2223,14 +2254,54 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
            registration.amount_cents <> registration.final_price
            or payment.id is null
            or payment.amount_cents <> registration.final_price
+           or ($4::text is not null and registration.distance_id <> $4)
+           or ($5::uuid is not null and registration.partner_id is distinct from $5::uuid)
          )
        for update of registration`,
-      [event.id, input.cpfHash, 'pending_payment'],
+      [event.id, input.cpfHash, 'pending_payment', requestedDistance?.id || null, requestedEligiblePartnerId],
     );
 
     if (stalePendingResult.rows.length > 0) {
       const now = new Date().toISOString();
       const staleIds = stalePendingResult.rows.map((row) => String(row.id));
+
+      for (const row of stalePendingResult.rows) {
+        const distanceChanged = Boolean(requestedDistance) && String(row.distance_id) !== String(requestedDistance!.id);
+        const partnerChanged = Boolean(requestedEligiblePartnerId) && String(row.partner_id || '') !== requestedEligiblePartnerId;
+        const amountMismatch = Number(row.amount_cents) !== Number(row.final_price)
+          || row.payment_id === null
+          || Number(row.payment_amount_cents) !== Number(row.final_price);
+        const reasons = [
+          ...(distanceChanged ? ['distance_changed'] : []),
+          ...(partnerChanged ? ['partner_changed'] : []),
+          ...(amountMismatch ? ['amount_mismatch'] : []),
+        ];
+        const staleAction: PartnerAuditAction = distanceChanged
+          ? 'registration.recovered_stale_distance'
+          : partnerChanged
+            ? 'registration.recovered_stale_partner'
+            : 'registration.recovered_stale_amount';
+
+        await insertPartnerAudit(client, {
+          partnerId: row.partner_id || null,
+          action: staleAction,
+          registrationId: String(row.id),
+          oldData: { distanceId: row.distance_id, partnerId: row.partner_id || null, amountCents: Number(row.amount_cents), finalPriceCents: Number(row.final_price) },
+          newData: { requestedDistanceId: requestedDistance?.id || null, requestedPartnerId: requestedEligiblePartnerId },
+          metadata: { correlationId: input.correlationId || null, reasons, oldCheckoutInvalidated: true },
+          ipAddress: input.ipAddress,
+          userAgent: input.userAgent,
+          createdAt: now,
+        });
+        console.log(JSON.stringify({
+          at: now,
+          message: 'registration_checkout_recovery',
+          registrationId: String(row.id),
+          checkoutResolution: 'regenerated',
+          reasons,
+        }));
+      }
+
       await client.query(
         `update ${table.registrations}
          set status = 'expired',
@@ -2373,6 +2444,13 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       });
       await client.query('commit');
       const shouldCreateCheckout = existing.status === 'pending_payment' && !existing.checkout_url;
+      console.log(JSON.stringify({
+        at: recoveredAt,
+        message: 'registration_checkout_recovery',
+        registrationId: existing.id,
+        checkoutResolution: shouldCreateCheckout ? 'regenerated' : 'reused',
+        reasons: requestedCouponDiffers ? ['coupon_changed'] : [],
+      }));
       return {
         statusCode: existing.status === 'paid' ? 409 : 200,
         success: existing.status !== 'paid',
@@ -2410,10 +2488,8 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
       };
     }
 
-    const distanceResult = await client.query(
-      `select id, name, capacity from ${table.distances} where event_id = $1 and name = $2 and status = $3 limit 1`,
-      [event.id, input.payload.distance, 'active'],
-    );
+    // Already resolved above (same transaction, same snapshot) to detect stale-checkout
+    // divergence before we got here — no need to query it again.
     const lotResult = await client.query(
       `select id, name, price_cents, capacity, sold_count, status, starts_at, ends_at, order_index, continues_after_capacity
        from ${table.lots}
@@ -2422,7 +2498,7 @@ export async function createPendingRegistrationInPostgres(input: PendingRegistra
        for update`,
       [event.id],
     );
-    const distance = distanceResult.rows[0];
+    const distance = requestedDistance;
 
     if (!distance || lotResult.rows.length === 0) {
       await client.query('rollback');
@@ -4339,6 +4415,7 @@ export type PartnerAuditAction =
   | 'partner.created' | 'partner.updated' | 'partner.type_changed' | 'partner.type_change_blocked' | 'partner.activated' | 'partner.inactivated' | 'partner.deleted'
   | 'partner.link_accessed' | 'partner.link_rejected' | 'partner.resolution_approved' | 'partner.session_created'
   | 'partner.session_replaced' | 'partner.session_replacement_blocked' | 'registration.started' | 'registration.recovered'
+  | 'registration.recovered_stale_distance' | 'registration.recovered_stale_partner' | 'registration.recovered_stale_amount'
   | 'partner.snapshot_persisted' | 'discount.applied'
   | 'payment.started' | 'webhook.received' | 'payment.approved' | 'payment.declined' | 'payment.amount_mismatch'
   | 'payment.duplicate_ignored' | 'payment.expired'
