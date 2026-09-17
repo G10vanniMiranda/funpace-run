@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizePartnerSlug, validatePartnerInput } from '../server/partner-management.js';
 import { buildPartnerLink, buildPartnerRegistrationUrl, copyPartnerLink, hasPartnerActivationMarker, partnerTypeBenefitLabels, partnerTypeLabels, slugifyPartnerName } from '../src/lib/partners.js';
-import { calculatePartnerPricing } from '../server/partner-discount.js';
+import { calculatePartnerPricing, isPartnerRowEligibleForDiscount } from '../server/partner-discount.js';
 import { signPartnerSession, verifyPartnerSession } from '../server/partner-session.js';
 import { getPartnerAuditEventTitle, getPartnerEntityLabel } from '../server/partner-audit-labels.js';
 
@@ -87,6 +87,29 @@ test('calculates partner pricing from the original backend price', () => {
   const partnerWithAthleteLimit = { ...partner, athleteLimit: 1 };
   assert.deepEqual(calculatePartnerPricing(12_000, influencer), calculatePartnerPricing(12_000, sportsAdvisory));
   assert.deepEqual(calculatePartnerPricing(12_000, partnerWithAthleteLimit), calculatePartnerPricing(12_000, partner));
+});
+
+// P0 hotfix (stale checkout reuse): createPendingRegistrationInPostgres checks partner
+// eligibility before it knows the lot price, so eligibility must be a price-independent
+// predicate that agrees exactly with calculatePartnerPricing's own gate.
+test('isPartnerRowEligibleForDiscount matches calculatePartnerPricing eligibility exactly', () => {
+  const eligible = { status: 'active' as const, deletedAt: null, discountPercentage: 10 };
+  assert.equal(isPartnerRowEligibleForDiscount(eligible), true);
+  assert.equal(isPartnerRowEligibleForDiscount({ ...eligible, status: 'inactive' }), false);
+  assert.equal(isPartnerRowEligibleForDiscount({ ...eligible, deletedAt: '2026-07-21T00:00:00.000Z' }), false);
+  assert.equal(isPartnerRowEligibleForDiscount({ ...eligible, discountPercentage: 0 }), false);
+  assert.equal(isPartnerRowEligibleForDiscount({ ...eligible, discountPercentage: 100 }), false);
+  assert.equal(isPartnerRowEligibleForDiscount(null), false);
+
+  const partner = { id: 'partner-1', name: 'Runners Club', status: 'active' as const, deletedAt: null, discountPercentage: 10 };
+  for (const variant of [
+    partner,
+    { ...partner, status: 'inactive' as const },
+    { ...partner, deletedAt: '2026-07-21T00:00:00.000Z' },
+    { ...partner, discountPercentage: 0 },
+  ]) {
+    assert.equal(isPartnerRowEligibleForDiscount(variant), calculatePartnerPricing(12_000, variant) !== null);
+  }
 });
 
 test('signs partner sessions and rejects tampering or expiration', () => {
