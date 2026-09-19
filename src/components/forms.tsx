@@ -10,6 +10,7 @@ import { getMetaBrowserContext, trackMetaEventOnce } from '../lib/metaPixel';
 import { captureCurrentMarketingAttribution } from '../lib/marketingAttribution';
 import { hasPartnerActivationMarker, partnerActivationQueryParam, partnerTypeBenefitLabels, partnerTypeLabels } from '../lib/partners';
 import { canRegisterWithPublicActiveLot, publicActiveLotOfferLabel, publicActiveLotUnavailableLabel, publicRegistrationPriceCents } from '../lib/publicActiveLot';
+import { DISTANCE_CLOSED_LABEL, isDistanceSelectable, selectDistanceAvailability } from '../lib/publicDistanceAvailability';
 import { formatCpf, formatPhone, validateRegistration } from '../lib/validation';
 import type { Gender, RaceDistance, RegistrationCouponPricing, RegistrationErrors, RegistrationFormData, ShirtSize } from '../types/registration';
 import type { PublicPartnerContext } from '../types/partner';
@@ -28,7 +29,10 @@ const initialRegistration: RegistrationFormData = {
   birthDate: '',
   gender: '',
   shirtSize: 'M',
-  distance: '10K',
+  // EVENT-OPS: 10K registration closure (5K stays open) — the default must not
+  // land on a closed distance. See src/lib/publicDistanceAvailability.ts for
+  // the live per-distance status that also disables the option below.
+  distance: '5K',
   emergencyContactName: '',
   emergencyContactPhone: '',
   termsAccepted: false,
@@ -425,9 +429,15 @@ export function RegistrationSection() {
               </FormField>
               <FormField id="registration-distance" name="distance" label="Distancia" error={errors.distance} autoComplete="off">
                 <select value={formData.distance} onChange={(event) => updateField('distance', event.target.value as RaceDistance)} className={`${inputClass} cursor-pointer appearance-none`}>
-                  {eventInfo.distanceOptions.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
+                  {eventInfo.distanceOptions.map((option) => {
+                    const distanceState = selectDistanceAvailability(availability, option.value as RaceDistance);
+                    const selectable = isDistanceSelectable(distanceState);
+                    return (
+                      <option key={option.value} value={option.value} disabled={!selectable}>
+                        {option.label}{!selectable ? ` — ${DISTANCE_CLOSED_LABEL}` : ''}
+                      </option>
+                    );
+                  })}
                 </select>
               </FormField>
             </div>
